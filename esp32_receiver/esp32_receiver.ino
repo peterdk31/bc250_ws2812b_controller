@@ -184,6 +184,14 @@ void loop()
         if (pin != currentPin ||
             ledCount != currentCount)
         {
+            // pixels past the new count (or on the old pin) would
+            // otherwise latch their last color forever
+            if (strip &&
+                (ledCount < currentCount || pin != currentPin))
+            {
+                blankStrip();
+            }
+
             initStrip(ledCount, pin);
         }
 
