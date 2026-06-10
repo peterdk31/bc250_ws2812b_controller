@@ -1,0 +1,16 @@
+# Build output (make / g++)
+/led
+*.o
+*.d
+
+# Arduino build output (arduino-cli --export-binaries / local build dirs)
+esp32_receiver/build/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS cruft
+.DS_Store

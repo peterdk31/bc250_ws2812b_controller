@@ -1,0 +1,103 @@
+{
+    "serial": {
+        "port": "/dev/ttyUSB0",
+        "baud": 921600,
+        "host_timeout_ms": 5000
+    },
+    "strip": {
+        "leds": 58,
+        "pin": 13,
+        "brightness": 0.2,
+        "gamma": 2.2
+    },
+    "sensors": [
+        "k10temp:Tctl",
+        "nct6686:CPU",
+        "nct6687:CPU",
+        "nct6686:AMD TSI Addr 98h",
+        "nct6683:AMD TSI Addr 98h",
+        "nct6686"
+    ],
+    "hold_seconds": 10,
+    "startup": {
+        "effect": "boot",
+        "settings": {
+            "duration_seconds": 5
+        }
+    },
+    "rules": [
+        {
+            "if": "temp>85",
+            "effect": "alarm",
+            "hold": 0,
+            "settings": {
+                "pulses_per_second": 2
+            }
+        },
+        {
+            "if": "file:/tmp/led-rainbow",
+            "effect": "rainbow",
+            "settings": {
+                "cycles_per_second": 0.625
+            }
+        },
+        {
+            "if": "file:/tmp/led-night",
+            "effect": "twinkle",
+            "settings": {
+                "color": "ffffff",
+                "base_color": "000020",
+                "sparks_per_second": 6,
+                "fade_seconds": 1.0
+            }
+        },
+        {
+            "if": "gpu_load>20 | cpu_load>20",
+            "effect": "load",
+            "settings": {
+                "smoothing_seconds": 0.5
+            }
+        },
+        {
+            "if": "proc:gamescope & temp>75 | proc:steam & temp>75",
+            "effect": "fire",
+            "settings": {
+                "speed": 1.6,
+                "min_heat": 0.45
+            }
+        },
+        {
+            "if": "proc:gamescope | proc:steam",
+            "effect": "fire",
+            "settings": {
+                "speed": 1.0,
+                "min_heat": 0.25
+            }
+        },
+        {
+            "if": "temp>65",
+            "effect": "cpu_temp",
+            "settings": {
+                "temp_min": 40,
+                "temp_max": 85
+            }
+        },
+        {
+            "if": "temp<48",
+            "effect": "aurora",
+            "settings": {
+                "speed": 1.0,
+                "hue_min": 0.3,
+                "hue_max": 0.85
+            }
+        },
+        {
+            "effect": "breathe",
+            "settings": {
+                "color": "ff7818",
+                "period_seconds": 5,
+                "min_brightness": 0.05
+            }
+        }
+    ]
+}

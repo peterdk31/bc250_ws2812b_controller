@@ -1,0 +1,15 @@
+[Unit]
+Description=Serial LED controller
+# the temperature effect needs the sensor kernel module (e.g. nct6687)
+After=systemd-modules-load.service
+# the serial adapter may enumerate late (or be unplugged); the service
+# exits on open/write failure and systemd retries until it's back
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/local/bin/led /etc/led-controller/config.json
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
