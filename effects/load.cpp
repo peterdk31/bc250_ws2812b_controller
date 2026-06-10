@@ -17,10 +17,9 @@ public:
     {
         smoothing = cfg.getFloat("smoothing_seconds", 0.5f);
 
-        gpuPath = hwmon::findGpuLoadPath();
-
-        if (gpuPath.empty())
-            fprintf(stderr, "load: no gpu_busy_percent found\n");
+        if (!gpuLoad.available())
+            fprintf(stderr, "load: no gpu load source found yet, "
+                            "will keep looking\n");
 
         hwmon::readCpuCounters(prevBusy, prevTotal);
     }
@@ -81,19 +80,14 @@ private:
 
     float readGpuLoad()
     {
-        if (gpuPath.empty())
-            return 0;
-
-        float load = (float)atof(hwmon::readFileLine(gpuPath).c_str()) / 100;
-
-        return load < 0 ? 0 : load > 1 ? 1 : load;
+        return gpuLoad.readPercent() / 100;
     }
 
     float smoothing = 0.5f;
     float cpu = 0;
     float gpu = 0;
 
-    std::string gpuPath;
+    hwmon::GpuLoad gpuLoad;
     unsigned long long prevBusy = 0;
     unsigned long long prevTotal = 0;
 };

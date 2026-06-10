@@ -228,7 +228,7 @@ immediately.
 | `always` | always |
 | `temp>N` / `temp<N` | sensor temperature above/below N °C |
 | `cpu_load>N` / `cpu_load<N` | CPU busy above/below N % (`/proc/stat`); bare `cpu_load` means `>20` |
-| `gpu_load>N` / `gpu_load<N` | GPU busy above/below N % (amdgpu `gpu_busy_percent`); bare `gpu_load` means `>20` |
+| `gpu_load>N` / `gpu_load<N` | GPU busy above/below N % (amdgpu `gpu_metrics` gfx activity, falling back to `gpu_busy_percent`); bare `gpu_load` means `>20` |
 | `proc:NAME` | a process with that name is running (comm, 15-char kernel limit) |
 | `file:/PATH` | the file exists |
 | `!COND` | negation |

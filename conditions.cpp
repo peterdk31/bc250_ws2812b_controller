@@ -59,33 +59,26 @@ public:
     GpuLoadCondition(bool above, float threshold)
         : above(above), threshold(threshold)
     {
-        path = hwmon::findGpuLoadPath();
-
-        if (path.empty())
-            fprintf(stderr, "gpu_load condition: no gpu_busy_percent "
+        if (!gpuLoad.available())
+            fprintf(stderr, "gpu_load condition: no gpu load source "
                             "found yet, will keep looking\n");
     }
 
     bool eval() override
     {
-        // amdgpu may load after we start; keep retrying
-        if (path.empty())
-        {
-            path = hwmon::findGpuLoadPath();
+        // amdgpu may load after we start; available() keeps retrying
+        // discovery, and a strip with no GPU shouldn't satisfy
+        // `gpu_load<N` just because the reading defaults to 0
+        if (!gpuLoad.available())
+            return false;
 
-            if (path.empty())
-                return false;
-
-            fprintf(stderr, "gpu_load condition: using %s\n", path.c_str());
-        }
-
-        float load = (float)atof(hwmon::readFileLine(path).c_str());
+        float load = gpuLoad.readPercent();
 
         return above ? load > threshold : load < threshold;
     }
 
 private:
-    std::string path;
+    hwmon::GpuLoad gpuLoad;
     bool above;
     float threshold;
 };
