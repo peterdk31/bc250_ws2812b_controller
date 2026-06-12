@@ -39,9 +39,13 @@ public:
         {
             bool cpuSide = i < half;
 
-            // this pixel's distance from the center 0..1; lit when the
-            // side's bar reaches it, colored by how far out it sits
-            float d = cpuSide ? (half - i) / half : (i + 1 - half) / half;
+            // this pixel's center as distance from the strip center
+            // 0..1; lit when the side's bar reaches the pixel's
+            // middle (its far edge would make the outermost pixel
+            // demand exactly 100%, which smoothing alone never
+            // reaches), colored by how far out it sits
+            float d = cpuSide ? (half - i - 0.5f) / half
+                              : (i + 0.5f - half) / half;
 
             if (d > (cpuSide ? cpu : gpu))
             {
