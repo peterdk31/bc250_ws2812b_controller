@@ -2,19 +2,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "effect.hpp"
+#include "color.hpp"
 #include "hwmon.hpp"
 
 // CPU and GPU load as two bars growing from the center of the strip
-// outward — CPU toward pixel 0, GPU toward the last pixel — green at
-// the center through yellow to red at the ends
+// outward — CPU toward pixel 0, GPU toward the last pixel — colored
+// along a hue ramp from center_color to edge_color (the defaults
+// sweep green through yellow to red)
 //
 // config:
 //   smoothing_seconds  load smoothing time constant (default 0.5)
+//   center_color       RRGGBB at the strip center (default 00ff00)
+//   edge_color         RRGGBB at the strip ends (default ff0000)
 class Load : public Effect
 {
 public:
     void init(const EffectConfig& cfg, int) override
     {
+        ramp = color::Ramp(cfg.getColor("center_color", 0x00ff00),
+                           cfg.getColor("edge_color", 0xff0000));
+
         smoothing = cfg.getFloat("smoothing_seconds", 0.5f);
 
         if (!gpuLoad.available())
@@ -53,13 +60,9 @@ public:
                 continue;
             }
 
-            float r = d * 2.0f;
-            float g = (1.0f - d) * 2.0f;
-
-            if (r > 1) r = 1;
-            if (g > 1) g = 1;
-
-            strip.setPixel(i, (uint8_t)(r * 255), (uint8_t)(g * 255), 0);
+            uint8_t r, g, b;
+            ramp.at(d, r, g, b);
+            strip.setPixel(i, r, g, b);
         }
     }
 
@@ -87,6 +90,7 @@ private:
         return gpuLoad.readPercent() / 100;
     }
 
+    color::Ramp ramp;
     float smoothing = 0.5f;
     float cpu = 0;
     float gpu = 0;

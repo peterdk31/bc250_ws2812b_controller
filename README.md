@@ -308,14 +308,14 @@ root (the systemd unit does).
 
 | name | description | settings (defaults) |
 |---|---|---|
-| `alarm` | whole-strip red pulse | `pulses_per_second` (2) |
+| `alarm` | whole-strip pulse | `color` (ff0000), `pulses_per_second` (2) |
 | `aurora` | slow drifting color curtains | `speed` (1.0), `hue_min` (0.30), `hue_max` (0.85) |
-| `boot` | power-on sequence: spark sweep, rippling charge-up, white flash-out; reports finished | `duration_seconds` (5), `color` (0028ff) |
+| `boot` | power-on sequence: spark sweep, rippling charge-up, flash-out; reports finished | `duration_seconds` (5), `color` (0028ff), `flash_color` (ffffff) |
 | `breathe` | single color on a slow sine | `color` (ff7818), `period_seconds` (5), `min_brightness` (0.05) |
 | `comet` | Larson scanner with fading tail | `color` (ff0000), `sweeps_per_second` (0.5), `tail_pixels` (8) |
-| `cpu_temp` | temperature bar graph, blue→red | `temp_min` (40), `temp_max` (85), `sensors` |
+| `cpu_temp` | temperature bar graph along a hue ramp | `temp_min` (40), `temp_max` (85), `cold_color` (0000ff), `hot_color` (ff0000), `sensors` |
 | `fire` | per-LED candle flicker | `speed` (1.0), `min_heat` (0.25) |
-| `load` | CPU/GPU bars growing from center | `smoothing_seconds` (0.5) |
+| `load` | CPU/GPU bars growing from center | `smoothing_seconds` (0.5), `center_color` (00ff00), `edge_color` (ff0000) |
 | `progress` | bar fed 0–100 from a file or Steam, green pulse at 100 | `source` (file), `value_file` (/tmp/led-progress), `color` (00a0ff), `done_color` (00ff40), `smoothing_seconds` (0.4) |
 | `rainbow` | scrolling hue cycle | `cycles_per_second` (0.625) |
 | `twinkle` | sparks fading over a base color | `color` (ffffff), `base_color` (000020), `sparks_per_second` (6), `fade_seconds` (1.0) |

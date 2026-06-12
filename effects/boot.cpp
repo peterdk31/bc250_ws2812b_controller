@@ -14,6 +14,7 @@
 // config:
 //   duration_seconds  total run time (default 5)
 //   color             charge color RRGGBB (default 0028ff)
+//   flash_color       spark/head/flash color RRGGBB (default ffffff)
 class Boot : public Effect
 {
 public:
@@ -27,6 +28,12 @@ public:
         r = (color >> 16) & 0xFF;
         g = (color >> 8) & 0xFF;
         b = color & 0xFF;
+
+        uint32_t flash = cfg.getColor("flash_color", 0xffffff);
+
+        fr = (flash >> 16) & 0xFF;
+        fg = (flash >> 8) & 0xFF;
+        fb = flash & 0xFF;
 
         trail.assign(leds, 0.0f);
         lastT = 0.0f;
@@ -82,7 +89,7 @@ private:
 
         paintTrail(strip);
 
-        strip.setPixel(head, 255, 255, 255);
+        strip.setPixel(head, fr, fg, fb);
     }
 
     void fill(WS2812Serial& strip, float p, float t)
@@ -108,7 +115,7 @@ private:
         }
 
         if (head < leds)
-            strip.setPixel(head, 200, 220, 255);
+            strip.setPixel(head, fr, fg, fb);
 
         // an occasional spark jumps ahead of the head
         if (rand() % 4 == 0)
@@ -116,7 +123,7 @@ private:
             int s = head + 1 + rand() % 4;
 
             if (s < leds)
-                strip.setPixel(s, 255, 255, 255);
+                strip.setPixel(s, fr, fg, fb);
         }
     }
 
@@ -129,12 +136,12 @@ private:
 
         if (p < RISE)
         {
-            // surge from the charge color to white
+            // surge from the charge color to the flash color
             float k = p / RISE;
 
-            rr = (uint8_t)(r + (255 - r) * k);
-            gg = (uint8_t)(g + (255 - g) * k);
-            bb = (uint8_t)(b + (255 - b) * k);
+            rr = (uint8_t)(r + (fr - r) * k);
+            gg = (uint8_t)(g + (fg - g) * k);
+            bb = (uint8_t)(b + (fb - b) * k);
         }
         else
         {
@@ -142,7 +149,9 @@ private:
             float k = 1.0f - (p - RISE) / (1.0f - RISE);
             float v = k * k;
 
-            rr = gg = bb = (uint8_t)(255 * v);
+            rr = (uint8_t)(fr * v);
+            gg = (uint8_t)(fg * v);
+            bb = (uint8_t)(fb * v);
         }
 
         for (int i = 0; i < leds; i++)
@@ -164,6 +173,7 @@ private:
     }
 
     uint8_t r = 0, g = 40, b = 255;
+    uint8_t fr = 255, fg = 255, fb = 255;
     float duration = 5.0f;
     float elapsed = 0.0f;
     float lastT = 0.0f;

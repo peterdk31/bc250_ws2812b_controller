@@ -1,20 +1,28 @@
 #include <stdio.h>
 #include "effect.hpp"
+#include "color.hpp"
 #include "hwmon.hpp"
 
-// bar graph of a hwmon temperature sensor: blue → green → yellow → red
+// bar graph of a hwmon temperature sensor, colored along a hue ramp
+// from cold_color to hot_color (the defaults sweep blue → green →
+// yellow → red)
 //
 // config:
-//   sensors   ordered chip:label candidates, first one present wins;
-//             a bare chip name means its temp1_input,
-//             e.g. "sensors": ["k10temp:Tctl", "nct6686:CPU", "nct6686"]
-//   temp_min  °C where the bar starts (default 40)
-//   temp_max  °C where the bar is full (default 85)
+//   sensors     ordered chip:label candidates, first one present wins;
+//               a bare chip name means its temp1_input,
+//               e.g. "sensors": ["k10temp:Tctl", "nct6686:CPU", "nct6686"]
+//   temp_min    °C where the bar starts (default 40)
+//   temp_max    °C where the bar is full (default 85)
+//   cold_color  RRGGBB at the bar's start (default 0000ff)
+//   hot_color   RRGGBB at the bar's end (default ff0000)
 class CpuTemp : public Effect
 {
 public:
     void init(const EffectConfig& cfg, int) override
     {
+        ramp = color::Ramp(cfg.getColor("cold_color", 0x0000ff),
+                           cfg.getColor("hot_color", 0xff0000));
+
         tempMin = cfg.getFloat("temp_min", 40.0f);
         tempMax = cfg.getFloat("temp_max", 85.0f);
 
@@ -54,7 +62,7 @@ public:
             {
                 float pos = (float)i / leds;
                 uint8_t r, g, b;
-                temp_to_rgb(pos, r, g, b);
+                ramp.at(pos, r, g, b);
                 strip.setPixel(i, r, g, b);
             }
             else
@@ -68,46 +76,9 @@ public:
 
 private:
     std::string sensorPath;
+    color::Ramp ramp;
     float tempMin = 40.0f;
     float tempMax = 85.0f;
-
-    // color: blue → green → yellow → red
-    static void temp_to_rgb(float x, uint8_t &r, uint8_t &g, uint8_t &b)
-    {
-        if (x < 0) x = 0;
-        if (x > 1) x = 1;
-
-        float r1, g1, b1;
-
-        if (x < 0.33f)
-        {
-            // blue → green
-            float t = x / 0.33f;
-            r1 = 0;
-            g1 = t;
-            b1 = 1.0f - t;
-        }
-        else if (x < 0.66f)
-        {
-            // green → yellow
-            float t = (x - 0.33f) / 0.33f;
-            r1 = t;
-            g1 = 1.0f;
-            b1 = 0;
-        }
-        else
-        {
-            // yellow → red
-            float t = (x - 0.66f) / 0.34f;
-            r1 = 1.0f;
-            g1 = 1.0f - t;
-            b1 = 0;
-        }
-
-        r = (uint8_t)(r1 * 255);
-        g = (uint8_t)(g1 * 255);
-        b = (uint8_t)(b1 * 255);
-    }
 };
 
 REGISTER_EFFECT("cpu_temp", CpuTemp)
