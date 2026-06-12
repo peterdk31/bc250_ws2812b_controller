@@ -245,7 +245,7 @@ to switch back. (`/tmp` clears on reboot.)
 |---|---|---|
 | `alarm` | whole-strip red pulse | `pulses_per_second` (2) |
 | `aurora` | slow drifting color curtains | `speed` (1.0), `hue_min` (0.30), `hue_max` (0.85) |
-| `boot` | blue loading bar, reports finished | `duration_seconds` (5) |
+| `boot` | power-on sequence: spark sweep, rippling charge-up, white flash-out; reports finished | `duration_seconds` (5), `color` (0028ff) |
 | `breathe` | single color on a slow sine | `color` (ff7818), `period_seconds` (5), `min_brightness` (0.05) |
 | `comet` | Larson scanner with fading tail | `color` (ff0000), `sweeps_per_second` (0.5), `tail_pixels` (8) |
 | `cpu_temp` | temperature bar graph, blue→red | `temp_min` (40), `temp_max` (85), `sensors` |
