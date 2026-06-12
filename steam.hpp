@@ -13,7 +13,7 @@
 // Steam download tracking by polling steamapps/appmanifest_*.acf:
 // Steam rewrites the manifests as chunks land, so their byte counters
 // are the standard way to watch downloads from outside. Shared by the
-// steam_dl condition and the progress effect
+// steam_dl condition and the steam_download effect
 namespace steam
 {
 

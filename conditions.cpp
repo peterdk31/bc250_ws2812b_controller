@@ -154,7 +154,7 @@ private:
 };
 
 // a Steam download is actively moving bytes (steam.hpp); pair with
-// the progress effect's `"source": "steam"` to show it
+// the steam_download effect to show it
 class SteamDlCondition : public Condition
 {
 public:
