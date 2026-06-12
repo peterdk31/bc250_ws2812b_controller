@@ -58,12 +58,11 @@ sudo make flash                     # compile + upload
 sudo make flash PORT=/dev/ttyACM0   # explicit port; FQBN=... for other boards
 ```
 
-The port, baud rate and host timeout default to `serial.port`,
-`serial.baud` and `serial.host_timeout_ms` from
-`/etc/led-controller/config.json` (falling back to the repo's
-`config.json`), so flashing targets the same adapter the daemon uses
-and bakes the matching settings into the sketch (`HOST_BAUD`,
-`HOST_TIMEOUT_MS`). On first run, `flash` installs the ESP32 core and
+The port, baud rate, host timeout, LED count, pin and brightness
+default to the matching keys from `/etc/led-controller/config.json`
+(falling back to the repo's `config.json`), so flashing targets the
+same adapter the daemon uses and bakes the matching settings into the
+sketch. On first run, `flash` installs the ESP32 core and
 the strip library automatically (also available separately as
 `make receiver-setup`); `make receiver` compiles without uploading.
 
@@ -83,6 +82,16 @@ library installed, and flash from there.
 
 The receiver is generic: pin and LED count come from the host in every
 frame, so it never needs reflashing for config changes.
+
+From power-on until the first valid host frame, the receiver runs a
+standalone breathing animation (the host's idle warm amber, through
+the same gamma/brightness curve), so the strip isn't dark while the OS
+boots and the daemon starts. The geometry comes from the last valid
+frame (remembered in flash), falling back to the `strip.leds`/
+`strip.pin` baked in by `make flash`; a never-flashed,
+never-driven board stays dark. The animation never resumes after the
+host goes quiet — that means shutdown or crash, where the usual
+timeout blank is the right answer.
 
 **Host and receiver must be updated together** when the wire protocol
 changes (it gained a checksum byte — an old receiver will reject every

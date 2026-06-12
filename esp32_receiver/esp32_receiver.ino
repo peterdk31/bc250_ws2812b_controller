@@ -19,6 +19,27 @@
 #define HOST_TIMEOUT_MS 5000
 #endif
 
+// strip geometry for the standalone power-on animation, before the
+// host has said anything. `make flash` overrides these with
+// strip.leds/strip.pin from the host config; geometry from the last
+// valid frame (saved in NVS) outranks both. A count of 0 disables the
+// animation until the first frame ever
+#ifndef DEFAULT_LED_COUNT
+#define DEFAULT_LED_COUNT 0
+#endif
+#ifndef DEFAULT_LED_PIN
+#define DEFAULT_LED_PIN 13
+#endif
+
+// the host applies gamma and brightness before sending, so the
+// standalone animation must do the same or it would blast full-power
+// LEDs into a room tuned for strip.brightness. `make flash` overrides
+// brightness with the host config's value
+#ifndef STRIP_BRIGHTNESS
+#define STRIP_BRIGHTNESS 0.2f
+#endif
+#define STRIP_GAMMA 2.2f
+
 // when bytes keep arriving but never form a valid frame, the host is
 // probably talking at another rate: step through the candidates (the
 // same set the host's baudToSpeed() supports) until frames decode.
@@ -41,6 +62,14 @@ uint8_t currentPin = 13;
 uint8_t *frameBuffer = nullptr;
 size_t frameBufferSize = 0;
 
+// the OS takes a while to start the daemon, so between power-on and
+// the first valid frame the receiver breathes on its own (the host's
+// idle warm amber) instead of sitting dark. Never resumes after host
+// loss — a host that stops after having talked means shutdown or
+// crash, where dark is the right answer
+bool hostSeen = false;
+unsigned long lastBreathMs = 0;
+
 unsigned long lastFrameMs = 0;
 unsigned long lastHuntMs = 0;
 uint32_t bytesSinceValid = 0;
@@ -54,6 +83,12 @@ Preferences prefs;
 uint32_t currentBaud = HOST_BAUD;
 uint32_t savedBaud = 0;
 uint32_t savedFlashed = 0;
+
+// strip geometry from the last valid frame, persisted alongside the
+// baud so the power-on breathe lights the right pixels on the right
+// pin even when the flashed defaults are stale
+uint16_t savedCount = 0;
+uint8_t savedPin = 0;
 
 void initStrip(uint16_t count, uint8_t pin)
 {
@@ -106,11 +141,38 @@ void blankStrip()
     strip->show();
 }
 
+// the same curve the host's lut applies (ws2812_serial.hpp), so the
+// standalone breathe matches what the daemon will render later
+uint8_t shade(uint8_t c, float v)
+{
+    return (uint8_t)(powf(c * v / 255.0f, STRIP_GAMMA)
+                     * STRIP_BRIGHTNESS * 255.0f + 0.5f);
+}
+
+// the host's idle "breathe" effect: warm amber, 5 s sine, 5% floor
+void renderBreath(unsigned long now)
+{
+    float t = now / 1000.0f;
+    float breath = 0.5f - 0.5f * cosf(t * 2.0f * PI / 5.0f);
+    float v = 0.05f + 0.95f * breath;
+
+    uint8_t r = shade(255, v);
+    uint8_t g = shade(120, v);
+    uint8_t b = shade(24, v);
+
+    for (uint16_t i = 0; i < currentCount; i++)
+        strip->setLedColorData(i, r, g, b);
+
+    strip->show();
+}
+
 void setup()
 {
     prefs.begin("ledrx", false);
     savedBaud = prefs.getUInt("baud", 0);
     savedFlashed = prefs.getUInt("flashed", 0);
+    savedCount = prefs.getUShort("count", 0);
+    savedPin = prefs.getUChar("pin", DEFAULT_LED_PIN);
 
     // trust the remembered rate only if the firmware default is the
     // same one it was saved under — a reflash with a new HOST_BAUD
@@ -127,6 +189,13 @@ void setup()
 
     frameBufferSize = MAX_LEDS * 3;
     frameBuffer = (uint8_t *)malloc(frameBufferSize);
+
+    // bring the strip up immediately for the power-on breathe; the
+    // first host frame re-inits if the geometry changed meanwhile
+    uint16_t bootCount = savedCount ? savedCount : DEFAULT_LED_COUNT;
+
+    if (bootCount > 0 && bootCount <= MAX_LEDS)
+        initStrip(bootCount, savedPin);
 }
 
 void loop()
@@ -211,6 +280,7 @@ void loop()
         lastFrameMs = millis();
         bytesSinceValid = 0;
         blanked = false;
+        hostSeen = true;
 
         // a checksummed frame proves this rate works; writes happen
         // only when something actually changed, so NVS wear is one
@@ -222,11 +292,22 @@ void loop()
             savedBaud = currentBaud;
             savedFlashed = HOST_BAUD;
         }
+
+        // remember the geometry for the next power-on breathe
+        if (currentCount != savedCount || currentPin != savedPin)
+        {
+            prefs.putUShort("count", currentCount);
+            prefs.putUChar("pin", currentPin);
+            savedCount = currentCount;
+            savedPin = currentPin;
+        }
     }
 
     unsigned long now = millis();
 
-    if (strip && !blanked &&
+    // only after the host has talked once: before that the power-on
+    // breathe owns the strip and there is nothing stale to blank
+    if (hostSeen && strip && !blanked &&
         now - lastFrameMs > HOST_TIMEOUT_MS)
     {
         blankStrip();
@@ -248,5 +329,11 @@ void loop()
 
         bytesSinceValid = 0;
         lastHuntMs = now;
+    }
+
+    if (!hostSeen && strip && now - lastBreathMs >= 33)
+    {
+        lastBreathMs = now;
+        renderBreath(now);
     }
 }

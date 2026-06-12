@@ -2,16 +2,20 @@ CXX = g++
 CXXFLAGS = -O2 -std=c++17 -Wall -Wextra -I.
 PREFIX = /usr/local
 
-# ESP32 receiver flashing via arduino-cli; PORT, BAUD and TIMEOUT_MS
-# default to serial.port/serial.baud/serial.host_timeout_ms from the
+# ESP32 receiver flashing via arduino-cli; PORT, BAUD, TIMEOUT_MS,
+# LEDS, LED_PIN and BRIGHTNESS default to the matching keys from the
 # installed config (or the repo one), override on the command line,
-# e.g. `make flash PORT=/dev/ttyACM0`. BAUD and TIMEOUT_MS are baked
-# into the sketch (HOST_BAUD, HOST_TIMEOUT_MS) so receiver and daemon
-# always agree
+# e.g. `make flash PORT=/dev/ttyACM0`. All but PORT are baked into the
+# sketch so receiver and daemon always agree; LEDS/LED_PIN/BRIGHTNESS
+# drive the receiver's standalone power-on breathe before the daemon
+# is up
 CONFIG = $(firstword $(wildcard /etc/led-controller/config.json config.json))
 PORT ?= $(or $(shell sed -n 's/.*"port"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' $(CONFIG) /dev/null | head -n1),/dev/ttyUSB0)
 BAUD ?= $(or $(shell sed -n 's/.*"baud"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' $(CONFIG) /dev/null | head -n1),921600)
 TIMEOUT_MS ?= $(or $(shell sed -n 's/.*"host_timeout_ms"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' $(CONFIG) /dev/null | head -n1),5000)
+LEDS ?= $(or $(shell sed -n 's/.*"leds"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' $(CONFIG) /dev/null | head -n1),0)
+LED_PIN ?= $(or $(shell sed -n 's/.*"pin"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' $(CONFIG) /dev/null | head -n1),13)
+BRIGHTNESS ?= $(or $(shell sed -n 's/.*"brightness"[[:space:]]*:[[:space:]]*\([0-9.][0-9.]*\).*/\1/p' $(CONFIG) /dev/null | head -n1),0.2)
 FQBN ?= esp32:esp32:esp32
 ESP32_URL = https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
@@ -85,7 +89,7 @@ receiver-toolchain:
 # would replace the esp32 platform's own extra flags
 receiver: receiver-toolchain
 	arduino-cli compile --fqbn $(FQBN) \
-		--build-property "compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS)" \
+		--build-property "compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS) -DDEFAULT_LED_COUNT=$(LEDS) -DDEFAULT_LED_PIN=$(LED_PIN) -DSTRIP_BRIGHTNESS=$(BRIGHTNESS)" \
 		esp32_receiver
 
 # the daemon holds the serial port open, so stop it around the upload
