@@ -52,6 +52,22 @@
             }
         },
         {
+            "if": "file:/tmp/led-progress",
+            "effect": "progress",
+            "hold": 0,
+            "settings": {
+                "value_file": "/tmp/led-progress"
+            }
+        },
+        {
+            "if": "steam_dl",
+            "effect": "progress",
+            "hold": 0,
+            "settings": {
+                "source": "steam"
+            }
+        },
+        {
             "if": "gpu_load>20 | cpu_load>20",
             "effect": "load",
             "settings": {

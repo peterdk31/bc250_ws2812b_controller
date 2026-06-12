@@ -19,7 +19,7 @@ BRIGHTNESS ?= $(or $(shell sed -n 's/.*"brightness"[[:space:]]*:[[:space:]]*\([0
 FQBN ?= esp32:esp32:esp32
 ESP32_URL = https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
-HEADERS = ws2812_serial.hpp config_loader.hpp json.hpp effect.hpp condition.hpp hwmon.hpp rules.hpp
+HEADERS = ws2812_serial.hpp config_loader.hpp json.hpp effect.hpp condition.hpp hwmon.hpp steam.hpp rules.hpp
 
 # every effects/*.cpp is compiled in and registers itself
 EFFECT_SRCS = $(wildcard effects/*.cpp)

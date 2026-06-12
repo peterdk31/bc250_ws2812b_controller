@@ -239,6 +239,7 @@ immediately.
 | `cpu_load>N` / `cpu_load<N` | CPU busy above/below N % (`/proc/stat`); bare `cpu_load` means `>20` |
 | `gpu_load>N` / `gpu_load<N` | GPU busy above/below N % (amdgpu `gpu_metrics` gfx activity, falling back to `gpu_busy_percent`); bare `gpu_load` means `>20` |
 | `proc:NAME` | a process with that name is running (comm, 15-char kernel limit) |
+| `steam_dl` | a Steam download is actively moving bytes |
 | `file:/PATH` | the file exists |
 | `!COND` | negation |
 | `A & B` | both hold |
@@ -247,6 +248,61 @@ immediately.
 `file:` conditions are the external control surface — e.g.
 `touch /tmp/led-night` from a script or cron to switch modes, `rm` it
 to switch back. (`/tmp` clears on reboot.)
+
+### Showing progress from scripts
+
+The `progress` effect turns the strip into a progress bar driven by a
+number 0–100 in a file. The default config activates it whenever
+`/tmp/led-progress` exists; write percentages to it, remove it when
+done:
+
+```sh
+echo 0 > /tmp/led-progress
+# ... long-running work, updating as it goes ...
+echo 42 > /tmp/led-progress
+echo 100 > /tmp/led-progress   # whole strip pulses green
+sleep 3
+rm /tmp/led-progress           # rules take over again
+```
+
+The head pixel is antialiased, so the bar resolves single percents
+even on short strips. A download example:
+
+```sh
+url=https://example.com/big.iso out=/tmp/big.iso
+total=$(curl -sIL "$url" | tr -d '\r' |
+        awk 'tolower($1)=="content-length:"{n=$2} END{print n}')
+curl -sL -o "$out" "$url" &
+while kill -0 $! 2>/dev/null; do
+    [ -n "$total" ] &&
+        echo $(( $(stat -c %s "$out" 2>/dev/null || echo 0) * 100 / total )) \
+            > /tmp/led-progress
+    sleep 1
+done
+echo 100 > /tmp/led-progress; sleep 3; rm -f /tmp/led-progress
+```
+
+Anything that knows its own progress works the same way — package
+updates, backups, custom scripts. Steam downloads don't even need
+that; see below.
+
+### Automatic Steam download progress
+
+Steam downloads need no script at all: the `steam_dl` condition is
+true while Steam is actively downloading, and the progress effect with
+`"source": "steam"` follows the download directly (the default config
+ships this rule). The daemon polls every Steam library's
+`appmanifest_*.acf` files — Steam rewrites them as chunks land — and
+shows percent of outstanding bytes across all active downloads.
+
+It finds Steam roots under `/home/*` and ostree's `/var/home/*`,
+follows extra libraries from `libraryfolders.vdf` (SD cards, second
+disks), ignores games whose update is pending but not started
+("update on next launch"), and hides the bar if a download stalls for
+2 minutes (Steam doesn't always set the paused flag). The strip pulses
+green while a finished download installs, then returns to normal.
+Reading other users' Steam directories relies on the daemon running as
+root (the systemd unit does).
 
 ## Effects
 
@@ -260,6 +316,7 @@ to switch back. (`/tmp` clears on reboot.)
 | `cpu_temp` | temperature bar graph, blue→red | `temp_min` (40), `temp_max` (85), `sensors` |
 | `fire` | per-LED candle flicker | `speed` (1.0), `min_heat` (0.25) |
 | `load` | CPU/GPU bars growing from center | `smoothing_seconds` (0.5) |
+| `progress` | bar fed 0–100 from a file or Steam, green pulse at 100 | `source` (file), `value_file` (/tmp/led-progress), `color` (00a0ff), `done_color` (00ff40), `smoothing_seconds` (0.4) |
 | `rainbow` | scrolling hue cycle | `cycles_per_second` (0.625) |
 | `twinkle` | sparks fading over a base color | `color` (ffffff), `base_color` (000020), `sparks_per_second` (6), `fade_seconds` (1.0) |
 

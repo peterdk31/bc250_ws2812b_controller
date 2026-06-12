@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <vector>
 #include "hwmon.hpp"
+#include "steam.hpp"
 
 class AlwaysCondition : public Condition
 {
@@ -152,6 +153,14 @@ private:
     std::string name;
 };
 
+// a Steam download is actively moving bytes (steam.hpp); pair with
+// the progress effect's `"source": "steam"` to show it
+class SteamDlCondition : public Condition
+{
+public:
+    bool eval() override { return steam::downloads().active; }
+};
+
 class FileCondition : public Condition
 {
 public:
@@ -236,6 +245,9 @@ static std::unique_ptr<Condition> parseAtom(const std::string& spec,
 
     if (spec.rfind("file:", 0) == 0)
         return std::make_unique<FileCondition>(spec.substr(5));
+
+    if (spec == "steam_dl")
+        return std::make_unique<SteamDlCondition>();
 
     if (spec.rfind("temp", 0) == 0 && spec.size() > 5 &&
         (spec[4] == '>' || spec[4] == '<'))
