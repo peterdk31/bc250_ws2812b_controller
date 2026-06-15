@@ -209,7 +209,6 @@ inline const Downloads& downloads()
     static double lastScan = -1e9;
     static double lastCacheMoved = -1e9;
     static unsigned long long lastCache = 0;
-    static unsigned long long peakDone = 0;
 
     timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -266,27 +265,19 @@ inline const Downloads& downloads()
     {
         // nothing landing -> paused / finished / gone: inactive, no bar
         cached = Downloads{};
-        peakDone = 0;
         return cached;
     }
 
+    // percent comes from the manifest's byte counts: BytesDownloaded and
+    // BytesToDownload are the same (compressed) units, so the ratio is
+    // accurate. The download cache can't serve here -- its on-disk size
+    // doesn't track the compressed download 1:1 and overshoots the total
+    // near the end -- so it's used only to sense activity above. Steam
+    // rewrites the manifest only periodically, so this advances in steps
+    // (the effect's glide softens them); a momentary empty scan
+    // (total == 0 mid-rewrite) keeps the last percent rather than blanking.
     if (total > 0)
-    {
-        // the manifest's BytesDownloaded is accurate but Steam rewrites
-        // it only every minute or so, so a bar driven off it sits frozen
-        // between flushes and only jumps when Steam flushes (e.g. on a
-        // pause). The download cache grows in real time, so take the live
-        // figure as the larger of the two over the (stable) total, and
-        // hold a high-water mark so a cache flush-to-disk can't make the
-        // bar read low or run backward. A momentary empty manifest scan
-        // (total == 0 mid-rewrite) just keeps the last percent.
-        unsigned long long live = cache > done ? cache : done;
-
-        if (live > peakDone) peakDone = live;
-        if (peakDone > total) peakDone = total;
-
-        cached.percent = 100.0f * peakDone / total;
-    }
+        cached.percent = 100.0f * done / total;
 
     cached.active = true;
     return cached;
