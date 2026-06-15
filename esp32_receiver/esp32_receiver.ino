@@ -86,8 +86,9 @@ bool hostSeen = false;
 
 // the standalone animation currently playing (power-on or shutdown), the
 // shared color LUT it renders through, and its timing. `shuttingDown`
-// marks the post-host shutdown effect; `standaloneDone` latches dark once
-// shutdown finishes, until a host frame takes over again.
+// marks the post-host shutdown effect; `standaloneDone` latches once a
+// standalone effect finishes so it isn't auto-restarted (the strip holds
+// its last frame), until a host frame takes over again.
 ColorLut standaloneLut;
 std::unique_ptr<Effect> standalone;
 unsigned long standaloneStartMs = 0;
@@ -110,7 +111,7 @@ uint32_t savedBaud = 0;
 uint32_t savedFlashed = 0;
 
 // strip geometry from the last valid frame, persisted alongside the
-// baud so the power-on breathe lights the right pixels on the right
+// baud so the power-on effect lights the right pixels on the right
 // pin even when the flashed defaults are stale
 uint16_t savedCount = 0;
 uint8_t savedPin = 0;
@@ -233,9 +234,8 @@ void startStandalone(const SlotConfig& slot, unsigned long now)
         standalone->init(EffectConfig(slot.settings), currentCount);
 }
 
-// advance the standalone effect one frame if its frame delay has elapsed,
-// then handle completion: the power-on effect hands off to a breathing
-// idle, while the shutdown effect leaves the strip dark
+// advance the standalone effect one frame if its frame delay has elapsed;
+// when it reports finished, stop and hold (a looping effect never does)
 void tickStandalone(unsigned long now)
 {
     if (!standalone || !strip)
@@ -255,21 +255,16 @@ void tickStandalone(unsigned long now)
     if (!standalone->finished())
         return;
 
+    // the effect has played once. The shutdown effect ends on a blanked
+    // strip; a finite power-on effect just stops on its last frame (boot
+    // ends dark). Either way, don't auto-start anything else — a user who
+    // wants e.g. boot-then-idle composes that into one effect, or sets a
+    // looping power-on effect. A host frame clears this and takes over.
     if (shuttingDown)
-    {
         blankStrip();
-        standalone.reset();
-        standaloneDone = true; // stay dark until a host frame takes over
-    }
-    else
-    {
-        // a finite power-on effect (e.g. boot) has played once; settle
-        // into the breathing idle until the host connects. A looping
-        // power-on effect never gets here
-        SlotConfig idle;
-        idle.effect = "breathe";
-        startStandalone(idle, now);
-    }
+
+    standalone.reset();
+    standaloneDone = true;
 }
 
 // a validated command frame from the host
@@ -277,14 +272,14 @@ void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
 {
     if (cmd == proto::CMD_SHUTDOWN)
     {
-        if (standaloneDone)
-            return;
-
         // the host has sent this and exited; play the configured shutdown
         // effect (remembered in NVS) to completion, then stay dark.
-        // hostSeen stops the power-on path from ever resuming
+        // hostSeen stops the power-on path from resuming; clearing
+        // standaloneDone lets shutdown run even if a finite power-on
+        // effect had already finished
         hostSeen = true;
         shuttingDown = true;
+        standaloneDone = false;
         startStandalone(loadSlot("sd", DEFAULT_SHUTDOWN_EFFECT), millis());
     }
     else if (cmd == proto::CMD_CONFIG)
@@ -483,7 +478,7 @@ void loop()
             savedFlashed = HOST_BAUD;
         }
 
-        // remember the geometry for the next power-on breathe
+        // remember the geometry for the next power-on effect
         if (currentCount != savedCount || currentPin != savedPin)
         {
             prefs.putUShort("count", currentCount);

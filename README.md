@@ -111,8 +111,10 @@ is up — applies on the *next* power cycle. A fresh, never-driven board
 uses the firmware's built-in defaults (`boot` / `shutdown`) until the
 daemon first pushes config. A power-on effect that loops (e.g. `rainbow`)
 runs until the host takes over; a finite one (e.g. `boot`) plays once and
-settles into a breathing idle. A shutdown effect plays to completion — or,
-if you pick a looping one, until the strip loses power.
+then holds its last frame (`boot` ends dark) until the host takes over —
+for a boot-then-idle look, set the power-on slot to a looping effect or
+compose one effect that does both. A shutdown effect plays to completion —
+or, if you pick a looping one, until the strip loses power.
 
 Strip geometry comes from the last valid frame (remembered in NVS),
 falling back to the `strip.leds`/`strip.pin` baked in by `make flash`; a
