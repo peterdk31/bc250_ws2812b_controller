@@ -15,6 +15,17 @@
 // (the receiver has no JSON; strip-level brightness/white balance are
 // baked into Esp32Strip at flash time). Define ESP32_BUILD for the latter.
 
+// "RRGGBB" or "#RRGGBB" -> 0xRRGGBB; returns def for an empty string.
+// shared by both EffectConfig backends so they parse colors identically
+inline uint32_t parseHexColor(const std::string& v, uint32_t def)
+{
+    if (v.empty())
+        return def;
+
+    const char* s = v.c_str() + (v[0] == '#' ? 1 : 0);
+    return (uint32_t)strtoul(s, nullptr, 16);
+}
+
 #ifdef ESP32_BUILD
 
 #include "esp32_strip.hpp"
@@ -55,17 +66,9 @@ public:
         return v.empty() ? def : (float)atof(v.c_str());
     }
 
-    // "RRGGBB" or "#RRGGBB" as 0xRRGGBB
     uint32_t getColor(const std::string& key, uint32_t def) const
     {
-        std::string v = get(key);
-        if (v.empty())
-            return def;
-
-        if (v[0] == '#')
-            v.erase(0, 1);
-
-        return (uint32_t)strtoul(v.c_str(), nullptr, 16);
+        return parseHexColor(get(key), def);
     }
 
 private:
@@ -106,17 +109,9 @@ public:
         return v ? json::toFloat(*v, def) : def;
     }
 
-    // "RRGGBB" or "#RRGGBB" as 0xRRGGBB
     uint32_t getColor(const std::string& key, uint32_t def) const
     {
-        auto v = get(key);
-        if (v.empty())
-            return def;
-
-        if (v[0] == '#')
-            v.erase(0, 1);
-
-        return (uint32_t)strtoul(v.c_str(), nullptr, 16);
+        return parseHexColor(get(key), def);
     }
 
     // escape hatch for effects that compose others (e.g. `cycle`): the

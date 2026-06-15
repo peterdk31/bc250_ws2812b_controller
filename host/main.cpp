@@ -71,10 +71,11 @@ static void sendEsp32Config(const Config& cfg, WS2812Serial& strip)
 static void usage(const char* prog)
 {
     fprintf(stderr,
-            "Usage: %s <config>           run the rules\n"
-            "       %s <config> <effect>  run a single effect\n"
-            "       %s --list             list available effects\n",
-            prog, prog, prog);
+            "Usage: %s <config>                       run the rules\n"
+            "       %s <config> <effect>              run a single effect\n"
+            "       %s --list                         list available effects\n"
+            "       %s --config-get <config> <path>   print a config value\n",
+            prog, prog, prog, prog);
 }
 
 int main(int argc, char** argv)
@@ -84,6 +85,27 @@ int main(int argc, char** argv)
         for (auto& name : effectNames())
             printf("%s\n", name.c_str());
 
+        return 0;
+    }
+
+    // read one value out of the config through the daemon's own parser,
+    // so the build (Makefile) can't drift from how the daemon reads the
+    // same file. prints the scalar at <path> (dotted, e.g. "serial.port")
+    // and exits 0; exits 1 with no output when the key is absent, so the
+    // caller can fall back to its own default
+    if (argc == 4 && strcmp(argv[1], "--config-get") == 0)
+    {
+        Config cfg;
+
+        if (!cfg.load(argv[2]))
+            return 1;
+
+        const json::Value* v = cfg.find(argv[3]);
+
+        if (!v)
+            return 1;
+
+        printf("%s\n", json::toString(*v).c_str());
         return 0;
     }
 

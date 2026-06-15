@@ -54,9 +54,8 @@ bool loadRules(const Config& cfg, std::vector<Rule>& rules)
                          hold ? json::toFloat(*hold, 0.0f) : 0.0f});
     }
 
-    if (rules.empty())
-        rules.push_back({parseCondition("always", cfg), "cpu_temp", nullptr,
-                         -1.0f});
+    // no implicit default: with no rules configured nothing matches, so
+    // the daemon simply leaves the strip dark until one does
 
     // fail at startup, not mid-run, on a typo'd effect name
     for (auto& r : rules)

@@ -88,13 +88,13 @@ From power-on until the first valid host frame, the receiver runs a
 and the daemon starts; on a clean shutdown it runs a **shutdown effect**
 after the host has gone. These standalone animations are the *actual* host
 effects compiled into the firmware (`make receiver` mirrors `effect.hpp`,
-the color LUT and every `effects/standalone/*.cpp` into the sketch's
+the color LUT and every `shared/effects/*.cpp` into the sketch's
 `src/`), so they render through the same correction as the daemon's frames
 and can't drift from it.
 
 Both slots are configurable from the `esp32` block in `config.json` — set
 each to any **standalone** effect (the host-data effects in
-`effects/host/` can't run on the receiver) with its own settings:
+`host/effects/` can't run on the receiver) with its own settings:
 
 ```jsonc
 "esp32": {
@@ -310,7 +310,8 @@ connects.
 
 Evaluated top to bottom every 0.5 s; the first rule whose condition
 holds wins. A rule without `"if"` always matches (put a catch-all
-last). With no rules at all, `cpu_temp` runs.
+last). When no rule matches — including an empty or missing `rules`
+list — the daemon sends no frames and leaves the strip dark.
 
 ```jsonc
 {
@@ -401,11 +402,11 @@ power-on/shutdown effect.
 Drop a new file in one of two folders — both are compiled into the daemon
 automatically:
 
-- **`effects/standalone/`** — pure animation, no host data. Also linked
+- **`shared/effects/`** — pure animation, no host data. Also linked
   into the firmware, so it can be a receiver power-on/shutdown effect.
   Render against `Strip&` (it's `WS2812Serial` on the host, the receiver's
   driver on the ESP32).
-- **`effects/host/`** — needs live host data (sensors, Steam, …). Daemon
+- **`host/effects/`** — needs live host data (sensors, Steam, …). Daemon
   only; can't run on the receiver.
 
 ```cpp

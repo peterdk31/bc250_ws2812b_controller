@@ -16,7 +16,7 @@
 // the daemon pushes the configured ones (the config.json "esp32" block)
 // over serial, which the receiver then remembers in NVS. So a fresh,
 // never-driven board shows these; after the first daemon run it uses the
-// configured effects. Any effects/standalone/* name works
+// configured effects. Any shared/effects/* name works
 #ifndef DEFAULT_POWER_ON_EFFECT
 #define DEFAULT_POWER_ON_EFFECT "boot"
 #endif

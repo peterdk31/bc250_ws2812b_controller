@@ -1,5 +1,9 @@
 CXX = g++
-CXXFLAGS = -O2 -std=c++17 -Wall -Wextra -I.
+# source is grouped by where it runs: shared/ compiles into both the
+# daemon and the firmware, host/ is daemon-only, vendor/ is third-party.
+# includes stay path-less, so each dir goes on the include path here and
+# the receiver build (which copies the shared files flat) needs no -I
+CXXFLAGS = -O2 -std=c++17 -Wall -Wextra -Ishared -Ihost -Ivendor
 PREFIX = /usr/local
 
 # ESP32 receiver flashing via arduino-cli; PORT, BAUD, TIMEOUT_MS,
@@ -8,26 +12,37 @@ PREFIX = /usr/local
 # command line, e.g. `make flash PORT=/dev/ttyACM0`. All but PORT are
 # baked into the sketch so receiver and daemon always agree;
 # LEDS/LED_PIN/BRIGHTNESS/WHITE_BALANCE drive the receiver's standalone
-# power-on breathe before the daemon is up
-CONFIG = $(firstword $(wildcard /etc/led-controller/config.json config.json))
-PORT ?= $(or $(shell sed -n 's/.*"port"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' $(CONFIG) /dev/null | head -n1),/dev/ttyUSB0)
-BAUD ?= $(or $(shell sed -n 's/.*"baud"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' $(CONFIG) /dev/null | head -n1),921600)
-TIMEOUT_MS ?= $(or $(shell sed -n 's/.*"host_timeout_ms"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' $(CONFIG) /dev/null | head -n1),5000)
-LEDS ?= $(or $(shell sed -n 's/.*"leds"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' $(CONFIG) /dev/null | head -n1),0)
-LED_PIN ?= $(or $(shell sed -n 's/.*"pin"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' $(CONFIG) /dev/null | head -n1),13)
-BRIGHTNESS ?= $(or $(shell sed -n 's/.*"brightness"[[:space:]]*:[[:space:]]*\([0-9.][0-9.]*\).*/\1/p' $(CONFIG) /dev/null | head -n1),0.2)
-# strip leading '#' if present; default to ffffff (no correction)
-WHITE_BALANCE ?= $(or $(shell sed -n 's/.*"white_balance"[[:space:]]*:[[:space:]]*"#\?\([0-9A-Fa-f]*\)".*/\1/p' $(CONFIG) /dev/null | head -n1),ffffff)
+# power-on breathe before the daemon is up.
+#
+# the values are read through the daemon's own JSON parser (`led
+# --config-get <dotted.path>`) rather than scraped, so they can't drift
+# from how the daemon reads the same file. `receiver` depends on `led`
+# so it exists by the time these expand; if it somehow doesn't, each
+# falls back to the default below (same as before)
+CONFIG ?= $(firstword $(wildcard /etc/led-controller/config.json config.json))
+CONFIG_GET = ./led --config-get $(CONFIG)
+PORT ?= $(or $(shell $(CONFIG_GET) serial.port 2>/dev/null),/dev/ttyUSB0)
+BAUD ?= $(or $(shell $(CONFIG_GET) serial.baud 2>/dev/null),921600)
+TIMEOUT_MS ?= $(or $(shell $(CONFIG_GET) serial.host_timeout_ms 2>/dev/null),5000)
+LEDS ?= $(or $(shell $(CONFIG_GET) strip.leds 2>/dev/null),0)
+LED_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),13)
+BRIGHTNESS ?= $(or $(shell $(CONFIG_GET) strip.brightness 2>/dev/null),0.2)
+# strip a leading '#' if present; default to ffffff (no correction)
+WHITE_BALANCE ?= $(or $(shell $(CONFIG_GET) strip.white_balance 2>/dev/null | tr -d '\#'),ffffff)
 FQBN ?= esp32:esp32:esp32
 ESP32_URL = https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
-HEADERS = ws2812_serial.hpp config_loader.hpp json.hpp effect.hpp condition.hpp color.hpp hwmon.hpp steam.hpp rules.hpp color_lut.hpp protocol.hpp
+HEADERS = host/ws2812_serial.hpp host/config_loader.hpp vendor/json.hpp \
+          shared/effect.hpp host/condition.hpp shared/color.hpp \
+          host/hwmon.hpp host/steam.hpp host/rules.hpp \
+          shared/color_lut.hpp shared/protocol.hpp
 
-# every effect compiles in and registers itself. effects/standalone/*
-# are host-independent (also linked into the firmware); effects/host/*
+# every effect compiles in and registers itself. shared/effects/*
+# are host-independent (also linked into the firmware); host/effects/*
 # need live host data (sensors, Steam) and only run on the daemon
-EFFECT_SRCS = $(wildcard effects/standalone/*.cpp effects/host/*.cpp)
-SRCS = main.cpp effect_registry.cpp conditions.cpp rules.cpp $(EFFECT_SRCS)
+EFFECT_SRCS = $(wildcard shared/effects/*.cpp host/effects/*.cpp)
+SRCS = host/main.cpp shared/effect_registry.cpp host/conditions.cpp \
+       host/rules.cpp $(EFFECT_SRCS)
 
 all: led
 
@@ -93,12 +108,14 @@ receiver-toolchain:
 # the receiver shares the wire protocol, the color LUT and the actual
 # effect code with the daemon, so its standalone animations ARE the
 # host's effects rather than a hand-kept copy. arduino-cli compiles a
-# sketch's src/ subdir, so mirror the shared files in there; it's
-# regenerated each build and gitignored. Every effects/standalone/* is
-# linked in, so any of them can be the configured power-on/shutdown effect
+# sketch's src/ subdir, so mirror the shared files in there (flat, which
+# is why includes are path-less); it's regenerated each build and
+# gitignored. Every shared/effects/* is linked in, so any of them can be
+# the configured power-on/shutdown effect
 RECEIVER_SRC = esp32_receiver/src
-SHARED = protocol.hpp color_lut.hpp esp32_strip.hpp effect.hpp \
-         effect_registry.cpp $(wildcard effects/standalone/*.cpp)
+SHARED = shared/protocol.hpp shared/color_lut.hpp firmware/esp32_strip.hpp \
+         shared/effect.hpp shared/effect_registry.cpp \
+         $(wildcard shared/effects/*.cpp)
 
 receiver-shared:
 	mkdir -p $(RECEIVER_SRC)
@@ -107,7 +124,9 @@ receiver-shared:
 # compiler.cpp.extra_flags rather than build.extra_flags: the latter
 # would replace the esp32 platform's own extra flags. ESP32_BUILD selects
 # the receiver-side Strip/EffectConfig backends in effect.hpp
-receiver: receiver-toolchain receiver-shared
+# depends on `led` so the CONFIG_GET reads above resolve against the
+# freshly built daemon (the firmware's baked-in defaults come from it)
+receiver: led receiver-toolchain receiver-shared
 	arduino-cli compile --fqbn $(FQBN) \
 		--build-property "compiler.cpp.extra_flags=-DESP32_BUILD -DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS) -DDEFAULT_LED_COUNT=$(LEDS) -DDEFAULT_LED_PIN=$(LED_PIN) -DSTRIP_BRIGHTNESS=$(BRIGHTNESS) -DSTRIP_WHITE_BALANCE=0x$(WHITE_BALANCE)" \
 		esp32_receiver
