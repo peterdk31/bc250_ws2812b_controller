@@ -113,12 +113,46 @@
             }
         },
         {
-            "effect": "breathe",
+            "effect": "cycle",
             "hold": 0,
             "settings": {
-                "color": "ff7818",
-                "period_seconds": 5,
-                "min_brightness": 0.05
+                "period_seconds": 30,
+                "effects": [
+                    {
+                        "effect": "breathe",
+                        "settings": {
+                            "color": "ff7818",
+                            "period_seconds": 5,
+                            "min_brightness": 0.05
+                        }
+                    },
+                    {
+                        "effect": "aurora",
+                        "settings": {
+                            "speed": 1.0,
+                            "hue_min": 0.3,
+                            "hue_max": 0.85
+                        }
+                    },
+                    {
+                        "effect": "twinkle",
+                        "settings": {
+                            "color": "ffffff",
+                            "base_color": "000020",
+                            "sparks_per_second": 6,
+                            "fade_seconds": 1.0
+                        }
+                    },
+                    {
+                        "effect": "comet",
+                        "seconds": 20,
+                        "settings": {
+                            "color": "00ffaa",
+                            "sweeps_per_second": 0.5,
+                            "tail_pixels": 8
+                        }
+                    }
+                ]
             }
         }
     ]

@@ -375,6 +375,7 @@ root (the systemd unit does).
 | `breathe` | single color on a slow sine | `color` (ff7818), `period_seconds` (5), `min_brightness` (0.05) |
 | `comet` | Larson scanner with fading tail | `color` (ff0000), `sweeps_per_second` (0.5), `tail_pixels` (8) |
 | `cpu_temp` | temperature bar graph along a hue ramp | `temp_min` (40), `temp_max` (85), `cold_color` (0000ff), `hot_color` (ff0000), `sensors` |
+| `cycle` | rotates through a list of other effects, switching to a random next one each period | `period_seconds` (30), `effects` (list of `{effect, settings, seconds}`) |
 | `fire` | per-LED candle flicker | `speed` (1.0), `min_heat` (0.25) |
 | `load` | CPU/GPU bars growing from center | `smoothing_seconds` (0.5), `center_color` (00ff00), `edge_color` (ff0000) |
 | `rainbow` | scrolling hue cycle | `cycles_per_second` (0.625) |
@@ -385,6 +386,15 @@ root (the systemd unit does).
 Colors are `"RRGGBB"` or `"#RRGGBB"`. Effect settings come from the
 matching rule's `"settings"`, falling back to top-level config keys,
 then the defaults above.
+
+`cycle` composes the others: each entry in its `"effects"` list carries
+its own `"settings"` (resolved exactly like a rule's — entry settings
+first, then top-level keys, then that effect's defaults) and an optional
+`"seconds"` to override `period_seconds` for that one. It picks a random
+next entry each time, runs each sub-effect on its own clock, and hands
+off early if a sub-effect reports itself finished. It's host-only (the
+nested list needs the JSON config), so it can't be a receiver
+power-on/shutdown effect.
 
 ### Adding an effect
 

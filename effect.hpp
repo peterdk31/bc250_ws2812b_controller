@@ -119,6 +119,13 @@ public:
         return (uint32_t)strtoul(v.c_str(), nullptr, 16);
     }
 
+    // escape hatch for effects that compose others (e.g. `cycle`): the
+    // resolved json value for a key (overrides first, then top-level),
+    // and the Config to spin up child views from. Host-only — the
+    // receiver's EffectConfig has no json behind it.
+    const json::Value* raw(const std::string& key) const { return find(key); }
+    const Config& config() const { return cfg; }
+
 private:
     const json::Value* find(const std::string& key) const
     {
