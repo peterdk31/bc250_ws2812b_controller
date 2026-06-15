@@ -147,12 +147,15 @@ inline void addManifest(const std::string& path,
 // 0.5 s rule tick and the per-frame effect share one scan's cost.
 // When the byte counts stop moving for 2 minutes the download is
 // really paused or stalled (Steam doesn't always set the paused bit)
-// and stops counting as active until they move again
+// and stops counting as active until they move again. A scan that
+// finds no download in a running state is held for a few seconds
+// before it counts (see the empty-scan grace below)
 inline const Downloads& downloads()
 {
     static Downloads cached;
     static double lastScan = -1e9;
     static double lastMoved = 0;
+    static double lastNonEmpty = -1e9;
     static unsigned long long lastDone = ~0ull;
 
     timespec ts;
@@ -187,10 +190,25 @@ inline const Downloads& downloads()
 
     if (total == 0)
     {
+        // empty-scan grace: a single empty scan is usually transient.
+        // Steam rewrites the manifests as chunks land and cycles
+        // StateFlags through intermediate values, so a scan can briefly
+        // catch no download in a running state mid-flight. Dropping
+        // active on that one scan flapped the steam_dl rule, which
+        // yielded the strip to other rules and restarted the
+        // steam_download effect from an empty bar. Hold the last state
+        // until the strip has genuinely been empty for a few seconds
+        // (more than one scan interval); only then is the download
+        // really paused/finished/gone.
+        if (now - lastNonEmpty < 6.0)
+            return cached;
+
         cached = Downloads{};
         lastDone = ~0ull;
         return cached;
     }
+
+    lastNonEmpty = now;
 
     if (done != lastDone)
     {

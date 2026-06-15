@@ -34,8 +34,16 @@ public:
 
         smoothing = cfg.getFloat("smoothing_seconds", 0.4f);
 
-        target = 0.0f;
-        shown = 0.0f;
+        // seed from the live percentage rather than 0: while a game
+        // downloads, proc:steam / cpu_load / gpu_load rules contend for
+        // the strip, so this effect is re-activated (and re-init'd) on
+        // every bit of churn. Starting at 0 each time left the bar
+        // forever gliding up from empty and reading blank; resuming at
+        // the current percent makes a re-activation seamless.
+        const steam::Downloads& dl = steam::downloads();
+
+        target = dl.percent / 100.0f;
+        shown = target;
     }
 
     void render(WS2812Serial& strip, float t) override
