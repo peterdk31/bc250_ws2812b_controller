@@ -121,9 +121,24 @@ inline void addManifest(const std::string& path,
     char line[512];
     std::string key, val;
 
+    // the appmanifest is nested VDF. The top-level AppState block holds
+    // the whole-update StateFlags and byte totals, but blocks deeper in
+    // (per-depot download state) repeat BytesToDownload/BytesDownloaded
+    // for their own slice -- a live download can carry a dozen-plus, the
+    // last a tiny 240-byte depot. A flat last-match read lands on that
+    // leftover instead of the real total, so track brace depth and read
+    // only the depth-1 AppState keys. Braces sit alone on their own lines.
+    int depth = 0;
+
     while (fgets(line, sizeof line, f))
     {
-        if (!vdfPair(line, key, val))
+        const char* p = line;
+        while (*p == ' ' || *p == '\t') p++;
+
+        if (*p == '{') { depth++; continue; }
+        if (*p == '}') { depth--; continue; }
+
+        if (depth != 1 || !vdfPair(line, key, val))
             continue;
 
         if (key == "StateFlags")
@@ -266,9 +281,20 @@ inline void dumpStatus(FILE* out)
             std::string name, key, val;
             char line[512];
 
+            // read only the top-level AppState keys (see addManifest):
+            // per-depot blocks repeat the byte counters and a flat read
+            // lands on a tiny leftover instead of the real total
+            int depth = 0;
+
             while (fgets(line, sizeof line, f))
             {
-                if (!vdfPair(line, key, val)) continue;
+                const char* p = line;
+                while (*p == ' ' || *p == '\t') p++;
+
+                if (*p == '{') { depth++; continue; }
+                if (*p == '}') { depth--; continue; }
+
+                if (depth != 1 || !vdfPair(line, key, val)) continue;
 
                 if (key == "name") name = val;
                 else if (key == "StateFlags")
