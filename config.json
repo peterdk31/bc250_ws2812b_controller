@@ -8,7 +8,8 @@
         "leds": 58,
         "pin": 13,
         "brightness": 0.2,
-        "gamma": 2.2
+        "gamma": "2.2",
+        "white_balance": "b4ffff"
     },
     "sensors": [
         "k10temp:Tctl",

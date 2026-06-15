@@ -150,9 +150,11 @@ instant lock (a changed firmware default outranks the remembered
 rate). A silent line never triggers hunting, so a host that merely
 stopped finds the receiver where it left it.
 
-Gamma correction (`strip.gamma`) and brightness (`strip.brightness`)
-are applied on the host before sending; the bytes on the wire are
-final PWM values.
+Gamma correction (`strip.gamma`), white balance (`strip.white_balance`)
+and brightness (`strip.brightness`) are applied on the host before
+sending; the bytes on the wire are final PWM values. The three fold
+into one per-channel lookup table, so they cost nothing per frame. See
+[Tuning the colors](#tuning-the-colors) for how to set them.
 
 ## Configuration
 
@@ -173,7 +175,12 @@ final PWM values.
         "leds": 58,
         "pin": 13,              // ESP32 GPIO driving the strip
         "brightness": 0.2,      // 0..1, scales linear light output
-        "gamma": 2.2            // perceptual correction; 1.0 disables
+        "gamma": "2.2",         // perceptual correction; 1.0 disables.
+                                // three space-separated values ("2.0 2.2
+                                // 2.4") set it per R/G/B channel
+        "white_balance": "b4ffff" // RRGGBB "white" that reads neutral
+                                  // through the diffuser/filter; ffffff
+                                  // disables
     },
     "sensors": [ ... ],         // temp sensor candidates, see below
     "hold_seconds": 10,         // min seconds between effect switches
@@ -181,6 +188,52 @@ final PWM values.
     "rules": [ ... ]            // see below
 }
 ```
+
+### Tuning the colors
+
+Three `strip` settings shape what reaches your eye. They stack in this
+order — gamma curves each channel, white balance rescales it, then
+brightness scales the whole thing — and all three are folded into one
+per-channel lookup table on the host, so changing them is free per
+frame. A reflash (`make flash`) is only needed to match the receiver's
+standalone power-on breathe; the daemon picks up changes on restart.
+
+**`brightness`** (0..1) — overall output, linear in light. Set this
+first, to whatever is comfortable in the room. The two corrections
+below hold across the whole range, so you don't need to re-tune them
+when you change brightness.
+
+**`white_balance`** (RRGGBB, `ffffff` = off) — corrects an overall
+color cast, typically from a diffuser or filter in front of the strip.
+It's a per-channel *linear gain*: each hex byte scales that channel
+(`b4` on red = red runs at 0xB4/0xFF ≈ 71%). To set it: command a full
+white and find the RRGGBB that looks neutral through your cover —
+whichever channel leaks through too strongly gets pulled below `ff`. A
+black film tends to pass red most, so the fix lands around `b4ffff`
+(dimmer red, full green/blue). Because the gain is linear, the balance
+that looks neutral at full brightness stays neutral when dimmed.
+
+**`gamma`** (default `"2.2"`, `1.0` = off) — perceptual correction so
+mid-level values look mid-bright. One value applies to all channels;
+three space-separated values (`"2.0 2.2 2.4"`) set red/green/blue
+independently. Per-channel gamma is the tool for a cast that *only*
+shows at one end of the brightness range — most often dim whites
+drifting in color because the WS2812's three dies don't track each
+other near their PWM floor. White balance can't fix that (it's the
+same gain at every level); a per-channel gamma can, because it bends
+the midtones without moving the endpoints.
+
+Suggested order when dialing it in:
+
+1. Set `brightness` for the room.
+2. At a *bright* white, adjust `white_balance` until white looks
+   neutral.
+3. Drop to a *dim* white. If it now has a tint (e.g. goes bluish),
+   lower the gamma of the channel that fades too fast — bluish means
+   red is dropping out, so try `"2.0 2.2 2.2"`. Raising a channel's
+   gamma darkens its midtones; lowering it lifts them.
+4. Re-check the bright end (step 2 is unaffected by gamma at full
+   white) and `make flash` so the power-on breathe matches.
 
 ### Sensors
 

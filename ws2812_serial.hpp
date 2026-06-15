@@ -22,13 +22,25 @@ public:
         int leds = cfg.getInt("strip.leds", 10);
         int pin = cfg.getInt("strip.pin", 13);
         float brightness = cfg.getFloat("strip.brightness", 0.1f);
-        float gamma = cfg.getFloat("strip.gamma", 2.2f);
 
         WS2812Serial strip(port.c_str(), baud);
 
         strip.setLeds(leds);
         strip.setPin(pin);
-        strip.setGamma(gamma);
+
+        // gamma: one value for all channels, or three space-separated
+        // to also trim the per-channel falloff that makes dim whites
+        // drift toward a tint (e.g. "2.0 2.2 2.4")
+        float gr, gg, gb;
+        parseGamma(cfg.get("strip.gamma", "2.2"), gr, gg, gb);
+        strip.setGamma(gr, gg, gb);
+
+        // white_balance: the RRGGBB "white" that reads neutral through
+        // the strip's diffuser/filter; applied as a per-channel linear
+        // gain so it holds at every brightness
+        strip.setWhiteBalance(parseColor(cfg.get("strip.white_balance",
+                                                  "ffffff")));
+
         strip.setBrightness(brightness);
 
         return strip;
@@ -77,7 +89,8 @@ public:
         leds = 0;
         pin = 0;
         brightness = 1.0f;
-        gamma = 2.2f;
+        gamma[0] = gamma[1] = gamma[2] = 2.2f;
+        wb[0] = wb[1] = wb[2] = 1.0f;
         rebuildLut();
     }
 
@@ -89,9 +102,10 @@ public:
           buf(std::move(other.buf)),
           leds(other.leds),
           pin(other.pin),
-          brightness(other.brightness),
-          gamma(other.gamma)
+          brightness(other.brightness)
     {
+        memcpy(gamma, other.gamma, sizeof gamma);
+        memcpy(wb, other.wb, sizeof wb);
         memcpy(lut, other.lut, sizeof lut);
         other.fd = -1;
     }
@@ -122,9 +136,29 @@ public:
 
     // WS2812 PWM is linear in light output, but effect colors are
     // perceptual; 1.0 disables correction
-    void setGamma(float g)
+    void setGamma(float g) { setGamma(g, g, g); }
+
+    // a per-channel gamma reshapes one channel's midtones without
+    // touching its endpoints, which corrects a tint that only appears
+    // at some brightness levels (e.g. dim whites drifting blue) — the
+    // axis a single white_balance gain can't reach
+    void setGamma(float r, float g, float b)
     {
-        gamma = g > 0 ? g : 1.0f;
+        gamma[0] = r > 0 ? r : 1.0f;
+        gamma[1] = g > 0 ? g : 1.0f;
+        gamma[2] = b > 0 ? b : 1.0f;
+        rebuildLut();
+    }
+
+    // per-channel linear gain from an RRGGBB "white": the channel the
+    // filter passes too strongly sits below 0xFF to pull it down. A
+    // linear, level-independent scale, so the balance holds from dim
+    // to full brightness (unlike correcting in the color values)
+    void setWhiteBalance(uint32_t rgb)
+    {
+        wb[0] = ((rgb >> 16) & 0xFF) / 255.0f;
+        wb[1] = ((rgb >> 8) & 0xFF) / 255.0f;
+        wb[2] = (rgb & 0xFF) / 255.0f;
         rebuildLut();
     }
 
@@ -146,9 +180,9 @@ public:
 
         int p = 5 + i * 3;
 
-        buf[p++] = lut[r];
-        buf[p++] = lut[g];
-        buf[p]   = lut[b];
+        buf[p++] = lut[0][r];
+        buf[p++] = lut[1][g];
+        buf[p]   = lut[2][b];
     }
 
     bool show()
@@ -218,12 +252,35 @@ private:
         buf.resize(5 + leds * 3 + 1); // header + pixels + checksum
     }
 
-    // gamma first, then brightness scales linear light
+    // RRGGBB hex, optionally '#'-prefixed, as 0xRRGGBB
+    static uint32_t parseColor(std::string v)
+    {
+        if (!v.empty() && v[0] == '#')
+            v.erase(0, 1);
+
+        return (uint32_t)strtoul(v.c_str(), nullptr, 16);
+    }
+
+    // one float broadcasts to every channel; three set them per-channel
+    static void parseGamma(const std::string& s,
+                           float& r, float& g, float& b)
+    {
+        float v[3];
+        int n = sscanf(s.c_str(), "%f %f %f", &v[0], &v[1], &v[2]);
+
+        if (n == 3) { r = v[0]; g = v[1]; b = v[2]; return; }
+
+        r = g = b = (n >= 1) ? v[0] : 2.2f;
+    }
+
+    // gamma first, then the white-balance gain and brightness scale
+    // linear light; per channel so balance is independent of level
     void rebuildLut()
     {
-        for (int v = 0; v < 256; v++)
-            lut[v] = (uint8_t)(powf(v / 255.0f, gamma)
-                               * brightness * 255.0f + 0.5f);
+        for (int c = 0; c < 3; c++)
+            for (int v = 0; v < 256; v++)
+                lut[c][v] = (uint8_t)(powf(v / 255.0f, gamma[c])
+                                      * wb[c] * brightness * 255.0f + 0.5f);
     }
 
 private:
@@ -233,6 +290,7 @@ private:
     int leds;
     int pin;
     float brightness;
-    float gamma;
-    uint8_t lut[256];
+    float gamma[3];
+    float wb[3];
+    uint8_t lut[3][256];
 };
