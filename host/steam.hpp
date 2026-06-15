@@ -191,7 +191,7 @@ inline unsigned long long dirBytes(const std::string& path)
     return sum;
 }
 
-// state of all Steam downloads, rescanned at most every 2 s so the
+// state of all Steam downloads, rescanned at most every 1 s so the
 // 0.5 s rule tick and the per-frame effect share one scan's cost.
 //
 // percent comes from the manifests' top-level byte totals, but "is it
@@ -215,7 +215,7 @@ inline const Downloads& downloads()
     clock_gettime(CLOCK_MONOTONIC, &ts);
     double now = ts.tv_sec + ts.tv_nsec / 1e9;
 
-    if (now - lastScan < 2.0)
+    if (now - lastScan < 1.0)
         return cached;
 
     lastScan = now;
@@ -251,10 +251,12 @@ inline const Downloads& downloads()
         lastCacheMoved = now;
     }
 
-    // active = chunks landed recently. The 15 s window rides over the
-    // brief gaps while Steam commits a batch to disk, yet still clears a
-    // few seconds after a pause (the old byte-stall window was 2 min)
-    bool moving = now - lastCacheMoved < 15.0;
+    // active = chunks landed recently. With a 1 s scan, a 3 s window
+    // absorbs a one- or two-tick blip (a momentary commit lull or a
+    // brief network stall) but still clears ~3 s after a real pause --
+    // close to the unpause latency. Shorten it for snappier pause
+    // detection at the cost of flickering on transient stalls.
+    bool moving = now - lastCacheMoved < 3.0;
 
     if (total == 0)
     {
