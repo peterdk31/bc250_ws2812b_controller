@@ -221,4 +221,99 @@ inline const Downloads& downloads()
     return cached;
 }
 
+// one verbose scan for debugging detection (the daemon's `--steam-status`):
+// prints every library found, every appmanifest with its StateFlags and
+// byte counters, whether addManifest's filter would count it as an active
+// download (and if not, why), and the resulting percent. Mirrors the
+// libraries()/addManifest logic so what it reports is what downloads() acts on
+inline void dumpStatus(FILE* out)
+{
+    std::vector<std::string> libs = libraries();
+
+    fprintf(out, "steam libraries found: %zu\n", libs.size());
+
+    for (const auto& l : libs)
+        fprintf(out, "  %s\n", l.c_str());
+
+    if (libs.empty())
+        fprintf(out, "  (none matched — Steam may be installed somewhere "
+                     "libraries() doesn't scan, e.g. a Flatpak under "
+                     "~/.var/app or a Snap under ~/snap)\n");
+
+    unsigned long long total = 0, done = 0;
+    int manifests = 0, counted = 0;
+
+    for (const auto& lib : libs)
+    {
+        DIR* dir = opendir(lib.c_str());
+        if (!dir) continue;
+
+        while (dirent* e = readdir(dir))
+        {
+            size_t len = strlen(e->d_name);
+
+            if (strncmp(e->d_name, "appmanifest_", 12) != 0 ||
+                len < 4 || strcmp(e->d_name + len - 4, ".acf") != 0)
+                continue;
+
+            manifests++;
+
+            FILE* f = fopen((lib + "/" + e->d_name).c_str(), "r");
+            if (!f) { fprintf(out, "  %s: cannot open\n", e->d_name); continue; }
+
+            unsigned long flags = 0;
+            unsigned long long toDownload = 0, downloaded = 0;
+            std::string name, key, val;
+            char line[512];
+
+            while (fgets(line, sizeof line, f))
+            {
+                if (!vdfPair(line, key, val)) continue;
+
+                if (key == "name") name = val;
+                else if (key == "StateFlags")
+                    flags = strtoul(val.c_str(), nullptr, 10);
+                else if (key == "BytesToDownload")
+                    toDownload = strtoull(val.c_str(), nullptr, 10);
+                else if (key == "BytesDownloaded")
+                    downloaded = strtoull(val.c_str(), nullptr, 10);
+            }
+
+            fclose(f);
+
+            bool counts = !(toDownload == 0 || (flags & 512) ||
+                            !(flags & (256 | 1024)));
+
+            fprintf(out, "  %s \"%s\": StateFlags=%lu BytesToDownload=%llu "
+                         "BytesDownloaded=%llu -> %s\n",
+                    e->d_name, name.c_str(), flags, toDownload, downloaded,
+                    counts ? "COUNTS" : "ignored");
+
+            if (!counts)
+            {
+                if (toDownload == 0)
+                    fprintf(out, "      reason: BytesToDownload is 0\n");
+                if (flags & 512)
+                    fprintf(out, "      reason: paused (StateFlags bit 512)\n");
+                if (!(flags & (256 | 1024)))
+                    fprintf(out, "      reason: no running bit 256/1024 in "
+                                 "StateFlags\n");
+            }
+            else { total += toDownload; done += downloaded; counted++; }
+        }
+
+        closedir(dir);
+    }
+
+    fprintf(out, "manifests scanned: %d, counted as active: %d\n",
+            manifests, counted);
+
+    if (total > 0)
+        fprintf(out, "totals: %llu / %llu bytes -> %.1f%% (steam_dl active)\n",
+                done, total, 100.0 * done / total);
+    else
+        fprintf(out, "totals: nothing counted -> percent 0, steam_dl inactive "
+                     "(this is why the bar is blank)\n");
+}
+
 } // namespace steam

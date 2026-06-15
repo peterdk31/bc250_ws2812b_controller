@@ -7,6 +7,7 @@
 #include <vector>
 #include "effect.hpp"
 #include "rules.hpp"
+#include "steam.hpp"
 
 // set from a signal handler; the render loops watch it so a SIGTERM
 // from systemd (or Ctrl-C) breaks out and lets us tell the receiver to
@@ -74,8 +75,9 @@ static void usage(const char* prog)
             "Usage: %s <config>                       run the rules\n"
             "       %s <config> <effect>              run a single effect\n"
             "       %s --list                         list available effects\n"
+            "       %s --steam-status                 dump Steam download detection\n"
             "       %s --config-get <config> <path>   print a config value\n",
-            prog, prog, prog, prog);
+            prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char** argv)
@@ -85,6 +87,16 @@ int main(int argc, char** argv)
         for (auto& name : effectNames())
             printf("%s\n", name.c_str());
 
+        return 0;
+    }
+
+    // one verbose Steam scan, then exit: prints which libraries and
+    // appmanifests the download detector sees and why each does or
+    // doesn't count, so a blank steam_download bar can be traced to its
+    // cause (no library matched, manifest paused/not-running, etc.)
+    if (argc == 2 && strcmp(argv[1], "--steam-status") == 0)
+    {
+        steam::dumpStatus(stdout);
         return 0;
     }
 
