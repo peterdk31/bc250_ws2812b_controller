@@ -116,6 +116,16 @@ uint32_t savedFlashed = 0;
 uint16_t savedCount = 0;
 uint8_t savedPin = 0;
 
+// one configured slot: which effect, and its settings as key=value pairs.
+// Defined here, above the first function, because arduino-cli emits its
+// generated prototypes there — including ones that return/take SlotConfig
+// — so the type must be visible before that point.
+struct SlotConfig
+{
+    std::string effect;
+    EffectConfig::Settings settings;
+};
+
 void initStrip(uint16_t count, uint8_t pin)
 {
     if (strip)
@@ -166,13 +176,6 @@ void blankStrip()
 
     strip->show();
 }
-
-// one configured slot: which effect, and its settings as key=value pairs
-struct SlotConfig
-{
-    std::string effect;
-    EffectConfig::Settings settings;
-};
 
 // parse a slot string (effect name on the first line, then key=value
 // lines — see protocol.hpp). A blank/missing effect line falls back to
