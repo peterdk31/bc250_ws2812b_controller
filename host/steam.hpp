@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <algorithm>
 #include <string>
@@ -158,20 +159,57 @@ inline void addManifest(const std::string& path,
     done += downloaded;
 }
 
+// recursively sum the regular-file bytes under a directory (0 if it
+// doesn't exist or can't be read). lstat, so symlinks aren't followed
+inline unsigned long long dirBytes(const std::string& path)
+{
+    DIR* dir = opendir(path.c_str());
+    if (!dir) return 0;
+
+    unsigned long long sum = 0;
+
+    while (dirent* e = readdir(dir))
+    {
+        if (e->d_name[0] == '.' &&
+            (e->d_name[1] == '\0' ||
+             (e->d_name[1] == '.' && e->d_name[2] == '\0')))
+            continue;
+
+        std::string child = path + "/" + e->d_name;
+        struct stat st;
+
+        if (lstat(child.c_str(), &st) != 0)
+            continue;
+
+        if (S_ISDIR(st.st_mode))
+            sum += dirBytes(child);
+        else if (S_ISREG(st.st_mode))
+            sum += (unsigned long long)st.st_size;
+    }
+
+    closedir(dir);
+    return sum;
+}
+
 // state of all Steam downloads, rescanned at most every 2 s so the
 // 0.5 s rule tick and the per-frame effect share one scan's cost.
-// When the byte counts stop moving for 2 minutes the download is
-// really paused or stalled (Steam doesn't always set the paused bit)
-// and stops counting as active until they move again. A scan that
-// finds no download in a running state is held for a few seconds
-// before it counts (see the empty-scan grace below)
+//
+// percent comes from the manifests' top-level byte totals, but "is it
+// downloading right now" comes from the in-flight chunk bytes under
+// steamapps/downloading/: Steam rewrites the manifests only every minute
+// or so -- far too coarse to tell a deliberate pause from a slow patch --
+// while the download cache grows continuously during a transfer and
+// freezes the instant it's paused. So active tracks recent movement of
+// that cache. A manifest with no download in a running state is held
+// briefly (the empty-scan grace) so a transient mid-rewrite scan doesn't
+// blank the bar.
 inline const Downloads& downloads()
 {
     static Downloads cached;
     static double lastScan = -1e9;
-    static double lastMoved = 0;
     static double lastNonEmpty = -1e9;
-    static unsigned long long lastDone = ~0ull;
+    static double lastCacheMoved = -1e9;
+    static unsigned long long lastCache = 0;
 
     timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -182,57 +220,63 @@ inline const Downloads& downloads()
 
     lastScan = now;
 
-    unsigned long long total = 0, done = 0;
+    unsigned long long total = 0, done = 0, cache = 0;
 
     for (const auto& lib : libraries())
     {
         DIR* dir = opendir(lib.c_str());
-        if (!dir) continue;
 
-        while (dirent* e = readdir(dir))
+        if (dir)
         {
-            size_t len = strlen(e->d_name);
+            while (dirent* e = readdir(dir))
+            {
+                size_t len = strlen(e->d_name);
 
-            if (strncmp(e->d_name, "appmanifest_", 12) != 0 ||
-                len < 4 || strcmp(e->d_name + len - 4, ".acf") != 0)
-                continue;
+                if (strncmp(e->d_name, "appmanifest_", 12) != 0 ||
+                    len < 4 || strcmp(e->d_name + len - 4, ".acf") != 0)
+                    continue;
 
-            addManifest(lib + "/" + e->d_name, total, done);
+                addManifest(lib + "/" + e->d_name, total, done);
+            }
+
+            closedir(dir);
         }
 
-        closedir(dir);
+        cache += dirBytes(lib + "/downloading");
     }
+
+    if (cache != lastCache)
+    {
+        lastCache = cache;
+        lastCacheMoved = now;
+    }
+
+    // active = chunks landed recently. The 15 s window rides over the
+    // brief gaps while Steam commits a batch to disk, yet still clears a
+    // few seconds after a pause (the old byte-stall window was 2 min)
+    bool moving = now - lastCacheMoved < 15.0;
 
     if (total == 0)
     {
-        // empty-scan grace: a single empty scan is usually transient.
-        // Steam rewrites the manifests as chunks land and cycles
-        // StateFlags through intermediate values, so a scan can briefly
-        // catch no download in a running state mid-flight. Dropping
-        // active on that one scan flapped the steam_dl rule, which
-        // yielded the strip to other rules and restarted the
-        // steam_download effect from an empty bar. Hold the last state
-        // until the strip has genuinely been empty for a few seconds
-        // (more than one scan interval); only then is the download
-        // really paused/finished/gone.
+        // empty-scan grace: Steam rewrites manifests as chunks land and
+        // cycles StateFlags through intermediate values, so a scan can
+        // briefly catch no download in a running state mid-flight. Hold
+        // the last percent across that transient rather than blanking the
+        // bar; only a few seconds of genuine emptiness clears it.
         if (now - lastNonEmpty < 6.0)
+        {
+            cached.active = moving;
             return cached;
+        }
 
         cached = Downloads{};
-        lastDone = ~0ull;
         return cached;
     }
 
     lastNonEmpty = now;
 
-    if (done != lastDone)
-    {
-        lastDone = done;
-        lastMoved = now;
-    }
-
     cached.percent = 100.0f * done / total;
-    cached.active = now - lastMoved < 120.0;
+    cached.active = moving;
     return cached;
 }
 

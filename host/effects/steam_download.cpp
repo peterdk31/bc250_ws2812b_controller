@@ -5,16 +5,20 @@
 // progress bar for Steam downloads (steam.hpp), activated by the
 // steam_dl condition. The head pixel is antialiased, so even a 10-LED
 // strip resolves single percents; the displayed value glides toward
-// the target so coarse updates animate instead of jumping. The
-// unfilled remainder glows as a faint track to show the mode is
-// active, and at 100 the whole bar pulses in done_color until the
-// rule deactivates. While the download is inactive (paused, gone) the
-// last value holds — the rule engine switches away shortly after
+// the target so coarse updates animate instead of jumping. A gentle
+// crest flows along the filled bar toward the head to read as live
+// activity. The unfilled remainder glows as a faint track to show the
+// mode is active, and at 100 the whole bar pulses in done_color until
+// the rule deactivates. While the download is inactive (paused, gone)
+// the last value holds — the rule engine switches away shortly after
 //
 // config:
 //   color              bar RRGGBB (default 00a0ff)
 //   done_color         finished pulse RRGGBB (default 00ff40)
 //   smoothing_seconds  glide time constant (default 0.4)
+//   flow_speed         flow crests per second along the bar (default 0.7)
+//   flow_depth         how deeply the flow dims between crests, 0..1
+//                      (default 0.35; 0 disables the flow)
 class SteamDownload : public Effect
 {
 public:
@@ -33,6 +37,9 @@ public:
         db = done & 0xFF;
 
         smoothing = cfg.getFloat("smoothing_seconds", 0.4f);
+
+        flowSpeed = cfg.getFloat("flow_speed", 0.7f);
+        flowDepth = cfg.getFloat("flow_depth", 0.35f);
 
         // seed from the live percentage rather than 0: while a game
         // downloads, proc:steam / cpu_load / gpu_load rules contend for
@@ -76,8 +83,25 @@ public:
         int head = (int)pos;
         float frac = pos - head;
 
+        // one flow wave at a time across the whole strip keeps the crest
+        // visible whether the bar is a sliver or nearly full
+        const float waves_across = 1.5f;
+
         for (int i = 0; i < leds; i++)
         {
+            float v = i < head ? 1.0f
+                    : i == head ? frac
+                    : 0.0f;
+
+            // a crest flowing toward the head reads as a live download;
+            // the unfilled track stays steady to set it apart
+            if (i <= head && flowDepth > 0)
+            {
+                float phase = (float)i / leds * waves_across - t * flowSpeed;
+                v *= 1.0f - flowDepth * 0.5f *
+                     (1.0f + sinf(phase * 2.0f * (float)M_PI));
+            }
+
             // floor the unfilled track to a faint glow so the bar's
             // extent (and that the mode is active) still reads when the
             // download sits near 0%. This has to clear the host's
@@ -86,10 +110,6 @@ public:
             // 0.15 floor mapped to a single unit of blue — invisible, and
             // an empty bar read as a dead-black strip. 0.30 survives as a
             // dim blue (~8% of the filled bar) with room to spare.
-            float v = i < head ? 1.0f
-                    : i == head ? frac
-                    : 0.0f;
-
             if (v < 0.30f)
                 v = 0.30f;
 
@@ -104,6 +124,8 @@ private:
     uint8_t r = 0, g = 160, b = 255;
     uint8_t dr = 0, dg = 255, db = 64;
     float smoothing = 0.4f;
+    float flowSpeed = 0.7f;
+    float flowDepth = 0.35f;
     float target = 0.0f;
     float shown = 0.0f;
 };
