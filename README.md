@@ -232,7 +232,6 @@ into one per-channel lookup table, so they cost nothing per frame. See
                                   // disables
     },
     "sensors": [ ... ],         // temp sensor candidates, see below
-    "hold_seconds": 10,         // min seconds between effect switches
     "esp32": {                  // effects the receiver runs on its own,
         "power_on": { ... },    // pushed to it over serial; see "Flashing
         "shutdown": { ... }     // the receiver". Standalone effects only
@@ -317,16 +316,16 @@ last). With no rules at all, `cpu_temp` runs.
 {
     "if": "proc:gamescope & temp>75",
     "effect": "fire",
-    "hold": 0,                       // optional, overrides hold_seconds
-    "settings": { "speed": 1.6 }     // optional, effect-specific
+    "hold": 5,                       // optional, min seconds since last
+    "settings": { "speed": 1.6 }     // switch; optional, effect-specific
 }
 ```
 
 Switching to a different effect (or the same effect with different
-settings) waits until `hold_seconds` have passed since the last switch,
-so rules that flap don't strobe the strip. A per-rule `"hold"`
-overrides that — `"hold": 0` on the overheat alarm makes it take over
-immediately.
+settings) waits until the rule's `"hold"` seconds have passed since the
+last switch, so a rule that flaps doesn't strobe the strip. `"hold"`
+defaults to 0 — switch immediately — so only a rule that wants
+debouncing sets its own.
 
 ### Conditions
 

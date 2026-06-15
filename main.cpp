@@ -183,7 +183,6 @@ int main(int argc, char** argv)
     // "esp32" block), played at true power-on while the OS comes up — so
     // the daemon goes straight to the rules instead of replaying it here
 
-    float holdSeconds = cfg.getFloat("hold_seconds", 3.0f);
     const double evalInterval = 0.5;
 
     double lastEval = -1e9;
@@ -212,7 +211,7 @@ int main(int argc, char** argv)
             (want->effect != active ||
              !sameSettings(want->settings, activeSettings));
 
-        float hold = want && want->hold >= 0 ? want->hold : holdSeconds;
+        float hold = want ? want->hold : 0.0f;
 
         if (changed && now - lastSwitch >= hold)
         {

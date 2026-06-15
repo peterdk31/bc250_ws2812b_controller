@@ -51,7 +51,7 @@ bool loadRules(const Config& cfg, std::vector<Rule>& rules)
         const json::Value* hold = entry.find("hold");
 
         rules.push_back({std::move(condition), effect->text, settings,
-                         hold ? json::toFloat(*hold, -1.0f) : -1.0f});
+                         hold ? json::toFloat(*hold, 0.0f) : 0.0f});
     }
 
     if (rules.empty())

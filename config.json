@@ -19,7 +19,6 @@
         "nct6683:AMD TSI Addr 98h",
         "nct6686"
     ],
-    "hold_seconds": 10,
     "esp32": {
         "power_on": {
             "effect": "boot",
@@ -47,6 +46,7 @@
         {
             "if": "file:/tmp/led-rainbow",
             "effect": "rainbow",
+            "hold": 0,
             "settings": {
                 "cycles_per_second": 0.625
             }
@@ -54,6 +54,7 @@
         {
             "if": "file:/tmp/led-night",
             "effect": "twinkle",
+            "hold": 0,
             "settings": {
                 "color": "ffffff",
                 "base_color": "000020",
@@ -69,6 +70,7 @@
         {
             "if": "gpu_load>20 | cpu_load>20",
             "effect": "load",
+            "hold": 0,
             "settings": {
                 "smoothing_seconds": 0.5
             }
@@ -76,6 +78,7 @@
         {
             "if": "proc:gamescope & temp>75 | proc:steam & temp>75",
             "effect": "fire",
+            "hold": 0,
             "settings": {
                 "speed": 1.6,
                 "min_heat": 0.45
@@ -84,6 +87,7 @@
         {
             "if": "proc:gamescope | proc:steam",
             "effect": "fire",
+            "hold": 0,
             "settings": {
                 "speed": 1.0,
                 "min_heat": 0.25
@@ -92,6 +96,7 @@
         {
             "if": "temp>65",
             "effect": "cpu_temp",
+            "hold": 0,
             "settings": {
                 "temp_min": 40,
                 "temp_max": 85
@@ -100,6 +105,7 @@
         {
             "if": "temp<48",
             "effect": "aurora",
+            "hold": 0,
             "settings": {
                 "speed": 1.0,
                 "hue_min": 0.3,
@@ -108,6 +114,7 @@
         },
         {
             "effect": "breathe",
+            "hold": 0,
             "settings": {
                 "color": "ff7818",
                 "period_seconds": 5,
