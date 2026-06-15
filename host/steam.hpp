@@ -191,24 +191,62 @@ inline unsigned long long dirBytes(const std::string& path)
     return sum;
 }
 
+// total bytes received across every interface except loopback, from
+// /proc/net/dev. Used to tell a live network download from disk-only
+// churn (Steam verifying/committing a finished download still rewrites
+// the downloading/ cache, but pulls nothing over the network)
+inline unsigned long long netRxBytes()
+{
+    FILE* f = fopen("/proc/net/dev", "r");
+    if (!f) return 0;
+
+    char line[512];
+    unsigned long long sum = 0;
+
+    // each data line is "  iface: rxbytes rxpackets ..."; the two header
+    // lines carry no colon so they're skipped
+    while (fgets(line, sizeof line, f))
+    {
+        char* colon = strchr(line, ':');
+        if (!colon) continue;
+
+        char* name = line;
+        while (*name == ' ' || *name == '\t') name++;
+        *colon = '\0';
+
+        if (strcmp(name, "lo") == 0)
+            continue;
+
+        sum += strtoull(colon + 1, nullptr, 10);
+    }
+
+    fclose(f);
+    return sum;
+}
+
 // state of all Steam downloads, rescanned at most every 1 s so the
 // 0.5 s rule tick and the per-frame effect share one scan's cost.
 //
 // percent comes from the manifests' top-level byte totals, but "is it
-// downloading right now" comes from the in-flight chunk bytes under
-// steamapps/downloading/: Steam rewrites the manifests only every minute
-// or so -- far too coarse to tell a deliberate pause from a slow patch --
-// while the download cache grows continuously during a transfer and
-// freezes the instant it's paused. So active tracks recent movement of
-// that cache. A manifest with no download in a running state is held
-// briefly (the empty-scan grace) so a transient mid-rewrite scan doesn't
-// blank the bar.
+// downloading right now" comes from two signals that must agree:
+//   1. the in-flight chunk bytes under steamapps/downloading/ moving --
+//      Steam rewrites the manifests only every minute or so (far too
+//      coarse to tell a deliberate pause from a slow patch) while the
+//      download cache grows continuously during a transfer and freezes
+//      the instant it's paused.
+//   2. real bytes arriving over the network (netRxBytes).
+// requiring both rejects the disk-only churn of a finished download
+// being verified/committed: the cache still moves but nothing comes off
+// the network, which used to flicker the bar on and off. A deliberate
+// pause clears signal 1; verification clears signal 2.
 inline const Downloads& downloads()
 {
     static Downloads cached;
     static double lastScan = -1e9;
     static double lastCacheMoved = -1e9;
+    static double lastNetMoved = -1e9;
     static unsigned long long lastCache = 0;
+    static unsigned long long lastRx = 0;
 
     timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -217,6 +255,7 @@ inline const Downloads& downloads()
     if (now - lastScan < 1.0)
         return cached;
 
+    double scanDt = now - lastScan;
     lastScan = now;
 
     unsigned long long total = 0, done = 0, cache = 0;
@@ -250,16 +289,30 @@ inline const Downloads& downloads()
         lastCacheMoved = now;
     }
 
-    // the download cache is the activity authority: it grows while
-    // downloading and freezes on pause. active just asks whether it
-    // moved within the window. With a 1 s scan a 2 s window tolerates a
-    // single dead tick (a brief network blip) yet clears ~2 s after a
-    // real pause -- about the unpause latency. No manifest-based grace
-    // anymore: the cache, not the manifest's flicker-prone StateFlags,
-    // decides activity, so a stale empty manifest scan can't blank the
-    // bar. Drop the window toward 1 s for near-instant pause, at the
-    // cost of a flicker on any one-second stall.
-    bool moving = now - lastCacheMoved < 2.0;
+    // network throughput is the second authority. A live download runs
+    // megabytes/sec; idle background chatter and the disk-only churn of
+    // verifying a finished download sit far below this floor, so they
+    // don't count as movement. Guard rx > lastRx so a counter reset
+    // (interface down/up) reads as zero rather than a huge false spike.
+    unsigned long long rx = netRxBytes();
+
+    const double kRxFloor = 50.0 * 1024.0; // bytes/sec
+
+    if (lastRx != 0 && scanDt > 0 && rx > lastRx &&
+        (double)(rx - lastRx) / scanDt > kRxFloor)
+        lastNetMoved = now;
+
+    lastRx = rx;
+
+    // active requires both authorities within the window: the download
+    // cache moving and real bytes arriving. With a 1 s scan a 2 s window
+    // tolerates a single dead tick (a brief blip) yet clears ~2 s after
+    // a real pause -- about the unpause latency. The cache, not the
+    // manifest's flicker-prone StateFlags, decides whether bytes are
+    // landing locally, so a stale empty manifest scan can't blank the
+    // bar; the network check then rejects the verify/commit phase, where
+    // the cache still churns but nothing comes off the wire.
+    bool moving = now - lastCacheMoved < 2.0 && now - lastNetMoved < 2.0;
 
     if (!moving)
     {
@@ -382,11 +435,39 @@ inline void dumpStatus(FILE* out)
             manifests, counted);
 
     if (total > 0)
-        fprintf(out, "totals: %llu / %llu bytes -> %.1f%% (steam_dl active)\n",
+        fprintf(out, "totals: %llu / %llu bytes -> %.1f%% (manifest percent)\n",
                 done, total, 100.0 * done / total);
     else
-        fprintf(out, "totals: nothing counted -> percent 0, steam_dl inactive "
-                     "(this is why the bar is blank)\n");
+        fprintf(out, "totals: nothing counted -> percent 0\n");
+
+    // sample network RX over ~1 s: active needs real throughput, not just
+    // a manifest that counts, so report the rate and how it compares to
+    // the floor that separates a live download from verify/idle chatter
+    const double kRxFloor = 50.0 * 1024.0;
+
+    unsigned long long rx0 = netRxBytes();
+    timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    timespec nap{1, 0};
+    nanosleep(&nap, nullptr);
+
+    unsigned long long rx1 = netRxBytes();
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    double dt = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+    double rate = (dt > 0 && rx1 > rx0) ? (rx1 - rx0) / dt : 0.0;
+    bool netActive = rate > kRxFloor;
+
+    fprintf(out, "network RX: %.0f KiB/s (floor %.0f KiB/s) -> %s\n",
+            rate / 1024.0, kRxFloor / 1024.0,
+            netActive ? "downloading" : "idle/verify");
+
+    fprintf(out, "steam_dl %s\n",
+            (counted > 0 && netActive)
+                ? "would be active (manifest counts + network flowing)"
+                : "inactive (needs a counted manifest AND network throughput; "
+                  "a finished download being verified counts but sends nothing)");
 }
 
 } // namespace steam
