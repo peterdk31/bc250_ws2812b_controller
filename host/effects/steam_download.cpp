@@ -78,14 +78,20 @@ public:
 
         for (int i = 0; i < leds; i++)
         {
-            // 0.15 is the faintest level that survives the host's
-            // gamma/brightness lut at the default 20% brightness
+            // floor the unfilled track to a faint glow so the bar's
+            // extent (and that the mode is active) still reads when the
+            // download sits near 0%. This has to clear the host's
+            // gamma/brightness lut: at the default gamma 2.2 and 20%
+            // brightness the gamma curve crushes small values hard, so a
+            // 0.15 floor mapped to a single unit of blue — invisible, and
+            // an empty bar read as a dead-black strip. 0.30 survives as a
+            // dim blue (~8% of the filled bar) with room to spare.
             float v = i < head ? 1.0f
                     : i == head ? frac
                     : 0.0f;
 
-            if (v < 0.15f)
-                v = 0.15f;
+            if (v < 0.30f)
+                v = 0.30f;
 
             strip.setPixel(i, (uint8_t)(r * v), (uint8_t)(g * v),
                            (uint8_t)(b * v));
