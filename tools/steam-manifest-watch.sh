@@ -1,72 +1,71 @@
 #!/usr/bin/env bash
-# Figure out what actually tracks a Steam download's progress on this
-# box. The led daemon reads BytesToDownload/BytesDownloaded from the
-# appmanifest, but Steam doesn't always keep those live: it streams
-# in-flight chunks into steamapps/downloading/<appid>/ and only folds
-# them into the manifest periodically, so the .acf can sit frozen while
-# the download is moving.
+# Steam's appmanifest doesn't always record byte-level progress (we've
+# seen StateFlags "started" but not "running", with a frozen 240/0
+# placeholder). So instead of trusting the manifest, measure what a
+# download actually does: bytes arriving on the network, and bytes
+# landing in steamapps/downloading/<appid>/ -- in EXACT bytes, so small
+# movement isn't hidden by rounding.
 #
-# This dumps the full manifest once, then samples both the manifest
-# counters and the download-cache directory size twice, so we can see
-# which (if any) actually advances during a download.
+# Run it during the download. If network RX climbs by hundreds of MB,
+# a transfer is genuinely live and we drive the led effect off that. If
+# everything is flat, the download isn't actually transferring right now
+# (queued/stalled), which is a Steam-side thing, not a daemon bug.
 #
 # usage: tools/steam-manifest-watch.sh [appid] [seconds-between-samples]
-#   appid    a specific app (e.g. 391220); defaults to every manifest found
-#   seconds  delay between the two samples (default 15)
 set -u
 
 appid="${1:-}"
-delay="${2:-15}"
+delay="${2:-20}"
+
+# total received bytes across real (non-loopback) interfaces
+rx_total () {
+    local sum=0 b s
+    for s in /sys/class/net/*/statistics/rx_bytes; do
+        case "$s" in */lo/*) continue ;; esac
+        b="$(cat "$s" 2>/dev/null || echo 0)"
+        sum=$((sum + b))
+    done
+    echo "$sum"
+}
 
 roots=(/home /var/home /mnt /run/media /media)
-
 mapfile -t manifests < <(find "${roots[@]}" -type f \
     -name "appmanifest_${appid:-*}.acf" 2>/dev/null | sort -u)
 
-if [ "${#manifests[@]}" -eq 0 ]; then
-    echo "no appmanifest_${appid:-*}.acf found under: ${roots[*]}"
-    echo "(start the download first, or pass the right appid)"
-    exit 1
-fi
-
-counters='"(StateFlags|BytesToDownload|BytesDownloaded|BytesToStage|BytesStaged|SizeOnDisk|StagingSize)"'
-
-# steamapps/downloading/<id> holds the in-flight chunks; its size is the
-# live signal even when the manifest is frozen
-cache_dir () {
-    local f="$1" id
+# exact byte size of steamapps/downloading/<id> for a given manifest
+cache_bytes () {
+    local f="$1" id dl
     id="$(basename "$f" .acf)"; id="${id#appmanifest_}"
-    echo "$(dirname "$f")/downloading/$id"
+    dl="$(dirname "$f")/downloading/$id"
+    [ -d "$dl" ] && du -sb "$dl" 2>/dev/null | cut -f1 || echo "-"
 }
 
-sample () {
-    for f in "${manifests[@]}"; do
-        echo "-- $f"
-        grep -E "$counters" "$f"
-        local dl; dl="$(cache_dir "$f")"
-        if [ -d "$dl" ]; then
-            echo "   downloading-cache: $(du -sh "$dl" 2>/dev/null | cut -f1) ($dl)"
-        else
-            echo "   downloading-cache: (no dir $dl)"
-        fi
-    done
-}
-
-echo "########## full manifest(s) ##########"
-for f in "${manifests[@]}"; do
-    echo "===== $f ====="
-    cat "$f"
-    echo
+echo "interfaces:"
+for s in /sys/class/net/*/statistics/rx_bytes; do
+    case "$s" in */lo/*) continue ;; esac
+    iface="$(basename "$(dirname "$(dirname "$s")")")"
+    echo "  $iface rx=$(cat "$s")"
 done
 
-echo "########## sample 1 ($(date +%T)) ##########"
-sample
-echo
-echo "### waiting ${delay}s for the download to advance..."
+rx1="$(rx_total)"
+declare -A c1
+for f in "${manifests[@]}"; do c1["$f"]="$(cache_bytes "$f")"; done
+
+echo "sampling over ${delay}s (keep the download going)..."
 sleep "$delay"
+
+rx2="$(rx_total)"
+
 echo
-echo "########## sample 2 ($(date +%T)) ##########"
-sample
+awk -v d="$((rx2 - rx1))" -v t="$delay" \
+    'BEGIN { printf "network RX: %d bytes in %ss = %.2f MB/s\n", d, t, d/t/1048576 }'
+
+for f in "${manifests[@]}"; do
+    c2="$(cache_bytes "$f")"
+    echo "download-cache $(basename "$f"): ${c1[$f]} -> ${c2} bytes"
+done
+
 echo
-echo "# whichever number moved between samples (a manifest counter or the"
-echo "# downloading-cache size) is what the daemon should track; paste it all back."
+echo "# RX climbing (MB/s) => use network as the signal."
+echo "# cache bytes climbing => use the download-cache size."
+echo "# both flat => nothing is actually transferring (Steam-side, not the daemon)."
