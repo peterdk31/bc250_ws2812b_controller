@@ -31,14 +31,22 @@
 #define DEFAULT_LED_PIN 13
 #endif
 
-// the host applies gamma and brightness before sending, so the
-// standalone animation must do the same or it would blast full-power
-// LEDs into a room tuned for strip.brightness. `make flash` overrides
-// brightness with the host config's value
+// the host applies gamma, white balance and brightness before sending,
+// so the standalone animation must do the same or it would blast
+// full-power LEDs into a room tuned for strip.brightness. `make flash`
+// overrides brightness and white balance with the host config's values
 #ifndef STRIP_BRIGHTNESS
 #define STRIP_BRIGHTNESS 0.2f
 #endif
 #define STRIP_GAMMA 2.2f
+
+// per-channel linear gain as 0xRRGGBB; 0xFFFFFF disables. Mirrors
+// strip.white_balance so the standalone breathe is tinted like the
+// daemon's frames (see ws2812_serial.hpp). Single gamma here is fine:
+// the breathe is one fixed amber, not a gradient
+#ifndef STRIP_WHITE_BALANCE
+#define STRIP_WHITE_BALANCE 0xFFFFFF
+#endif
 
 // when bytes keep arriving but never form a valid frame, the host is
 // probably talking at another rate: step through the candidates (the
@@ -141,12 +149,13 @@ void blankStrip()
     strip->show();
 }
 
-// the same curve the host's lut applies (ws2812_serial.hpp), so the
+// the same curve the host's lut applies (ws2812_serial.hpp): gamma,
+// then the per-channel white-balance gain and brightness, so the
 // standalone breathe matches what the daemon will render later
-uint8_t shade(uint8_t c, float v)
+uint8_t shade(uint8_t c, float v, float gain)
 {
     return (uint8_t)(powf(c * v / 255.0f, STRIP_GAMMA)
-                     * STRIP_BRIGHTNESS * 255.0f + 0.5f);
+                     * gain * STRIP_BRIGHTNESS * 255.0f + 0.5f);
 }
 
 // the host's idle "breathe" effect: warm amber, 5 s sine, 5% floor
@@ -156,9 +165,9 @@ void renderBreath(unsigned long now)
     float breath = 0.5f - 0.5f * cosf(t * 2.0f * PI / 5.0f);
     float v = 0.05f + 0.95f * breath;
 
-    uint8_t r = shade(255, v);
-    uint8_t g = shade(120, v);
-    uint8_t b = shade(24, v);
+    uint8_t r = shade(255, v, ((STRIP_WHITE_BALANCE >> 16) & 0xFF) / 255.0f);
+    uint8_t g = shade(120, v, ((STRIP_WHITE_BALANCE >> 8)  & 0xFF) / 255.0f);
+    uint8_t b = shade(24,  v, ( STRIP_WHITE_BALANCE        & 0xFF) / 255.0f);
 
     for (uint16_t i = 0; i < currentCount; i++)
         strip->setLedColorData(i, r, g, b);
