@@ -207,7 +207,6 @@ inline const Downloads& downloads()
 {
     static Downloads cached;
     static double lastScan = -1e9;
-    static double lastNonEmpty = -1e9;
     static double lastCacheMoved = -1e9;
     static unsigned long long lastCache = 0;
 
@@ -251,34 +250,31 @@ inline const Downloads& downloads()
         lastCacheMoved = now;
     }
 
-    // active = chunks landed recently. With a 1 s scan, a 3 s window
-    // absorbs a one- or two-tick blip (a momentary commit lull or a
-    // brief network stall) but still clears ~3 s after a real pause --
-    // close to the unpause latency. Shorten it for snappier pause
-    // detection at the cost of flickering on transient stalls.
-    bool moving = now - lastCacheMoved < 3.0;
+    // the download cache is the activity authority: it grows while
+    // downloading and freezes on pause. active just asks whether it
+    // moved within the window. With a 1 s scan a 2 s window tolerates a
+    // single dead tick (a brief network blip) yet clears ~2 s after a
+    // real pause -- about the unpause latency. No manifest-based grace
+    // anymore: the cache, not the manifest's flicker-prone StateFlags,
+    // decides activity, so a stale empty manifest scan can't blank the
+    // bar. Drop the window toward 1 s for near-instant pause, at the
+    // cost of a flicker on any one-second stall.
+    bool moving = now - lastCacheMoved < 2.0;
 
-    if (total == 0)
+    if (!moving)
     {
-        // empty-scan grace: Steam rewrites manifests as chunks land and
-        // cycles StateFlags through intermediate values, so a scan can
-        // briefly catch no download in a running state mid-flight. Hold
-        // the last percent across that transient rather than blanking the
-        // bar; only a few seconds of genuine emptiness clears it.
-        if (now - lastNonEmpty < 6.0)
-        {
-            cached.active = moving;
-            return cached;
-        }
-
+        // nothing landing -> paused / finished / gone: inactive, no bar
         cached = Downloads{};
         return cached;
     }
 
-    lastNonEmpty = now;
+    // downloading: percent comes from the manifest's top-level byte
+    // totals, but if a scan momentarily catches no counted manifest (a
+    // mid-rewrite blip) keep the last percent rather than blanking
+    if (total > 0)
+        cached.percent = 100.0f * done / total;
 
-    cached.percent = 100.0f * done / total;
-    cached.active = moving;
+    cached.active = true;
     return cached;
 }
 
