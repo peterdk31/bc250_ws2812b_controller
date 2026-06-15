@@ -84,18 +84,49 @@ The receiver is generic: pin and LED count come from the host in every
 frame, so it never needs reflashing for config changes.
 
 From power-on until the first valid host frame, the receiver runs a
-standalone breathing animation (the host's idle warm amber, through
-the same gamma/brightness curve), so the strip isn't dark while the OS
-boots and the daemon starts. The geometry comes from the last valid
-frame (remembered in flash), falling back to the `strip.leds`/
-`strip.pin` baked in by `make flash`; a never-flashed,
-never-driven board stays dark. The animation never resumes after the
-host goes quiet — that means shutdown or crash, where the usual
-timeout blank is the right answer.
+**power-on effect** on its own, so the strip isn't dark while the OS boots
+and the daemon starts; on a clean shutdown it runs a **shutdown effect**
+after the host has gone. These standalone animations are the *actual* host
+effects compiled into the firmware (`make receiver` mirrors `effect.hpp`,
+the color LUT and every `effects/standalone/*.cpp` into the sketch's
+`src/`), so they render through the same correction as the daemon's frames
+and can't drift from it.
+
+Both slots are configurable from the `esp32` block in `config.json` — set
+each to any **standalone** effect (the host-data effects in
+`effects/host/` can't run on the receiver) with its own settings:
+
+```jsonc
+"esp32": {
+    "power_on": { "effect": "breathe",  "settings": { "color": "ff7818" } },
+    "shutdown": { "effect": "shutdown", "settings": { "color": "0028ff" } }
+}
+```
+
+The receiver has no JSON parser, so the daemon sends this config over
+serial at startup and the receiver remembers it in flash (NVS). It takes
+effect on the next daemon (re)start: the **shutdown** slot applies that
+same session, while the **power-on** slot — which runs before the daemon
+is up — applies on the *next* power cycle. A fresh, never-driven board
+uses the firmware's built-in defaults (`boot` / `shutdown`) until the
+daemon first pushes config. A power-on effect that loops (e.g. `rainbow`)
+runs until the host takes over; a finite one (e.g. `boot`) plays once and
+settles into a breathing idle. A shutdown effect plays to completion — or,
+if you pick a looping one, until the strip loses power.
+
+Strip geometry comes from the last valid frame (remembered in NVS),
+falling back to the `strip.leds`/`strip.pin` baked in by `make flash`; a
+never-flashed, never-driven board stays dark. The receiver — independently
+powered — outlives the host, which is what lets it finish the shutdown
+effect. A host that goes quiet *without* sending the shutdown command (a
+crash or pulled cable) still blanks on the host timeout. A later valid
+frame cancels any standalone state, so `systemctl stop` → `start` resumes
+cleanly.
 
 **Host and receiver must be updated together** when the wire protocol
-changes (it gained a checksum byte — an old receiver will reject every
-frame from a new host and vice versa).
+changes (e.g. it gained a checksum byte, then a command frame — an old
+receiver ignores the shutdown command and falls back to the timeout
+blank; mismatched checksums are rejected outright).
 
 ## Building and installing the host daemon
 
@@ -117,14 +148,14 @@ adapter enumerating late at boot) heals itself.
 Usage:
 
 ```
-led <config>            run startup effect, then rules
+led <config>            run the rules
 led <config> <effect>   run a single effect forever (testing)
 led --list              list available effects
 ```
 
 ## Wire protocol
 
-Each frame, host → receiver:
+Pixel frame, host → receiver:
 
 | bytes | content |
 |---|---|
@@ -133,6 +164,22 @@ Each frame, host → receiver:
 | 2 | LED count, little-endian |
 | 3·n | RGB, one triple per LED |
 | 1 | checksum: XOR of pin, count and RGB bytes |
+
+There is also a **command frame**, distinguished by a different second
+sync byte so the pixel-frame parser skips over it:
+
+| bytes | content |
+|---|---|
+| 2 | sync `0xAA 0x56` |
+| 1 | command (`0x01` = shutdown, `0x02` = config) |
+| 2 | payload length, little-endian |
+| n | payload |
+| 1 | checksum: XOR of command, length and payload bytes |
+
+`shutdown` carries no payload. `config` carries the power-on and shutdown
+slots as two NUL-terminated strings (effect name, then `key=value` lines).
+The byte values and payload format live in `protocol.hpp`, shared by host
+and firmware.
 
 The receiver drops frames with a bad checksum and rescans for sync, so
 a desync (sync bytes occurring inside pixel data) recovers within a
@@ -184,7 +231,10 @@ into one per-channel lookup table, so they cost nothing per frame. See
     },
     "sensors": [ ... ],         // temp sensor candidates, see below
     "hold_seconds": 10,         // min seconds between effect switches
-    "startup": { ... },         // one-shot effect on boot, see below
+    "esp32": {                  // effects the receiver runs on its own,
+        "power_on": { ... },    // pushed to it over serial; see "Flashing
+        "shutdown": { ... }     // the receiver". Standalone effects only
+    },
     "rules": [ ... ]            // see below
 }
 ```
@@ -196,7 +246,7 @@ order — gamma curves each channel, white balance rescales it, then
 brightness scales the whole thing — and all three are folded into one
 per-channel lookup table on the host, so changing them is free per
 frame. A reflash (`make flash`) is only needed to match the receiver's
-standalone power-on breathe; the daemon picks up changes on restart.
+standalone power-on animation; the daemon picks up changes on restart.
 
 **`brightness`** (0..1) — overall output, linear in light. Set this
 first, to whatever is comfortable in the room. The two corrections
@@ -233,7 +283,7 @@ Suggested order when dialing it in:
    red is dropping out, so try `"2.0 2.2 2.2"`. Raising a channel's
    gamma darkens its midtones; lowering it lifts them.
 4. Re-check the bright end (step 2 is unaffected by gamma at full
-   white) and `make flash` so the power-on breathe matches.
+   white) and `make flash` so the power-on animation matches.
 
 ### Sensors
 
@@ -250,17 +300,10 @@ the nct6687d driver (`nct6686:CPU`) and the in-kernel nct6683 driver
 
 ### Startup
 
-```jsonc
-"startup": {
-    "effect": "boot",
-    "settings": { "duration_seconds": 5 },
-    "max_seconds": 30   // safety cap if the effect never reports finished
-}
-```
-
-Runs once until the effect reports finished (or `max_seconds` elapses,
-default 30), then the rule engine takes over. Omit for no startup
-effect.
+There's no host-side startup effect: the boot animation is the receiver's
+power-on effect (the `esp32.power_on` block above), played at true
+power-on while the OS boots. The daemon goes straight to the rules when it
+connects.
 
 ### Rules
 
@@ -334,6 +377,7 @@ root (the systemd unit does).
 | `fire` | per-LED candle flicker | `speed` (1.0), `min_heat` (0.25) |
 | `load` | CPU/GPU bars growing from center | `smoothing_seconds` (0.5), `center_color` (00ff00), `edge_color` (ff0000) |
 | `rainbow` | scrolling hue cycle | `cycles_per_second` (0.625) |
+| `shutdown` | power-down sequence (boot in reverse): pulse, then darkness collapses to center; reports finished | `duration_seconds` (1.5), `color` (0028ff), `flash_color` (ffffff) |
 | `steam_download` | Steam download bar, green pulse at 100 | `color` (00a0ff), `done_color` (00ff40), `smoothing_seconds` (0.4) |
 | `twinkle` | sparks fading over a base color | `color` (ffffff), `base_color` (000020), `sparks_per_second` (6), `fade_seconds` (1.0) |
 
@@ -343,8 +387,15 @@ then the defaults above.
 
 ### Adding an effect
 
-Drop a new file in `effects/` — every `effects/*.cpp` is compiled in
+Drop a new file in one of two folders — both are compiled into the daemon
 automatically:
+
+- **`effects/standalone/`** — pure animation, no host data. Also linked
+  into the firmware, so it can be a receiver power-on/shutdown effect.
+  Render against `Strip&` (it's `WS2812Serial` on the host, the receiver's
+  driver on the ESP32).
+- **`effects/host/`** — needs live host data (sensors, Steam, …). Daemon
+  only; can't run on the receiver.
 
 ```cpp
 #include "effect.hpp"
@@ -353,10 +404,13 @@ class MyEffect : public Effect
 {
 public:
     void init(const EffectConfig& cfg, int leds) override { ... }
-    void render(WS2812Serial& strip, float t) override { ... }
+    void render(Strip& strip, float t) override { ... }
     int frameDelayMs() const override { return 16; }   // optional
     bool finished() const override { return false; }   // optional
 };
 
 REGISTER_EFFECT("my_effect", MyEffect)
 ```
+
+Use `Strip&` (not `WS2812Serial&`) for a standalone effect so it compiles
+for the firmware too; host-only effects may use either.

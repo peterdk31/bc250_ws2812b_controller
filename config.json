@@ -20,10 +20,19 @@
         "nct6686"
     ],
     "hold_seconds": 10,
-    "startup": {
-        "effect": "boot",
-        "settings": {
-            "duration_seconds": 5
+    "esp32": {
+        "power_on": {
+            "effect": "boot",
+            "settings": {
+                "duration_seconds": 5
+            }
+        },
+        "shutdown": {
+            "effect": "shutdown",
+            "settings": {
+                "color": "0028ff",
+                "duration_seconds": 1.5
+            }
         }
     },
     "rules": [

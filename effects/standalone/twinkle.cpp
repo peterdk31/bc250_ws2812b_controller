@@ -31,7 +31,7 @@ public:
         spawnAcc = 0.0f;
     }
 
-    void render(WS2812Serial& strip, float) override
+    void render(Strip& strip, float) override
     {
         float dt = frameDelayMs() / 1000.0f;
         float decay = expf(-dt / fade);

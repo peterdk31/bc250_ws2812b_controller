@@ -20,7 +20,7 @@ public:
         speed = cfg.getFloat("pulses_per_second", 2.0f);
     }
 
-    void render(WS2812Serial& strip, float t) override
+    void render(Strip& strip, float t) override
     {
         float pulse = 0.5f + 0.5f * sinf(t * speed * 2.0f * (float)M_PI);
 

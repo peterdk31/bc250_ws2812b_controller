@@ -25,7 +25,7 @@ public:
         }
     }
 
-    void render(WS2812Serial& strip, float) override
+    void render(Strip& strip, float) override
     {
         float step = 0.06f * speed;
 

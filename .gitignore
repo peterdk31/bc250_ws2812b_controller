@@ -6,6 +6,9 @@
 # Arduino build output (arduino-cli --export-binaries / local build dirs)
 esp32_receiver/build/
 
+# shared host/firmware sources mirrored into the sketch by `make receiver`
+esp32_receiver/src/
+
 # Editor / IDE
 .idea/
 .vscode/

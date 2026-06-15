@@ -3,8 +3,80 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <utility>
+#include <stdint.h>
+#include <stdlib.h>
+
+// Effects render against `Strip`, a thin pixel sink (setPixel/size), and
+// read tuning through `EffectConfig`. Both have two backends so the same
+// effect source compiles on the host and on the ESP32 receiver:
+//   host  -> Strip is WS2812Serial, EffectConfig reads the JSON config
+//   ESP32 -> Strip is Esp32Strip,   EffectConfig just echoes defaults
+// (the receiver has no JSON; strip-level brightness/white balance are
+// baked into Esp32Strip at flash time). Define ESP32_BUILD for the latter.
+
+#ifdef ESP32_BUILD
+
+#include "esp32_strip.hpp"
+using Strip = Esp32Strip;
+
+// the receiver has no JSON parser: an effect's settings arrive as flat
+// key=value string pairs (decoded from a CMD_CONFIG frame, see
+// protocol.hpp). A default-constructed config has none, so every getter
+// returns its default — that's the cold-start case before the host has
+// pushed any config.
+class EffectConfig
+{
+public:
+    using Settings = std::vector<std::pair<std::string, std::string>>;
+
+    EffectConfig() = default;
+    explicit EffectConfig(const Settings& settings) : settings(&settings) {}
+
+    std::string get(const std::string& key, const std::string& def = "") const
+    {
+        if (settings)
+            for (auto& kv : *settings)
+                if (kv.first == key)
+                    return kv.second;
+
+        return def;
+    }
+
+    int getInt(const std::string& key, int def = 0) const
+    {
+        std::string v = get(key);
+        return v.empty() ? def : atoi(v.c_str());
+    }
+
+    float getFloat(const std::string& key, float def = 0.0f) const
+    {
+        std::string v = get(key);
+        return v.empty() ? def : (float)atof(v.c_str());
+    }
+
+    // "RRGGBB" or "#RRGGBB" as 0xRRGGBB
+    uint32_t getColor(const std::string& key, uint32_t def) const
+    {
+        std::string v = get(key);
+        if (v.empty())
+            return def;
+
+        if (v[0] == '#')
+            v.erase(0, 1);
+
+        return (uint32_t)strtoul(v.c_str(), nullptr, 16);
+    }
+
+private:
+    const Settings* settings = nullptr;
+};
+
+#else
+
 #include "config_loader.hpp"
 #include "ws2812_serial.hpp"
+using Strip = WS2812Serial;
 
 // config view for one effect activation: the triggering rule's
 // "settings" object, falling back to top-level keys for config shared
@@ -61,6 +133,8 @@ private:
     const json::Value* overrides;
 };
 
+#endif
+
 class Effect
 {
 public:
@@ -74,10 +148,11 @@ public:
     }
 
     // fill the current frame; t is seconds since this effect became active
-    virtual void render(WS2812Serial& strip, float t) = 0;
+    virtual void render(Strip& strip, float t) = 0;
 
-    // an effect may declare itself complete; the daemon uses this to
-    // end the startup one-shot before the rule engine takes over
+    // an effect may declare itself complete; the receiver uses this to
+    // end a one-shot power-on effect (handing off to the idle) and to
+    // stop the shutdown effect
     virtual bool finished() const { return false; }
 
     // delay between frames

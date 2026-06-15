@@ -9,7 +9,7 @@ public:
         speed = cfg.getFloat("cycles_per_second", 0.625f);
     }
 
-    void render(WS2812Serial& strip, float t) override
+    void render(Strip& strip, float t) override
     {
         float offset = t * speed;
 

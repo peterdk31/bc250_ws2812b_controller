@@ -1,8 +1,28 @@
 #include <Freenove_WS2812_Lib_for_ESP32.h>
 #include <Preferences.h>
 
+// shared with the host (copied into src/ by `make receiver`): the wire
+// protocol, the color LUT, and the actual effect code so the receiver's
+// standalone animations are the same effects the daemon runs, not a
+// hand-kept copy. ESP32_BUILD (set by the Makefile) selects the
+// receiver-side Strip/EffectConfig backends inside effect.hpp.
+#include "src/protocol.hpp"
+#include "src/effect.hpp"
+
 #define CHANNEL 0
 #define MAX_LEDS 2048
+
+// cold-start defaults for the power-on and shutdown effects, used until
+// the daemon pushes the configured ones (the config.json "esp32" block)
+// over serial, which the receiver then remembers in NVS. So a fresh,
+// never-driven board shows these; after the first daemon run it uses the
+// configured effects. Any effects/standalone/* name works
+#ifndef DEFAULT_POWER_ON_EFFECT
+#define DEFAULT_POWER_ON_EFFECT "boot"
+#endif
+#ifndef DEFAULT_SHUTDOWN_EFFECT
+#define DEFAULT_SHUTDOWN_EFFECT "shutdown"
+#endif
 
 // boot-time baud; `make flash` overrides this with serial.baud from
 // the host config. The receiver re-hunts (below) when traffic doesn't
@@ -31,22 +51,9 @@
 #define DEFAULT_LED_PIN 13
 #endif
 
-// the host applies gamma, white balance and brightness before sending,
-// so the standalone animation must do the same or it would blast
-// full-power LEDs into a room tuned for strip.brightness. `make flash`
-// overrides brightness and white balance with the host config's values
-#ifndef STRIP_BRIGHTNESS
-#define STRIP_BRIGHTNESS 0.2f
-#endif
-#define STRIP_GAMMA 2.2f
-
-// per-channel linear gain as 0xRRGGBB; 0xFFFFFF disables. Mirrors
-// strip.white_balance so the standalone breathe is tinted like the
-// daemon's frames (see ws2812_serial.hpp). Single gamma here is fine:
-// the breathe is one fixed amber, not a gradient
-#ifndef STRIP_WHITE_BALANCE
-#define STRIP_WHITE_BALANCE 0xFFFFFF
-#endif
+// the strip-level correction (brightness/white balance/gamma) the host
+// applies before sending lives in esp32_strip.hpp now, shared with the
+// daemon and baked in by `make flash`.
 
 // when bytes keep arriving but never form a valid frame, the host is
 // probably talking at another rate: step through the candidates (the
@@ -70,13 +77,23 @@ uint8_t currentPin = 13;
 uint8_t *frameBuffer = nullptr;
 size_t frameBufferSize = 0;
 
-// the OS takes a while to start the daemon, so between power-on and
-// the first valid frame the receiver breathes on its own (the host's
-// idle warm amber) instead of sitting dark. Never resumes after host
-// loss — a host that stops after having talked means shutdown or
-// crash, where dark is the right answer
+// the OS takes a while to start the daemon, so between power-on and the
+// first valid frame the receiver runs an effect on its own (the configured
+// power-on slot, or DEFAULT_POWER_ON_EFFECT) instead of sitting dark. The
+// same machinery plays the shutdown effect after the host sends a shutdown
+// command and exits.
 bool hostSeen = false;
-unsigned long lastBreathMs = 0;
+
+// the standalone animation currently playing (power-on or shutdown), the
+// shared color LUT it renders through, and its timing. `shuttingDown`
+// marks the post-host shutdown effect; `standaloneDone` latches dark once
+// shutdown finishes, until a host frame takes over again.
+ColorLut standaloneLut;
+std::unique_ptr<Effect> standalone;
+unsigned long standaloneStartMs = 0;
+unsigned long lastStandaloneMs = 0;
+bool shuttingDown = false;
+bool standaloneDone = false;
 
 unsigned long lastFrameMs = 0;
 unsigned long lastHuntMs = 0;
@@ -149,30 +166,144 @@ void blankStrip()
     strip->show();
 }
 
-// the same curve the host's lut applies (ws2812_serial.hpp): gamma,
-// then the per-channel white-balance gain and brightness, so the
-// standalone breathe matches what the daemon will render later
-uint8_t shade(uint8_t c, float v, float gain)
+// one configured slot: which effect, and its settings as key=value pairs
+struct SlotConfig
 {
-    return (uint8_t)(powf(c * v / 255.0f, STRIP_GAMMA)
-                     * gain * STRIP_BRIGHTNESS * 255.0f + 0.5f);
+    std::string effect;
+    EffectConfig::Settings settings;
+};
+
+// parse a slot string (effect name on the first line, then key=value
+// lines — see protocol.hpp). A blank/missing effect line falls back to
+// the given default
+SlotConfig parseSlot(const std::string& s, const char* fallback)
+{
+    SlotConfig c;
+    size_t start = 0;
+    bool firstLine = true;
+
+    while (start <= s.size())
+    {
+        size_t nl = s.find('\n', start);
+        std::string line =
+            s.substr(start, nl == std::string::npos ? std::string::npos
+                                                    : nl - start);
+
+        if (firstLine)
+        {
+            c.effect = line;
+            firstLine = false;
+        }
+        else if (!line.empty())
+        {
+            size_t eq = line.find('=');
+            if (eq != std::string::npos)
+                c.settings.emplace_back(line.substr(0, eq),
+                                        line.substr(eq + 1));
+        }
+
+        if (nl == std::string::npos)
+            break;
+        start = nl + 1;
+    }
+
+    if (c.effect.empty())
+        c.effect = fallback;
+
+    return c;
 }
 
-// the host's idle "breathe" effect: warm amber, 5 s sine, 5% floor
-void renderBreath(unsigned long now)
+// the slot the daemon stored in NVS (key "po" or "sd"), or the cold-start
+// default if the host hasn't pushed config yet
+SlotConfig loadSlot(const char* key, const char* fallback)
 {
-    float t = now / 1000.0f;
-    float breath = 0.5f - 0.5f * cosf(t * 2.0f * PI / 5.0f);
-    float v = 0.05f + 0.95f * breath;
+    return parseSlot(prefs.getString(key, "").c_str(), fallback);
+}
 
-    uint8_t r = shade(255, v, ((STRIP_WHITE_BALANCE >> 16) & 0xFF) / 255.0f);
-    uint8_t g = shade(120, v, ((STRIP_WHITE_BALANCE >> 8)  & 0xFF) / 255.0f);
-    uint8_t b = shade(24,  v, ( STRIP_WHITE_BALANCE        & 0xFF) / 255.0f);
+// begin a standalone effect, rendered through the shared LUT with the
+// given settings. The settings only need to outlive init(), which copies
+// what the effect needs, so a caller can pass a temporary
+void startStandalone(const SlotConfig& slot, unsigned long now)
+{
+    standalone = createEffect(slot.effect);
+    standaloneStartMs = now;
+    lastStandaloneMs = 0; // render the first frame immediately
 
-    for (uint16_t i = 0; i < currentCount; i++)
-        strip->setLedColorData(i, r, g, b);
+    if (standalone)
+        standalone->init(EffectConfig(slot.settings), currentCount);
+}
 
+// advance the standalone effect one frame if its frame delay has elapsed,
+// then handle completion: the power-on effect hands off to a breathing
+// idle, while the shutdown effect leaves the strip dark
+void tickStandalone(unsigned long now)
+{
+    if (!standalone || !strip)
+        return;
+
+    if (lastStandaloneMs != 0 &&
+        now - lastStandaloneMs < (unsigned long)standalone->frameDelayMs())
+        return;
+
+    lastStandaloneMs = now;
+
+    Esp32Strip sink(strip, currentCount, standaloneLut);
+    sink.beginFrame();
+    standalone->render(sink, (now - standaloneStartMs) / 1000.0f);
     strip->show();
+
+    if (!standalone->finished())
+        return;
+
+    if (shuttingDown)
+    {
+        blankStrip();
+        standalone.reset();
+        standaloneDone = true; // stay dark until a host frame takes over
+    }
+    else
+    {
+        // a finite power-on effect (e.g. boot) has played once; settle
+        // into the breathing idle until the host connects. A looping
+        // power-on effect never gets here
+        SlotConfig idle;
+        idle.effect = "breathe";
+        startStandalone(idle, now);
+    }
+}
+
+// a validated command frame from the host
+void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
+{
+    if (cmd == proto::CMD_SHUTDOWN)
+    {
+        if (standaloneDone)
+            return;
+
+        // the host has sent this and exited; play the configured shutdown
+        // effect (remembered in NVS) to completion, then stay dark.
+        // hostSeen stops the power-on path from ever resuming
+        hostSeen = true;
+        shuttingDown = true;
+        startStandalone(loadSlot("sd", DEFAULT_SHUTDOWN_EFFECT), millis());
+    }
+    else if (cmd == proto::CMD_CONFIG)
+    {
+        // payload: power-on slot string '\0' shutdown slot string '\0'.
+        // terminate defensively so a malformed payload can't run off the
+        // buffer, then remember both for the next power-on and shutdown
+        if (len < frameBufferSize)
+            frameBuffer[len] = 0;
+
+        const char* po = (const char*)payload;
+        uint16_t poLen = 0;
+        while (poLen < len && payload[poLen])
+            poLen++;
+        const char* sd = (poLen < len) ? (const char*)payload + poLen + 1 : "";
+
+        prefs.putString("po", po);
+        prefs.putString("sd", sd);
+    }
 }
 
 void setup()
@@ -199,7 +330,14 @@ void setup()
     frameBufferSize = MAX_LEDS * 3;
     frameBuffer = (uint8_t *)malloc(frameBufferSize);
 
-    // bring the strip up immediately for the power-on breathe; the
+    // the standalone animations render through the same correction the
+    // host bakes into its frames, so they match (values from the flash
+    // config; see esp32_strip.hpp)
+    standaloneLut.setGamma(STRIP_GAMMA);
+    standaloneLut.setWhiteBalance(STRIP_WHITE_BALANCE);
+    standaloneLut.setBrightness(STRIP_BRIGHTNESS);
+
+    // bring the strip up immediately for the power-on animation; the
     // first host frame re-inits if the geometry changed meanwhile
     uint16_t bootCount = savedCount ? savedCount : DEFAULT_LED_COUNT;
 
@@ -213,7 +351,7 @@ void loop()
     {
         bytesSinceValid++;
 
-        if (Serial.read() != 0xAA)
+        if (Serial.read() != proto::SYNC0)
             continue;
 
         uint8_t sync;
@@ -221,7 +359,43 @@ void loop()
         if (!readExact(&sync, 1))
             break;
 
-        if (sync != 0x55)
+        // command frame: cmd, a little-endian length, the payload, then a
+        // checksum over all of those (see protocol.hpp)
+        if (sync == proto::CMD_SYNC)
+        {
+            uint8_t hdr[3]; // cmd, len_lo, len_hi
+
+            if (!readExact(hdr, 3))
+                break;
+
+            uint8_t cmd = hdr[0];
+            uint16_t len = hdr[1] | (hdr[2] << 8);
+
+            // a bogus length (noise) would stall readExact; drop and resync
+            if (len > frameBufferSize)
+                continue;
+
+            if (len && !readExact(frameBuffer, len))
+                break;
+
+            uint8_t checksum;
+
+            if (!readExact(&checksum, 1))
+                break;
+
+            uint8_t expected = cmd ^ hdr[1] ^ hdr[2];
+            for (uint16_t i = 0; i < len; i++)
+                expected ^= frameBuffer[i];
+
+            if (checksum != expected)
+                continue;
+
+            bytesSinceValid = 0;
+            handleCommand(cmd, frameBuffer, len);
+            continue;
+        }
+
+        if (sync != proto::SYNC1)
             continue;
 
         uint8_t header[3];
@@ -291,6 +465,13 @@ void loop()
         blanked = false;
         hostSeen = true;
 
+        // the host is (back) in control: drop any standalone animation
+        // and clear the shutdown latch so a stop/start resumes cleanly
+        shuttingDown = false;
+        standaloneDone = false;
+        if (standalone)
+            standalone.reset();
+
         // a checksummed frame proves this rate works; writes happen
         // only when something actually changed, so NVS wear is one
         // write per baud change or reflash
@@ -314,9 +495,11 @@ void loop()
 
     unsigned long now = millis();
 
-    // only after the host has talked once: before that the power-on
-    // breathe owns the strip and there is nothing stale to blank
-    if (hostSeen && strip && !blanked &&
+    // only after the host has talked once, and only when no standalone
+    // animation owns the strip: a silent host that never sent a shutdown
+    // command (a crash/unplug) still goes dark on the timeout. The
+    // shutdown effect drives its own blank, so don't pre-empt it
+    if (hostSeen && strip && !blanked && !shuttingDown && !standaloneDone &&
         now - lastFrameMs > HOST_TIMEOUT_MS)
     {
         blankStrip();
@@ -326,7 +509,10 @@ void loop()
     unsigned long sinceGood =
         now - (lastHuntMs > lastFrameMs ? lastHuntMs : lastFrameMs);
 
-    if (bytesSinceValid >= HUNT_MIN_BYTES &&
+    // don't hunt for a baud once the host has intentionally gone (shutdown):
+    // there's nothing to lock onto and we'd disturb the animation
+    if (!shuttingDown && !standaloneDone &&
+        bytesSinceValid >= HUNT_MIN_BYTES &&
         sinceGood > HUNT_AFTER_MS)
     {
         baudIdx = (baudIdx + 1) % NUM_BAUDS;
@@ -340,9 +526,13 @@ void loop()
         lastHuntMs = now;
     }
 
-    if (!hostSeen && strip && now - lastBreathMs >= 33)
+    // standalone animations own the strip before the host's first frame
+    // (power-on) and during a shutdown after its last
+    if (((!hostSeen) || shuttingDown) && !standaloneDone && strip)
     {
-        lastBreathMs = now;
-        renderBreath(now);
+        if (!standalone && !hostSeen)
+            startStandalone(loadSlot("po", DEFAULT_POWER_ON_EFFECT), now);
+
+        tickStandalone(now);
     }
 }

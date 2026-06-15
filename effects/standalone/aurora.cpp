@@ -18,7 +18,7 @@ public:
         hueMax = cfg.getFloat("hue_max", 0.85f);
     }
 
-    void render(WS2812Serial& strip, float t) override
+    void render(Strip& strip, float t) override
     {
         for (int i = 0; i < strip.size(); i++)
         {

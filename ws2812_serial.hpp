@@ -11,6 +11,8 @@
 #include <math.h>
 #include <vector>
 #include "config_loader.hpp"
+#include "color_lut.hpp"
+#include "protocol.hpp"
 
 class WS2812Serial
 {
@@ -88,10 +90,6 @@ public:
 
         leds = 0;
         pin = 0;
-        brightness = 1.0f;
-        gamma[0] = gamma[1] = gamma[2] = 2.2f;
-        wb[0] = wb[1] = wb[2] = 1.0f;
-        rebuildLut();
     }
 
     WS2812Serial(const WS2812Serial&) = delete;
@@ -102,11 +100,8 @@ public:
           buf(std::move(other.buf)),
           leds(other.leds),
           pin(other.pin),
-          brightness(other.brightness)
+          lut(other.lut)
     {
-        memcpy(gamma, other.gamma, sizeof gamma);
-        memcpy(wb, other.wb, sizeof wb);
-        memcpy(lut, other.lut, sizeof lut);
         other.fd = -1;
     }
 
@@ -126,41 +121,12 @@ public:
         pin = p;
     }
 
-    void setBrightness(float b)
-    {
-        if (b < 0) b = 0;
-        if (b > 1) b = 1;
-        brightness = b;
-        rebuildLut();
-    }
-
     // WS2812 PWM is linear in light output, but effect colors are
-    // perceptual; 1.0 disables correction
-    void setGamma(float g) { setGamma(g, g, g); }
-
-    // a per-channel gamma reshapes one channel's midtones without
-    // touching its endpoints, which corrects a tint that only appears
-    // at some brightness levels (e.g. dim whites drifting blue) — the
-    // axis a single white_balance gain can't reach
-    void setGamma(float r, float g, float b)
-    {
-        gamma[0] = r > 0 ? r : 1.0f;
-        gamma[1] = g > 0 ? g : 1.0f;
-        gamma[2] = b > 0 ? b : 1.0f;
-        rebuildLut();
-    }
-
-    // per-channel linear gain from an RRGGBB "white": the channel the
-    // filter passes too strongly sits below 0xFF to pull it down. A
-    // linear, level-independent scale, so the balance holds from dim
-    // to full brightness (unlike correcting in the color values)
-    void setWhiteBalance(uint32_t rgb)
-    {
-        wb[0] = ((rgb >> 16) & 0xFF) / 255.0f;
-        wb[1] = ((rgb >> 8) & 0xFF) / 255.0f;
-        wb[2] = (rgb & 0xFF) / 255.0f;
-        rebuildLut();
-    }
+    // perceptual; see color_lut.hpp for how these three stack
+    void setBrightness(float b) { lut.setBrightness(b); }
+    void setGamma(float g) { lut.setGamma(g); }
+    void setGamma(float r, float g, float b) { lut.setGamma(r, g, b); }
+    void setWhiteBalance(uint32_t rgb) { lut.setWhiteBalance(rgb); }
 
     void beginFrame()
     {
@@ -180,9 +146,9 @@ public:
 
         int p = 5 + i * 3;
 
-        buf[p++] = lut[0][r];
-        buf[p++] = lut[1][g];
-        buf[p]   = lut[2][b];
+        buf[p++] = lut.map(0, r);
+        buf[p++] = lut.map(1, g);
+        buf[p]   = lut.map(2, b);
     }
 
     bool show()
@@ -219,6 +185,54 @@ public:
     }
 
     int size() const { return leds; }
+
+    float getBrightness() const { return lut.brightness(); }
+
+    // out-of-band command to the receiver (see protocol.hpp): a
+    // length-prefixed, checksummed frame the pixel-frame parser skips
+    // over. Blocks until the bytes are on the wire (tcdrain) so a caller
+    // can send one and exit immediately
+    bool sendCommand(uint8_t cmd, const uint8_t* payload = nullptr,
+                     uint16_t len = 0)
+    {
+        std::vector<uint8_t> frame;
+        frame.reserve(6 + len);
+
+        frame.push_back(proto::SYNC0);
+        frame.push_back(proto::CMD_SYNC);
+        frame.push_back(cmd);
+        frame.push_back((uint8_t)(len & 0xFF));
+        frame.push_back((uint8_t)(len >> 8));
+
+        uint8_t sum = cmd ^ (uint8_t)(len & 0xFF) ^ (uint8_t)(len >> 8);
+
+        for (uint16_t i = 0; i < len; i++)
+        {
+            frame.push_back(payload[i]);
+            sum ^= payload[i];
+        }
+
+        frame.push_back(sum);
+
+        size_t sent = 0;
+
+        while (sent < frame.size())
+        {
+            ssize_t n = write(fd, frame.data() + sent, frame.size() - sent);
+
+            if (n < 0)
+            {
+                if (errno == EINTR) continue;
+                perror("serial write");
+                return false;
+            }
+
+            sent += n;
+        }
+
+        tcdrain(fd);
+        return true;
+    }
 
 private:
     static speed_t baudToSpeed(int baud)
@@ -273,24 +287,11 @@ private:
         r = g = b = (n >= 1) ? v[0] : 2.2f;
     }
 
-    // gamma first, then the white-balance gain and brightness scale
-    // linear light; per channel so balance is independent of level
-    void rebuildLut()
-    {
-        for (int c = 0; c < 3; c++)
-            for (int v = 0; v < 256; v++)
-                lut[c][v] = (uint8_t)(powf(v / 255.0f, gamma[c])
-                                      * wb[c] * brightness * 255.0f + 0.5f);
-    }
-
 private:
     int fd;
     std::vector<uint8_t> buf;
 
     int leds;
     int pin;
-    float brightness;
-    float gamma[3];
-    float wb[3];
-    uint8_t lut[3][256];
+    ColorLut lut;
 };

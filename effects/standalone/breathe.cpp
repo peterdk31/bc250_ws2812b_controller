@@ -24,7 +24,7 @@ public:
         minLevel = cfg.getFloat("min_brightness", 0.05f);
     }
 
-    void render(WS2812Serial& strip, float t) override
+    void render(Strip& strip, float t) override
     {
         float breath = 0.5f - 0.5f * cosf(t * 2.0f * (float)M_PI / period);
         float v = minLevel + (1.0f - minLevel) * breath;

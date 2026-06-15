@@ -21,10 +21,12 @@ WHITE_BALANCE ?= $(or $(shell sed -n 's/.*"white_balance"[[:space:]]*:[[:space:]
 FQBN ?= esp32:esp32:esp32
 ESP32_URL = https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
-HEADERS = ws2812_serial.hpp config_loader.hpp json.hpp effect.hpp condition.hpp color.hpp hwmon.hpp steam.hpp rules.hpp
+HEADERS = ws2812_serial.hpp config_loader.hpp json.hpp effect.hpp condition.hpp color.hpp hwmon.hpp steam.hpp rules.hpp color_lut.hpp protocol.hpp
 
-# every effects/*.cpp is compiled in and registers itself
-EFFECT_SRCS = $(wildcard effects/*.cpp)
+# every effect compiles in and registers itself. effects/standalone/*
+# are host-independent (also linked into the firmware); effects/host/*
+# need live host data (sensors, Steam) and only run on the daemon
+EFFECT_SRCS = $(wildcard effects/standalone/*.cpp effects/host/*.cpp)
 SRCS = main.cpp effect_registry.cpp conditions.cpp rules.cpp $(EFFECT_SRCS)
 
 all: led
@@ -48,6 +50,7 @@ uninstall:
 
 clean:
 	rm -f led
+	rm -rf $(RECEIVER_SRC)
 
 # add the user to the serial port's group (uucp on Arch-likes, dialout
 # on Debian/Fedora) so running `led` and arduino-cli uploads work
@@ -87,11 +90,26 @@ receiver-toolchain:
 	 arduino-cli lib list 2>/dev/null | grep -q 'Freenove WS2812' || \
 		$(MAKE) receiver-setup
 
+# the receiver shares the wire protocol, the color LUT and the actual
+# effect code with the daemon, so its standalone animations ARE the
+# host's effects rather than a hand-kept copy. arduino-cli compiles a
+# sketch's src/ subdir, so mirror the shared files in there; it's
+# regenerated each build and gitignored. Every effects/standalone/* is
+# linked in, so any of them can be the configured power-on/shutdown effect
+RECEIVER_SRC = esp32_receiver/src
+SHARED = protocol.hpp color_lut.hpp esp32_strip.hpp effect.hpp \
+         effect_registry.cpp $(wildcard effects/standalone/*.cpp)
+
+receiver-shared:
+	mkdir -p $(RECEIVER_SRC)
+	cp $(SHARED) $(RECEIVER_SRC)/
+
 # compiler.cpp.extra_flags rather than build.extra_flags: the latter
-# would replace the esp32 platform's own extra flags
-receiver: receiver-toolchain
+# would replace the esp32 platform's own extra flags. ESP32_BUILD selects
+# the receiver-side Strip/EffectConfig backends in effect.hpp
+receiver: receiver-toolchain receiver-shared
 	arduino-cli compile --fqbn $(FQBN) \
-		--build-property "compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS) -DDEFAULT_LED_COUNT=$(LEDS) -DDEFAULT_LED_PIN=$(LED_PIN) -DSTRIP_BRIGHTNESS=$(BRIGHTNESS) -DSTRIP_WHITE_BALANCE=0x$(WHITE_BALANCE)" \
+		--build-property "compiler.cpp.extra_flags=-DESP32_BUILD -DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS) -DDEFAULT_LED_COUNT=$(LEDS) -DDEFAULT_LED_PIN=$(LED_PIN) -DSTRIP_BRIGHTNESS=$(BRIGHTNESS) -DSTRIP_WHITE_BALANCE=0x$(WHITE_BALANCE)" \
 		esp32_receiver
 
 # the daemon holds the serial port open, so stop it around the upload
@@ -105,4 +123,4 @@ flash: receiver
 	[ $$active = 1 ] && systemctl start led-controller; \
 	exit $$rc
 
-.PHONY: all install uninstall clean serial-perms receiver-setup receiver-toolchain receiver flash
+.PHONY: all install uninstall clean serial-perms receiver-setup receiver-toolchain receiver-shared receiver flash

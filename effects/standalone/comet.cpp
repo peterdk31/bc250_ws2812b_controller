@@ -32,7 +32,7 @@ public:
             ? powf(0.05f, dt * headPxPerSec / tail) : 1.0f;
     }
 
-    void render(WS2812Serial& strip, float t) override
+    void render(Strip& strip, float t) override
     {
         int leds = strip.size();
 

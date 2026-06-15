@@ -39,7 +39,7 @@ public:
         lastT = 0.0f;
     }
 
-    void render(WS2812Serial& strip, float t) override
+    void render(Strip& strip, float t) override
     {
         elapsed = t;
 
@@ -74,7 +74,7 @@ private:
     static constexpr float SWEEP_END = 0.18f;
     static constexpr float FILL_END = 0.88f;
 
-    void sweep(WS2812Serial& strip, float p)
+    void sweep(Strip& strip, float p)
     {
         int leds = strip.size();
 
@@ -92,7 +92,7 @@ private:
         strip.setPixel(head, fr, fg, fb);
     }
 
-    void fill(WS2812Serial& strip, float p, float t)
+    void fill(Strip& strip, float p, float t)
     {
         int leds = strip.size();
 
@@ -127,7 +127,7 @@ private:
         }
     }
 
-    void flash(WS2812Serial& strip, float p)
+    void flash(Strip& strip, float p)
     {
         const float RISE = 0.25f;
 
@@ -158,7 +158,7 @@ private:
             strip.setPixel(i, rr, gg, bb);
     }
 
-    void paintTrail(WS2812Serial& strip)
+    void paintTrail(Strip& strip)
     {
         for (int i = 0; i < (int)trail.size(); i++)
             strip.setPixel(i, (uint8_t)(r * trail[i]),
