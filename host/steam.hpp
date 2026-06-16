@@ -20,8 +20,9 @@ namespace steam
 
 struct Downloads
 {
-    bool active = false;   // a download is running and bytes are moving
-    float percent = 0.0f;  // 0..100 across all active downloads
+    bool active = false;    // a download is running and bytes are moving
+    bool finished = false;  // just completed -- effect celebrates, then ends
+    float percent = 0.0f;   // 0..100 across all active downloads
 };
 
 // `"key"  "value"` out of a VDF/ACF line; false for any other shape
@@ -227,8 +228,10 @@ inline unsigned long long netRxBytes()
 // state of all Steam downloads, rescanned at most every 1 s so the
 // 0.5 s rule tick and the per-frame effect share one scan's cost.
 //
-// percent comes from the manifests' top-level byte totals, but "is it
-// downloading right now" comes from two signals that must agree:
+// percent integrates live network throughput onto the manifest's byte
+// totals (the manifest alone barely moves mid-download -- see the
+// percent block below), while "is it downloading right now" comes from
+// two signals that must agree:
 //   1. the in-flight chunk bytes under steamapps/downloading/ moving --
 //      Steam rewrites the manifests only every minute or so (far too
 //      coarse to tell a deliberate pause from a slow patch) while the
@@ -247,6 +250,9 @@ inline const Downloads& downloads()
     static double lastNetMoved = -1e9;
     static unsigned long long lastCache = 0;
     static unsigned long long lastRx = 0;
+    static double estDone = 0.0;  // bytes pulled, integrated from netRxBytes
+    static bool finishHandled = false;  // finish hold already armed this run
+    static double finishedUntil = -1e9; // celebration holds until this time
 
     timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -296,10 +302,15 @@ inline const Downloads& downloads()
     // (interface down/up) reads as zero rather than a huge false spike.
     unsigned long long rx = netRxBytes();
 
+    // bytes off the wire since the last scan -- both the throughput test
+    // below and the increment that advances the live percent further down.
+    // Guard rx > lastRx so a counter reset (interface down/up) reads as
+    // zero rather than a huge false delta.
+    double rxDelta = (lastRx != 0 && rx > lastRx) ? (double)(rx - lastRx) : 0.0;
+
     const double kRxFloor = 50.0 * 1024.0; // bytes/sec
 
-    if (lastRx != 0 && scanDt > 0 && rx > lastRx &&
-        (double)(rx - lastRx) / scanDt > kRxFloor)
+    if (scanDt > 0 && rxDelta / scanDt > kRxFloor)
         lastNetMoved = now;
 
     lastRx = rx;
@@ -316,21 +327,72 @@ inline const Downloads& downloads()
 
     if (!moving)
     {
-        // nothing landing -> paused / finished / gone: inactive, no bar
+        // Activity stopped. If the estimate had essentially reached 100%
+        // first, every byte is down and only the local commit remains --
+        // treat that as finished and hold a brief active+finished window so
+        // the effect can play its completion blink before the rule engine
+        // switches away. The network goes quiet the instant a download
+        // completes, so without this hold the bar would just vanish at
+        // 100% and the done color would never show. Stopping below 100% is
+        // a pause/cancel: go straight to inactive.
+        const double kFinishHold = 5.0; // seconds to celebrate
+
+        if (!finishHandled && cached.percent >= 99.0f)
+        {
+            finishedUntil = now + kFinishHold;
+            finishHandled = true;
+        }
+
+        if (now < finishedUntil)
+        {
+            cached.active = true;
+            cached.finished = true;
+            cached.percent = 100.0f;
+            return cached;
+        }
+
+        // paused / finished-and-celebrated / gone: inactive, no bar. Drop
+        // the integrated estimate and re-arm the finish for the next run
         cached = Downloads{};
+        estDone = 0.0;
+        finishHandled = false;
+        finishedUntil = -1e9;
         return cached;
     }
 
-    // percent comes from the manifest's byte counts: BytesDownloaded and
-    // BytesToDownload are the same (compressed) units, so the ratio is
-    // accurate. The download cache can't serve here -- its on-disk size
-    // doesn't track the compressed download 1:1 and overshoots the total
-    // near the end -- so it's used only to sense activity above. Steam
-    // rewrites the manifest only periodically, so this advances in steps
-    // (the effect's glide softens them); a momentary empty scan
-    // (total == 0 mid-rewrite) keeps the last percent rather than blanking.
+    // still moving: clear any finished state and re-arm so a later
+    // completion fires its own hold
+    cached.finished = false;
+    finishHandled = false;
+    finishedUntil = -1e9;
+
+    // Live percent by integrating network throughput. Steam writes the
+    // manifest's BytesDownloaded only rarely during a transfer -- often
+    // not once across a multi-GB download, flushing it on pause/stop --
+    // so done/total alone leaves the bar frozen until you pause. Instead
+    // accumulate the bytes coming off the wire: they're in the same
+    // compressed units as the manifest counters (plus a little protocol
+    // overhead), so each scan's rxDelta is roughly what the manifest would
+    // have added had it been flushed.
+    //
+    // The estimate only ever climbs: the manifest's done is a floor that
+    // ratchets it up whenever Steam does flush (and seeds the baseline for
+    // a resumed download), and it's capped at total so wire overhead can't
+    // push past 100% -- it may reach 100% a little early and sit there
+    // until the download finishes and the effect dismisses, which reads
+    // better than a bar that jumps backward.
+    estDone += rxDelta;
+
+    if ((double)done > estDone)
+        estDone = (double)done;
+
     if (total > 0)
-        cached.percent = 100.0f * done / total;
+    {
+        if (estDone > (double)total)
+            estDone = (double)total;
+
+        cached.percent = 100.0f * (float)(estDone / (double)total);
+    }
 
     cached.active = true;
     return cached;
@@ -435,7 +497,9 @@ inline void dumpStatus(FILE* out)
             manifests, counted);
 
     if (total > 0)
-        fprintf(out, "totals: %llu / %llu bytes -> %.1f%% (manifest percent)\n",
+        fprintf(out, "totals: %llu / %llu bytes -> %.1f%% (manifest baseline; "
+                     "the live bar advances this with network RX between the "
+                     "manifest's infrequent flushes)\n",
                 done, total, 100.0 * done / total);
     else
         fprintf(out, "totals: nothing counted -> percent 0\n");

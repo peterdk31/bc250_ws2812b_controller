@@ -10,14 +10,17 @@
 // and once per flow_period a brightness crest sweeps start -> head and
 // then pauses, so the bar reads as a clean fill with a live pulse
 // rather than a constant ripple. The unfilled remainder glows as a
-// faint track to show the mode is active, and at 100 the whole bar
-// pulses in done_color until the rule deactivates. While the download
-// is inactive (paused, gone) the last value holds — the rule engine
+// faint track to show the mode is active. When the download completes
+// (steam.hpp reports finished) the whole strip pulses done_color as a
+// brief celebration before the rule deactivates. While the download is
+// inactive (paused, gone) the last value holds — the rule engine
 // switches away shortly after
 //
 // config:
 //   color              bar RRGGBB (default 00a0ff)
-//   done_color         finished pulse RRGGBB (default 00ff40)
+//   done_color         completion-pulse RRGGBB (default 00ff66)
+//   done_pulse_period  completion pulse period in seconds (default 1.4;
+//                      0 holds done_color steady instead of pulsing)
 //   smoothing_seconds  glide time constant (default 0.4)
 //   flow_period        seconds between flow pulses (default 2.5)
 //   flow_depth         how far the bar dims away from the sweeping
@@ -33,11 +36,13 @@ public:
         g = (color >> 8) & 0xFF;
         b = color & 0xFF;
 
-        uint32_t done = cfg.getColor("done_color", 0x00ff40);
+        uint32_t done = cfg.getColor("done_color", 0x00ff66);
 
         dr = (done >> 16) & 0xFF;
         dg = (done >> 8) & 0xFF;
         db = done & 0xFF;
+
+        donePulse = cfg.getFloat("done_pulse_period", 1.4f);
 
         smoothing = cfg.getFloat("smoothing_seconds", 0.4f);
 
@@ -70,10 +75,18 @@ public:
 
         int leds = strip.size();
 
-        if (shown >= 0.995f)
+        if (dl.finished)
         {
-            // done: slow full-strip pulse until the rule deactivates
-            float v = 0.6f + 0.4f * sinf(t * 2.0f * (float)M_PI / 1.5f);
+            // download complete: pulse the whole strip in done_color as a
+            // brief celebration. steam.hpp holds the rule active for a few
+            // seconds past completion so this actually shows (the network
+            // goes quiet the instant a download ends). A deep, smooth pulse
+            // distinct from the bar's flow sweep clearly reads as "done!";
+            // done_pulse_period == 0 holds done_color steady instead.
+            float phase = donePulse > 0
+                        ? sinf(t * 2.0f * (float)M_PI / donePulse)
+                        : 1.0f;
+            float v = 0.55f + 0.45f * phase; // pulses 0.10 .. 1.0
 
             for (int i = 0; i < leds; i++)
                 strip.setPixel(i, (uint8_t)(dr * v), (uint8_t)(dg * v),
@@ -142,7 +155,8 @@ public:
 
 private:
     uint8_t r = 0, g = 160, b = 255;
-    uint8_t dr = 0, dg = 255, db = 64;
+    uint8_t dr = 0, dg = 255, db = 102;
+    float donePulse = 1.4f;
     float smoothing = 0.4f;
     float flowPeriod = 2.5f;
     float flowDepth = 0.35f;
