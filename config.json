@@ -23,14 +23,14 @@
         "power_on": {
             "effect": "boot",
             "settings": {
-                "duration_seconds": 5
+                "duration_seconds": 6
             }
         },
         "shutdown": {
             "effect": "shutdown",
             "settings": {
                 "color": "0028ff",
-                "duration_seconds": 1.5
+                "duration_seconds": 2.0
             }
         }
     },
