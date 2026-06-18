@@ -287,12 +287,14 @@ inline const Downloads& downloads()
     const double kNetGrace = 10.0; // seconds of net-quiet before inactive
     bool active = present && (now - lastNetMoved < kNetGrace);
 
-    // each part of a multi-part install carries its own BytesToDownload;
-    // when Steam moves to the next part the total changes, so restart the
-    // bar at 0 (seeded from this part's already-downloaded floor, e.g. a
-    // resumed part) and let it fill again. If Steam instead reports one
-    // grand total for the whole job, the total stays put and the bar just
-    // tracks overall progress -- either way the math below is the same.
+    // a game install is really several apps downloaded one after another
+    // -- the game, Steamworks Common Redistributables (appid 228980),
+    // Proton, shader pre-cache -- each its own appmanifest. Steam runs them
+    // sequentially, so total tracks whichever is running now; when it
+    // finishes and the next starts, total changes, so restart the bar at 0
+    // (seeded from this part's already-downloaded floor, e.g. a resumed
+    // part) and let it fill again. Per-depot progress WITHIN one app isn't
+    // exposed anywhere outside Steam, so per-app is as granular as it gets.
     if (present && total != lastTarget)
     {
         lastTarget = total;
