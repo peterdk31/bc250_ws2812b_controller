@@ -45,6 +45,10 @@ public:
 
         strip.setBrightness(brightness);
 
+        // flip the logical-to-physical mapping when the strip is wired
+        // so LED 0 is at the far end; effects stay direction-agnostic
+        strip.setReversed(cfg.getBool("strip.reverse", false));
+
         return strip;
     }
 
@@ -100,6 +104,7 @@ public:
           buf(std::move(other.buf)),
           leds(other.leds),
           pin(other.pin),
+          reversed(other.reversed),
           lut(other.lut)
     {
         other.fd = -1;
@@ -120,6 +125,8 @@ public:
     {
         pin = p;
     }
+
+    void setReversed(bool r) { reversed = r; }
 
     // WS2812 PWM is linear in light output, but effect colors are
     // perceptual; see color_lut.hpp for how these three stack
@@ -143,6 +150,8 @@ public:
     void setPixel(int i, uint8_t r, uint8_t g, uint8_t b)
     {
         if (i < 0 || i >= leds) return;
+
+        if (reversed) i = leds - 1 - i;
 
         int p = 5 + i * 3;
 
@@ -313,5 +322,6 @@ private:
 
     int leds;
     int pin;
+    bool reversed = false;
     ColorLut lut;
 };

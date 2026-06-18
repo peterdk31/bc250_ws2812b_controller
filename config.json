@@ -7,6 +7,7 @@
     "strip": {
         "leds": 58,
         "pin": 13,
+        "reverse": false,
         "brightness": 0.2,
         "gamma": "2.2",
         "white_balance": "b4ffff"
@@ -24,14 +25,14 @@
         "power_on": {
             "effect": "boot",
             "settings": {
-                "duration_seconds": 6
+                "intro_seconds": 3
             }
         },
         "shutdown": {
             "effect": "shutdown",
             "settings": {
                 "color": "0028ff",
-                "duration_seconds": 2.0
+                "duration_seconds": 5.0
             }
         }
     },

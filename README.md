@@ -109,11 +109,13 @@ effect on the next daemon (re)start: the **shutdown** slot applies that
 same session, while the **power-on** slot — which runs before the daemon
 is up — applies on the *next* power cycle. A fresh, never-driven board
 uses the firmware's built-in defaults (`boot` / `shutdown`) until the
-daemon first pushes config. A power-on effect that loops (e.g. `rainbow`)
-runs until the host takes over; a finite one (e.g. `boot`) plays once and
-then holds its last frame (`boot` ends dark) until the host takes over —
-for a boot-then-idle look, set the power-on slot to a looping effect or
-compose one effect that does both. A shutdown effect plays to completion —
+daemon first pushes config. A power-on effect that loops (e.g. `rainbow`
+or `boot`) runs until the host takes over; a finite one plays once and then
+holds its last frame until the host takes over. `boot` plays its CRT-style
+power-on intro and then holds a living glow indefinitely, so the strip
+stays lit through limine and the rest of the OS boot rather than going dark
+on a timer — for a boot-then-idle look, set the power-on slot to a looping
+effect or compose one effect that does both. A shutdown effect plays to completion —
 or, if you pick a looping one, until the strip loses power.
 
 Strip geometry comes from the last valid frame (remembered in NVS),
@@ -223,6 +225,8 @@ into one per-channel lookup table, so they cost nothing per frame. See
     "strip": {
         "leds": 58,
         "pin": 13,              // ESP32 GPIO driving the strip
+        "reverse": false,       // flip direction so LED 0 is at the far
+                                // end of the strip
         "brightness": 0.2,      // 0..1, scales linear light output
         "gamma": "2.2",         // perceptual correction; 1.0 disables.
                                 // three space-separated values ("2.0 2.2
@@ -389,7 +393,7 @@ root (the systemd unit does).
 |---|---|---|
 | `alarm` | whole-strip pulse | `color` (ff0000), `pulses_per_second` (2) |
 | `aurora` | slow drifting color curtains | `speed` (1.0), `hue_min` (0.30), `hue_max` (0.85) |
-| `boot` | power-on: a CRT-style ignition — a white-hot point flares at the center, whips outward into a scan line, resolves to the body color, holds, then fades to black; reports finished | `duration_seconds` (6), `color` (0028ff), `flash_color` (ffffff) |
+| `boot` | power-on: a CRT-style ignition — a white-hot point flares at the center, whips outward into a scan line, resolves to the body color, then holds a living glow indefinitely (never finishes, never fades); the host's first frame ends it | `intro_seconds` (3), `color` (0028ff), `flash_color` (ffffff) |
 | `breathe` | single color on a slow sine | `color` (ff7818), `period_seconds` (5), `min_brightness` (0.05) |
 | `comet` | Larson scanner with fading tail | `color` (ff0000), `sweeps_per_second` (0.5), `tail_pixels` (8) |
 | `cpu_temp` | temperature bar graph along a hue ramp, soft tip + slow brightness shimmer | `temp_min` (40), `temp_max` (85), `cold_color` (0000ff), `hot_color` (ff0000), `speed` (1.0), `sensors` |
@@ -397,7 +401,7 @@ root (the systemd unit does).
 | `fire` | per-LED candle flicker with a slow flowing drift | `speed` (1.0), `min_heat` (0.25) |
 | `load` | CPU/GPU bars from center, aurora-washed with soft tips + shimmer | `smoothing_seconds` (0.7), `hue_min` (0.45), `hue_max` (0.83), `speed` (1.0) |
 | `rainbow` | scrolling hue cycle | `cycles_per_second` (0.625) |
-| `shutdown` | power-down sequence: a CRT-style collapse — the picture snaps inward to a white-hot point, then fades out with phosphor persistence; reports finished | `duration_seconds` (2.0), `color` (0028ff), `flash_color` (ffffff) |
+| `shutdown` | power-down sequence: a CRT-style collapse — the picture snaps inward to a white-hot point, then fades out slowly with phosphor persistence so it lingers through the OS power-down; reports finished | `duration_seconds` (5.0), `color` (0028ff), `flash_color` (ffffff) |
 | `steam_download` | Steam download bar, slow breath + flow sweep, green pulse at 100 | `color` (00a0ff), `done_color` (00ff40), `smoothing_seconds` (0.4), `flow_period` (2.5), `flow_depth` (0.35), `shimmer_depth` (0.15), `shimmer_period` (6.0) |
 | `twinkle` | sparks fading over a base color | `color` (ffffff), `base_color` (000020), `sparks_per_second` (6), `fade_seconds` (1.0) |
 

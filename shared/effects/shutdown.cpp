@@ -6,15 +6,18 @@
 // into a single white-hot point at the center (the electron beam focusing
 // down — the shrinking core gets brighter, not dimmer), which blooms and
 // then fades out slowly with phosphor persistence. The collapse is a quick
-// snap; the dying glow is what makes it linger. It reports finished once
-// the glow is gone so a player can stop and leave the strip dark.
+// snap; the long dying glow is what makes it linger, so the strip keeps
+// glowing through the OS power-down instead of blanking seconds early. It
+// reports finished once the glow is gone so a player can stop and leave the
+// strip dark — unlike boot, this one must end (the strip is independently
+// powered and outlives the host, so it can't hold a glow forever).
 //
 // self-contained (it doesn't depend on whatever was on the strip), so it
 // looks the same whether the daemon plays it on SIGTERM or the receiver
 // plays it on a shutdown command after the host has gone.
 //
 // config:
-//   duration_seconds  total run time (default 2.0)
+//   duration_seconds  total run time (default 5.0)
 //   color             body color RRGGBB while the picture is up (default 0028ff)
 //   flash_color       hot collapse / phosphor-dot color RRGGBB (default ffffff)
 class Shutdown : public Effect
@@ -22,8 +25,8 @@ class Shutdown : public Effect
 public:
     void init(const EffectConfig& cfg, int) override
     {
-        duration = cfg.getFloat("duration_seconds", 2.0f);
-        if (duration <= 0) duration = 2.0f;
+        duration = cfg.getFloat("duration_seconds", 5.0f);
+        if (duration <= 0) duration = 5.0f;
 
         uint32_t color = cfg.getColor("color", 0x0028ff);
         r = (color >> 16) & 0xFF;
@@ -98,12 +101,14 @@ public:
     bool finished() const override { return elapsed >= duration; }
 
 private:
-    static constexpr float COLLAPSE_END = 0.22f; // fraction spent collapsing
-    static constexpr float DECAY = 3.0f;         // phosphor fade steepness
+    // collapse stays a fixed-feeling ~0.5s snap at the default duration; the
+    // rest of the (now longer) run is the lingering phosphor afterglow
+    static constexpr float COLLAPSE_END = 0.1f; // fraction spent collapsing
+    static constexpr float DECAY = 3.0f;        // phosphor fade steepness
 
     uint8_t r = 0, g = 40, b = 255;
     uint8_t fr = 255, fg = 255, fb = 255;
-    float duration = 2.0f;
+    float duration = 5.0f;
     float elapsed = 0.0f;
 };
 

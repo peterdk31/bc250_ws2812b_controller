@@ -3,23 +3,32 @@
 
 // CRT-style power-on, the mirror of the shutdown effect: a white-hot point
 // ignites at the center, whips outward into a full-width scan line, the
-// line resolves from white into the body color, the strip then holds —
-// alive with a faint drifting scanline shimmer — and finally fades to
-// black, handing a dark strip to the rule engine. Reports finished so the
-// playlist advances. The ignition and scan are fast; the lit hold is what
-// makes it last.
+// line resolves from white into the body color, and the strip then holds —
+// alive with a faint drifting scanline shimmer — for as long as it runs.
+//
+// Unlike shutdown, boot never reports finished and never fades to black: it
+// owns the strip from power-on until the host daemon connects and sends its
+// first frame (which the receiver uses to drop the standalone effect and
+// take over). That handoff happens only after limine and the OS have come
+// up — seconds after power-on, and not on any fixed schedule — so a timed
+// effect would either end early and leave the strip dark through the rest
+// of the boot, or overrun. Holding the living glow until the daemon arrives
+// sidesteps the timing entirely.
 //
 // config:
-//   duration_seconds  total run time (default 6)
-//   color             body color RRGGBB (default 0028ff)
-//   flash_color       hot ignition / scan-line color RRGGBB (default ffffff)
+//   intro_seconds  time for the ignite + scan + resolve power-on (default 3)
+//   color          body color RRGGBB (default 0028ff)
+//   flash_color    hot ignition / scan-line color RRGGBB (default ffffff)
 class Boot : public Effect
 {
 public:
     void init(const EffectConfig& cfg, int) override
     {
-        duration = cfg.getFloat("duration_seconds", 6.0f);
-        if (duration <= 0) duration = 6.0f;
+        // accept the legacy duration_seconds as a fallback so existing
+        // configs keep a sensible intro pace
+        intro = cfg.getFloat("intro_seconds",
+                             cfg.getFloat("duration_seconds", 3.0f));
+        if (intro <= 0) intro = 3.0f;
 
         uint32_t color = cfg.getColor("color", 0x0028ff);
         r = (color >> 16) & 0xFF;
@@ -34,13 +43,13 @@ public:
 
     void render(Strip& strip, float t) override
     {
-        elapsed = t;
-
         int leds = strip.size();
         float center = (leds - 1) * 0.5f;
         float maxRadius = center + 1.0f; // +1 so the end pixels reach full
 
-        float u = t / duration;
+        // progress through the one-shot intro; clamps at 1 and stays there,
+        // dropping into the steady living-glow hold below
+        float u = t / intro;
         if (u > 1) u = 1;
 
         for (int i = 0; i < leds; i++)
@@ -95,41 +104,33 @@ public:
         }
         else
         {
-            // hold the body color, kept alive by a faint drifting
-            // scanline, then fade to black over the tail
-            float dim = 1.0f;
-            if (u >= FADE_START)
-            {
-                // quadratic fade: quick drop, soft landing into black
-                float k = 1.0f - (u - FADE_START) / (1.0f - FADE_START);
-                dim = k * k;
-            }
-
+            // steady state: hold the body color, kept alive by a faint
+            // drifting scanline, for as long as the effect runs. No fade —
+            // the host's first frame is what ends this (see class comment)
             for (int i = 0; i < leds; i++)
             {
                 float wave = 0.88f + 0.12f * sinf(i * 0.6f - t * 5.0f);
-                float v = dim * wave;
 
-                strip.setPixel(i, (uint8_t)(r * v), (uint8_t)(g * v),
-                               (uint8_t)(b * v));
+                strip.setPixel(i, (uint8_t)(r * wave), (uint8_t)(g * wave),
+                               (uint8_t)(b * wave));
             }
         }
     }
 
-    bool finished() const override { return elapsed >= duration; }
+    // never finishes: the receiver hands off to the host's first frame
+    // whenever the daemon comes up, so boot just holds until then
+    bool finished() const override { return false; }
 
 private:
-    // phase boundaries as fractions of the total duration: ignite, scan
-    // out, resolve to body color, then a long lit hold ending in a fade
-    static constexpr float IGNITE_END = 0.04f;
-    static constexpr float SCAN_END = 0.12f;
-    static constexpr float RESOLVE_END = 0.22f;
-    static constexpr float FADE_START = 0.82f;
+    // phase boundaries as fractions of the intro: ignite, scan out, resolve
+    // to body color, then the open-ended living-glow hold
+    static constexpr float IGNITE_END = 0.18f;
+    static constexpr float SCAN_END = 0.55f;
+    static constexpr float RESOLVE_END = 1.0f;
 
     uint8_t r = 0, g = 40, b = 255;
     uint8_t fr = 255, fg = 255, fb = 255;
-    float duration = 6.0f;
-    float elapsed = 0.0f;
+    float intro = 3.0f;
 };
 
 REGISTER_EFFECT("boot", Boot)

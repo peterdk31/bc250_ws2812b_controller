@@ -76,6 +76,12 @@ public:
         return v ? json::toFloat(*v, def) : def;
     }
 
+    bool getBool(const std::string& path, bool def = false) const
+    {
+        const json::Value* v = find(path);
+        return v ? json::toBool(*v, def) : def;
+    }
+
 private:
     json::Value rootValue;
 };

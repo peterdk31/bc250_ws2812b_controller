@@ -96,6 +96,15 @@ inline float toFloat(const Value& v, float def = 0.0f)
     return def;
 }
 
+inline bool toBool(const Value& v, bool def = false)
+{
+    if (v.type == Value::Type::Bool)   return v.boolean;
+    if (v.type == Value::Type::Number) return v.number != 0;
+    if (v.type == Value::Type::String)
+        return v.text == "true" || v.text == "1";
+    return def;
+}
+
 // deep equality; object member order doesn't matter
 inline bool equal(const Value& a, const Value& b)
 {
