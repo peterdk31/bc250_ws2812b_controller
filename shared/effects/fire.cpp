@@ -1,11 +1,15 @@
+#include <math.h>
 #include <stdlib.h>
 #include "effect.hpp"
 
-// per-LED candle flicker: each pixel's heat does a random walk and is
-// mapped through a black → red → orange palette
+// per-LED candle flicker softened toward the smooth, flowing look of the
+// aurora/comet effects: each pixel's heat still does a random walk, but
+// the walk is gentler and a slow drift field flows along the strip on top
+// of it, so the flames breathe and travel instead of twitching in place.
+// Heat is mapped through a black → red → orange palette.
 //
 // config:
-//   speed     flicker rate multiplier (default 1.0)
+//   speed     flicker / drift rate multiplier (default 1.0)
 //   min_heat  palette floor 0..1 so pixels never go fully dark (default 0.25)
 class Fire : public Effect
 {
@@ -25,9 +29,9 @@ public:
         }
     }
 
-    void render(Strip& strip, float) override
+    void render(Strip& strip, float t) override
     {
-        float step = 0.06f * speed;
+        float step = 0.04f * speed;
 
         for (int i = 0; i < strip.size(); i++)
         {
@@ -40,8 +44,18 @@ public:
             else
                 target[i] = randf();
 
+            float x = (float)i / strip.size();
+
+            // slow aurora-style drift flowing along the strip, two sines
+            // at unrelated frequencies, blended lightly with the per-pixel
+            // flicker so the flames flow rather than only twitch
+            float flow = 0.5f + 0.25f * sinf(x * 5.1f + t * 0.31f * speed)
+                              + 0.25f * sinf(x * 2.3f - t * 0.17f * speed);
+
+            float warmth = 0.7f * heat[i] + 0.3f * flow;
+
             uint8_t r, g, b;
-            heat_to_rgb(minHeat + (1.0f - minHeat) * heat[i], r, g, b);
+            heat_to_rgb(minHeat + (1.0f - minHeat) * warmth, r, g, b);
             strip.setPixel(i, r, g, b);
         }
     }

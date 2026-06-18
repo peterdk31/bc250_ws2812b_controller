@@ -188,6 +188,26 @@ public:
 
     float getBrightness() const { return lut.brightness(); }
 
+    // host-side frame compositing (crossfading between effects): grab the
+    // current frame's already-mapped pixel bytes, or write a blended set
+    // back. The header and trailing checksum are left alone, so a
+    // snapshot/writePixels pair composites cleanly between beginFrame()
+    // and show(). Values are post-LUT, so blending them is a plain linear
+    // dissolve in the same space the strip displays.
+    std::vector<uint8_t> snapshotPixels() const
+    {
+        if (leds <= 0) return {};
+        return std::vector<uint8_t>(buf.begin() + 5, buf.begin() + 5 + leds * 3);
+    }
+
+    void writePixels(const std::vector<uint8_t>& px)
+    {
+        if (leds <= 0 || (int)px.size() < leds * 3) return;
+
+        for (int i = 0; i < leds * 3; i++)
+            buf[5 + i] = px[i];
+    }
+
     // out-of-band command to the receiver (see protocol.hpp): a
     // length-prefixed, checksummed frame the pixel-frame parser skips
     // over. Blocks until the bytes are on the wire (tcdrain) so a caller

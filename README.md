@@ -328,6 +328,13 @@ last switch, so a rule that flaps doesn't strobe the strip. `"hold"`
 defaults to 0 — switch immediately — so only a rule that wants
 debouncing sets its own.
 
+A switch isn't abrupt: the daemon crossfades from the last displayed
+frame into the new effect over the top-level `transition_seconds`
+(default 0.6; set 0 for an instant cut). The dissolve runs on
+wall-clock, so it's the same length whatever the effects' frame rates,
+and the very first effect after startup appears immediately (nothing to
+fade from).
+
 ### Conditions
 
 | syntax | true when |
@@ -385,13 +392,13 @@ root (the systemd unit does).
 | `boot` | power-on: a CRT-style ignition — a white-hot point flares at the center, whips outward into a scan line, resolves to the body color, holds, then fades to black; reports finished | `duration_seconds` (6), `color` (0028ff), `flash_color` (ffffff) |
 | `breathe` | single color on a slow sine | `color` (ff7818), `period_seconds` (5), `min_brightness` (0.05) |
 | `comet` | Larson scanner with fading tail | `color` (ff0000), `sweeps_per_second` (0.5), `tail_pixels` (8) |
-| `cpu_temp` | temperature bar graph along a hue ramp | `temp_min` (40), `temp_max` (85), `cold_color` (0000ff), `hot_color` (ff0000), `sensors` |
+| `cpu_temp` | temperature bar graph along a hue ramp, soft tip + slow brightness shimmer | `temp_min` (40), `temp_max` (85), `cold_color` (0000ff), `hot_color` (ff0000), `speed` (1.0), `sensors` |
 | `cycle` | rotates through a list of other effects, switching to a random next one each period | `period_seconds` (30), `effects` (list of `{effect, settings, seconds}`) |
-| `fire` | per-LED candle flicker | `speed` (1.0), `min_heat` (0.25) |
-| `load` | CPU/GPU bars growing from center | `smoothing_seconds` (0.5), `center_color` (00ff00), `edge_color` (ff0000) |
+| `fire` | per-LED candle flicker with a slow flowing drift | `speed` (1.0), `min_heat` (0.25) |
+| `load` | CPU/GPU bars from center, aurora-washed with soft tips + shimmer | `smoothing_seconds` (0.7), `hue_min` (0.45), `hue_max` (0.83), `speed` (1.0) |
 | `rainbow` | scrolling hue cycle | `cycles_per_second` (0.625) |
 | `shutdown` | power-down sequence: a CRT-style collapse — the picture snaps inward to a white-hot point, then fades out with phosphor persistence; reports finished | `duration_seconds` (2.0), `color` (0028ff), `flash_color` (ffffff) |
-| `steam_download` | Steam download bar, green pulse at 100 | `color` (00a0ff), `done_color` (00ff40), `smoothing_seconds` (0.4) |
+| `steam_download` | Steam download bar, slow breath + flow sweep, green pulse at 100 | `color` (00a0ff), `done_color` (00ff40), `smoothing_seconds` (0.4), `flow_period` (2.5), `flow_depth` (0.35), `shimmer_depth` (0.15), `shimmer_period` (6.0) |
 | `twinkle` | sparks fading over a base color | `color` (ffffff), `base_color` (000020), `sparks_per_second` (6), `fade_seconds` (1.0) |
 
 Colors are `"RRGGBB"` or `"#RRGGBB"`. Effect settings come from the

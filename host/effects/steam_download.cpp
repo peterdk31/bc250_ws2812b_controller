@@ -9,8 +9,11 @@
 // LEDs sit steady at full, the head LED holds the fractional percent,
 // and once per flow_period a brightness crest sweeps start -> head and
 // then pauses, so the bar reads as a clean fill with a live pulse
-// rather than a constant ripple. The unfilled remainder glows as a
-// faint track to show the mode is active. When the download completes
+// rather than a constant ripple. Between sweeps the filled bar breathes
+// slowly (a shallow, uniform brightness rise and fall) so it is never
+// perfectly static, without the traveling shimmer that would blur the
+// percent. The unfilled remainder glows as a faint track to show the
+// mode is active. When the download completes
 // (steam.hpp reports finished) the whole strip pulses done_color as a
 // brief celebration before the rule deactivates. While the download is
 // inactive (paused, gone) the last value holds — the rule engine
@@ -25,6 +28,10 @@
 //   flow_period        seconds between flow pulses (default 2.5)
 //   flow_depth         how far the bar dims away from the sweeping
 //                      crest, 0..1 (default 0.35; 0 disables the flow)
+//   shimmer_depth      gentle whole-bar breathing between flow sweeps so
+//                      the fill is never fully static, 0..1 (default
+//                      0.15; 0 disables it)
+//   shimmer_period     breathing period in seconds (default 6.0)
 class SteamDownload : public Effect
 {
 public:
@@ -48,6 +55,9 @@ public:
 
         flowPeriod = cfg.getFloat("flow_period", 2.5f);
         flowDepth = cfg.getFloat("flow_depth", 0.35f);
+
+        shimmerDepth = cfg.getFloat("shimmer_depth", 0.15f);
+        shimmerPeriod = cfg.getFloat("shimmer_period", 6.0f);
 
         // seed from the live percentage rather than 0: while a game
         // downloads, proc:steam / cpu_load / gpu_load rules contend for
@@ -106,6 +116,18 @@ public:
         const float sweep_frac = 0.65f; // share of the period spent sweeping
         const float crest_width = 1.2f;  // crest half-width, in LEDs
 
+        // slow, shallow whole-bar breath: a uniform rise and fall on the
+        // filled pixels so the bar stays alive while it rests between flow
+        // sweeps. Uniform (not a traveling wave) so it never smears the
+        // percent the fill is meant to report.
+        float breath = 1.0f;
+
+        if (shimmerDepth > 0 && shimmerPeriod > 0)
+        {
+            float ph = 0.5f - 0.5f * cosf(t * 2.0f * (float)M_PI / shimmerPeriod);
+            breath = 1.0f - shimmerDepth * ph; // (1 - shimmerDepth) .. 1
+        }
+
         float env = 0.0f, crest = 0.0f;
 
         if (flowDepth > 0 && flowPeriod > 0)
@@ -135,6 +157,11 @@ public:
                 v *= 1.0f - env * flowDepth * (1.0f - bump);
             }
 
+            // breathe the filled bar (the floor track below is left
+            // steady so the bar's extent always reads)
+            if (i <= head)
+                v *= breath;
+
             // floor the unfilled track to a faint glow so the bar's
             // extent (and that the mode is active) still reads when the
             // download sits near 0%. This has to clear the host's
@@ -160,6 +187,8 @@ private:
     float smoothing = 0.4f;
     float flowPeriod = 2.5f;
     float flowDepth = 0.35f;
+    float shimmerDepth = 0.15f;
+    float shimmerPeriod = 6.0f;
     float target = 0.0f;
     float shown = 0.0f;
 };

@@ -11,6 +11,7 @@
         "gamma": "2.2",
         "white_balance": "b4ffff"
     },
+    "transition_seconds": 0.6,
     "sensors": [
         "k10temp:Tctl",
         "nct6686:CPU",
@@ -72,7 +73,10 @@
             "effect": "load",
             "hold": 0,
             "settings": {
-                "smoothing_seconds": 0.5
+                "smoothing_seconds": 0.7,
+                "hue_min": 0.45,
+                "hue_max": 0.83,
+                "speed": 1.0
             }
         },
         {

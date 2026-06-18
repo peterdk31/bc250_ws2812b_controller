@@ -148,6 +148,15 @@ int main(int argc, char** argv)
     const json::Value* activeSettings = nullptr;
     double effectStart = 0;
 
+    // crossfade state: when an effect is replaced we dissolve from the
+    // last displayed frame (frozen) into the new effect over fadeDur
+    // seconds, so switches glide instead of snapping. fadeDur == 0
+    // disables it. fadeFrom is empty when no fade is in flight.
+    const float fadeDur = cfg.getFloat("transition_seconds", 0.6f);
+    std::vector<uint8_t> lastShown; // bytes last pushed to the strip
+    std::vector<uint8_t> fadeFrom;  // outgoing frame held steady mid-fade
+    double fadeStart = 0;
+
     auto activate = [&](const std::string& name,
                         const json::Value* settings) -> bool
     {
@@ -163,13 +172,54 @@ int main(int argc, char** argv)
         active = name;
         activeSettings = settings;
         effectStart = now_seconds();
+
+        // begin a dissolve from whatever was last on the strip; skip it
+        // on the very first activation (nothing to fade from) or when
+        // disabled, so those appear immediately
+        if (fadeDur > 0 && !lastShown.empty())
+        {
+            fadeFrom = lastShown;
+            fadeStart = effectStart;
+        }
+        else
+        {
+            fadeFrom.clear();
+        }
+
         return true;
     };
 
     auto renderFrame = [&]() -> bool
     {
+        double now = now_seconds();
+
         strip.beginFrame();
-        effect->render(strip, (float)(now_seconds() - effectStart));
+        effect->render(strip, (float)(now - effectStart));
+
+        // mid-dissolve: blend the new effect's fresh frame over the held
+        // outgoing one. The dissolve runs on wall-clock so it is the same
+        // length regardless of the effect's frame rate.
+        std::vector<uint8_t> cur = strip.snapshotPixels();
+
+        if (!fadeFrom.empty() && fadeFrom.size() == cur.size()
+            && now - fadeStart < fadeDur)
+        {
+            float a = (float)((now - fadeStart) / fadeDur);
+
+            for (size_t i = 0; i < cur.size(); i++)
+            {
+                float v = fadeFrom[i] + ((int)cur[i] - (int)fadeFrom[i]) * a;
+                cur[i] = (uint8_t)(v + 0.5f);
+            }
+
+            strip.writePixels(cur);
+        }
+        else
+        {
+            fadeFrom.clear(); // dissolve done (or never started)
+        }
+
+        lastShown = std::move(cur);
 
         // exit on write failure so systemd restarts us and reopens the port
         if (!strip.show())
