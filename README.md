@@ -352,17 +352,27 @@ to switch back. (`/tmp` clears on reboot.)
 The `steam_dl` condition is true while Steam is actively downloading,
 and the `steam_download` effect turns the strip into the download's progress
 bar (the default config ships this rule). The daemon polls every Steam
-library's `appmanifest_*.acf` files — Steam rewrites them as chunks
-land — and shows percent of outstanding bytes across all active
-downloads. The head pixel is antialiased, so the bar resolves single
-percents even on short strips.
+library's `appmanifest_*.acf` files: a download is "in progress" while a
+manifest is marked actively updating (which holds across every part of a
+multi-part install), and "transferring right now" additionally requires
+real bytes arriving over the network — so a pause or the verify phase of
+a finished download (manifest still says "running", but nothing comes off
+the wire) drops the bar. `BytesDownloaded` in the manifest barely moves
+mid-download (Steam flushes it on pause/stop), so the live percent is
+driven by integrating network throughput onto the manifest's total; the
+bar restarts at 0 for each part as its `BytesToDownload` changes. The
+head pixel is antialiased, so the bar resolves single percents even on
+short strips.
 
 It finds Steam roots under `/home/*` and ostree's `/var/home/*`,
 follows extra libraries from `libraryfolders.vdf` (SD cards, second
 disks), ignores games whose update is pending but not started
-("update on next launch"), and hides the bar if a download stalls for
-2 minutes (Steam doesn't always set the paused flag). The strip pulses
-green while a finished download installs, then returns to normal.
+("update on next launch"), and hides the bar a few seconds after the
+network goes quiet (a pause or a finished download being verified). The
+percent is kept across brief inactivity, so the effect resuming after
+another effect borrows the strip picks up where it left off instead of
+snapping to 0. The strip pulses green while a finished download installs,
+then returns to normal.
 Reading other users' Steam directories relies on the daemon running as
 root (the systemd unit does).
 

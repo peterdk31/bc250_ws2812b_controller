@@ -160,38 +160,6 @@ inline void addManifest(const std::string& path,
     done += downloaded;
 }
 
-// recursively sum the regular-file bytes under a directory (0 if it
-// doesn't exist or can't be read). lstat, so symlinks aren't followed
-inline unsigned long long dirBytes(const std::string& path)
-{
-    DIR* dir = opendir(path.c_str());
-    if (!dir) return 0;
-
-    unsigned long long sum = 0;
-
-    while (dirent* e = readdir(dir))
-    {
-        if (e->d_name[0] == '.' &&
-            (e->d_name[1] == '\0' ||
-             (e->d_name[1] == '.' && e->d_name[2] == '\0')))
-            continue;
-
-        std::string child = path + "/" + e->d_name;
-        struct stat st;
-
-        if (lstat(child.c_str(), &st) != 0)
-            continue;
-
-        if (S_ISDIR(st.st_mode))
-            sum += dirBytes(child);
-        else if (S_ISREG(st.st_mode))
-            sum += (unsigned long long)st.st_size;
-    }
-
-    closedir(dir);
-    return sum;
-}
-
 // total bytes received across every interface except loopback, from
 // /proc/net/dev. Used to tell a live network download from disk-only
 // churn (Steam verifying/committing a finished download still rewrites
@@ -228,29 +196,36 @@ inline unsigned long long netRxBytes()
 // state of all Steam downloads, rescanned at most every 1 s so the
 // 0.5 s rule tick and the per-frame effect share one scan's cost.
 //
-// percent integrates live network throughput onto the manifest's byte
-// totals (the manifest alone barely moves mid-download -- see the
-// percent block below), while "is it downloading right now" comes from
-// two signals that must agree:
-//   1. the in-flight chunk bytes under steamapps/downloading/ moving --
-//      Steam rewrites the manifests only every minute or so (far too
-//      coarse to tell a deliberate pause from a slow patch) while the
-//      download cache grows continuously during a transfer and freezes
-//      the instant it's paused.
-//   2. real bytes arriving over the network (netRxBytes).
-// requiring both rejects the disk-only churn of a finished download
-// being verified/committed: the cache still moves but nothing comes off
-// the network, which used to flicker the bar on and off. A deliberate
-// pause clears signal 1; verification clears signal 2.
+// "is a download in progress" comes from the manifests: addManifest sums
+// BytesToDownload/BytesDownloaded only for manifests Steam marks as
+// actively updating (running, not paused, bytes outstanding), so total>0
+// means a transfer is underway. That manifest flag stays set across
+// EVERY part of a multi-part install, where the older download-cache test
+// went quiet between parts and dropped the effect on the early ones.
+//
+// "is it transferring right now" (cached.active, what steam_dl keys on)
+// adds a network check: real bytes arriving over the wire. That rejects a
+// deliberate pause and the disk-only churn of verifying a finished
+// download (the manifest may still read "running", but nothing comes off
+// the network). The window is wide enough that an ordinary dip between
+// parts doesn't flap the effect off.
+//
+// percent integrates network throughput onto the manifest's byte totals
+// (the manifest's BytesDownloaded barely moves mid-download -- Steam
+// flushes it on pause/stop -- see the percent block below). Each part
+// carries its own BytesToDownload; when it changes the bar restarts at 0
+// for the new part. The percent is held in cached across brief
+// inactivity, so an effect switching away and back resumes where it was
+// instead of snapping to 0.
 inline const Downloads& downloads()
 {
     static Downloads cached;
     static double lastScan = -1e9;
-    static double lastCacheMoved = -1e9;
     static double lastNetMoved = -1e9;
-    static unsigned long long lastCache = 0;
     static unsigned long long lastRx = 0;
     static double estDone = 0.0;  // bytes pulled, integrated from netRxBytes
+    static unsigned long long lastTarget = 0; // BytesToDownload we're tracking
+    static double idleSince = -1e9;     // when a running manifest last vanished
     static bool finishHandled = false;  // finish hold already armed this run
     static double finishedUntil = -1e9; // celebration holds until this time
 
@@ -264,137 +239,150 @@ inline const Downloads& downloads()
     double scanDt = now - lastScan;
     lastScan = now;
 
-    unsigned long long total = 0, done = 0, cache = 0;
+    unsigned long long total = 0, done = 0;
 
     for (const auto& lib : libraries())
     {
         DIR* dir = opendir(lib.c_str());
+        if (!dir) continue;
 
-        if (dir)
+        while (dirent* e = readdir(dir))
         {
-            while (dirent* e = readdir(dir))
-            {
-                size_t len = strlen(e->d_name);
+            size_t len = strlen(e->d_name);
 
-                if (strncmp(e->d_name, "appmanifest_", 12) != 0 ||
-                    len < 4 || strcmp(e->d_name + len - 4, ".acf") != 0)
-                    continue;
+            if (strncmp(e->d_name, "appmanifest_", 12) != 0 ||
+                len < 4 || strcmp(e->d_name + len - 4, ".acf") != 0)
+                continue;
 
-                addManifest(lib + "/" + e->d_name, total, done);
-            }
-
-            closedir(dir);
+            addManifest(lib + "/" + e->d_name, total, done);
         }
 
-        cache += dirBytes(lib + "/downloading");
+        closedir(dir);
     }
 
-    if (cache != lastCache)
-    {
-        lastCache = cache;
-        lastCacheMoved = now;
-    }
+    // addManifest only counts running, non-paused manifests with bytes
+    // outstanding, so total>0 is a stable "Steam is downloading something"
+    // that holds across every part of the job
+    bool present = total > 0;
 
     // network throughput is the second authority. A live download runs
     // megabytes/sec; idle background chatter and the disk-only churn of
-    // verifying a finished download sit far below this floor, so they
-    // don't count as movement. Guard rx > lastRx so a counter reset
-    // (interface down/up) reads as zero rather than a huge false spike.
+    // verifying a finished download sit far below this floor. Guard
+    // rx > lastRx so a counter reset (interface down/up) reads as zero
+    // rather than a huge false delta.
     unsigned long long rx = netRxBytes();
-
-    // bytes off the wire since the last scan -- both the throughput test
-    // below and the increment that advances the live percent further down.
-    // Guard rx > lastRx so a counter reset (interface down/up) reads as
-    // zero rather than a huge false delta.
     double rxDelta = (lastRx != 0 && rx > lastRx) ? (double)(rx - lastRx) : 0.0;
+    lastRx = rx;
 
     const double kRxFloor = 50.0 * 1024.0; // bytes/sec
 
     if (scanDt > 0 && rxDelta / scanDt > kRxFloor)
         lastNetMoved = now;
 
-    lastRx = rx;
+    // active = a manifest says a download is underway AND bytes are
+    // arriving. The window tolerates an ordinary dip between parts without
+    // flapping the effect off, yet a real pause or the verify phase
+    // (network goes silent) clears it within a few seconds -- long before
+    // Steam's minute-coarse paused flag would.
+    const double kNetGrace = 10.0; // seconds of net-quiet before inactive
+    bool active = present && (now - lastNetMoved < kNetGrace);
 
-    // active requires both authorities within the window: the download
-    // cache moving and real bytes arriving. With a 1 s scan a 2 s window
-    // tolerates a single dead tick (a brief blip) yet clears ~2 s after
-    // a real pause -- about the unpause latency. The cache, not the
-    // manifest's flicker-prone StateFlags, decides whether bytes are
-    // landing locally, so a stale empty manifest scan can't blank the
-    // bar; the network check then rejects the verify/commit phase, where
-    // the cache still churns but nothing comes off the wire.
-    bool moving = now - lastCacheMoved < 2.0 && now - lastNetMoved < 2.0;
-
-    if (!moving)
+    // each part of a multi-part install carries its own BytesToDownload;
+    // when Steam moves to the next part the total changes, so restart the
+    // bar at 0 (seeded from this part's already-downloaded floor, e.g. a
+    // resumed part) and let it fill again. If Steam instead reports one
+    // grand total for the whole job, the total stays put and the bar just
+    // tracks overall progress -- either way the math below is the same.
+    if (present && total != lastTarget)
     {
-        // Activity stopped. If the estimate had essentially reached 100%
-        // first, every byte is down and only the local commit remains --
-        // treat that as finished and hold a brief active+finished window so
-        // the effect can play its completion blink before the rule engine
-        // switches away. The network goes quiet the instant a download
-        // completes, so without this hold the bar would just vanish at
-        // 100% and the done color would never show. Stopping below 100% is
-        // a pause/cancel: go straight to inactive.
-        const double kFinishHold = 5.0; // seconds to celebrate
+        lastTarget = total;
+        estDone = (double)done;
+    }
 
-        if (!finishHandled && cached.percent >= 99.0f)
-        {
-            finishedUntil = now + kFinishHold;
-            finishHandled = true;
-        }
-
-        if (now < finishedUntil)
-        {
-            cached.active = true;
-            cached.finished = true;
-            cached.percent = 100.0f;
-            return cached;
-        }
-
-        // paused / finished-and-celebrated / gone: inactive, no bar. Drop
-        // the integrated estimate and re-arm the finish for the next run
-        cached = Downloads{};
-        estDone = 0.0;
+    if (active)
+    {
+        idleSince = -1e9;
         finishHandled = false;
         finishedUntil = -1e9;
+
+        // Live percent by integrating network throughput. Steam writes the
+        // manifest's BytesDownloaded only rarely during a transfer --
+        // often not once across a multi-GB part, flushing it on
+        // pause/stop -- so done/total alone leaves the bar frozen until you
+        // pause. Instead accumulate the bytes coming off the wire: they're
+        // in the same compressed units as the manifest counters (plus a
+        // little protocol overhead). The estimate only ever climbs: the
+        // manifest's done is a floor that ratchets it up whenever Steam
+        // does flush, and it's capped at total so wire overhead can't push
+        // past 100%.
+        estDone += rxDelta;
+
+        if ((double)done > estDone)
+            estDone = (double)done;
+
+        if (total > 0)
+        {
+            if (estDone > (double)total)
+                estDone = (double)total;
+
+            cached.percent = 100.0f * (float)(estDone / (double)total);
+        }
+
+        cached.active = true;
+        cached.finished = false;
         return cached;
     }
 
-    // still moving: clear any finished state and re-arm so a later
-    // completion fires its own hold
-    cached.finished = false;
-    finishHandled = false;
-    finishedUntil = -1e9;
+    // not transferring: pause / verify / finishing / gone / transient dip
+    if (idleSince < 0.0)
+        idleSince = now;
 
-    // Live percent by integrating network throughput. Steam writes the
-    // manifest's BytesDownloaded only rarely during a transfer -- often
-    // not once across a multi-GB download, flushing it on pause/stop --
-    // so done/total alone leaves the bar frozen until you pause. Instead
-    // accumulate the bytes coming off the wire: they're in the same
-    // compressed units as the manifest counters (plus a little protocol
-    // overhead), so each scan's rxDelta is roughly what the manifest would
-    // have added had it been flushed.
-    //
-    // The estimate only ever climbs: the manifest's done is a floor that
-    // ratchets it up whenever Steam does flush (and seeds the baseline for
-    // a resumed download), and it's capped at total so wire overhead can't
-    // push past 100% -- it may reach 100% a little early and sit there
-    // until the download finishes and the effect dismisses, which reads
-    // better than a bar that jumps backward.
-    estDone += rxDelta;
+    // a finish is when NO manifest is running any more (present==false)
+    // and the estimate had essentially reached 100%: every byte is down
+    // and only the local commit remains. Hold a brief active+finished
+    // window so the effect can play its completion blink before the rule
+    // engine switches away (the network goes quiet the instant a download
+    // ends). Gating on !present is what stops a part boundary -- where one
+    // part hits 100% but the next is still running -- from celebrating
+    // mid-job.
+    const double kFinishHold = 5.0; // seconds to celebrate
 
-    if ((double)done > estDone)
-        estDone = (double)done;
-
-    if (total > 0)
+    if (!finishHandled && !present && cached.percent >= 99.0f && lastTarget > 0)
     {
-        if (estDone > (double)total)
-            estDone = (double)total;
-
-        cached.percent = 100.0f * (float)(estDone / (double)total);
+        finishedUntil = now + kFinishHold;
+        finishHandled = true;
     }
 
-    cached.active = true;
+    if (now < finishedUntil)
+    {
+        cached.active = true;
+        cached.finished = true;
+        cached.percent = 100.0f;
+        return cached;
+    }
+
+    // forget the download once its celebration is over, or once no running
+    // manifest has been seen for long enough that a stale percent
+    // shouldn't bleed into the next one. A brief stall or a quick effect
+    // switch keeps the percent (present stays true, or we're inside the
+    // grace), so re-activating resumes smoothly instead of from 0 -- which
+    // is what made a download that briefly lost the effect snap back to 0%.
+    const double kResetGrace = 30.0; // seconds
+
+    if ((finishHandled && now >= finishedUntil) ||
+        (!present && now - idleSince > kResetGrace))
+    {
+        estDone = 0.0;
+        lastTarget = 0;
+        finishHandled = false;
+        finishedUntil = -1e9;
+        cached = Downloads{};
+        return cached;
+    }
+
+    // inactive but remembered: report not transferring, keep the percent
+    cached.active = false;
+    cached.finished = false;
     return cached;
 }
 
@@ -443,9 +431,14 @@ inline void dumpStatus(FILE* out)
             std::string name, key, val;
             char line[512];
 
-            // read only the top-level AppState keys (see addManifest):
-            // per-depot blocks repeat the byte counters and a flat read
-            // lands on a tiny leftover instead of the real total
+            // downloads() reads only the top-level (depth-1) AppState keys
+            // (per-depot blocks repeat the byte counters and a flat read
+            // lands on a tiny leftover instead of the real total). But the
+            // deeper per-depot BytesTo/Downloaded blocks are exactly what a
+            // future per-part bar would need, and they only exist while a
+            // download is live -- so dump them here too, with their depth,
+            // to capture the structure from a real multi-part download.
+            std::vector<std::string> deeper;
             int depth = 0;
 
             while (fgets(line, sizeof line, f))
@@ -456,15 +449,24 @@ inline void dumpStatus(FILE* out)
                 if (*p == '{') { depth++; continue; }
                 if (*p == '}') { depth--; continue; }
 
-                if (depth != 1 || !vdfPair(line, key, val)) continue;
+                if (!vdfPair(line, key, val)) continue;
 
-                if (key == "name") name = val;
-                else if (key == "StateFlags")
-                    flags = strtoul(val.c_str(), nullptr, 10);
-                else if (key == "BytesToDownload")
-                    toDownload = strtoull(val.c_str(), nullptr, 10);
-                else if (key == "BytesDownloaded")
-                    downloaded = strtoull(val.c_str(), nullptr, 10);
+                if (depth == 1)
+                {
+                    if (key == "name") name = val;
+                    else if (key == "StateFlags")
+                        flags = strtoul(val.c_str(), nullptr, 10);
+                    else if (key == "BytesToDownload")
+                        toDownload = strtoull(val.c_str(), nullptr, 10);
+                    else if (key == "BytesDownloaded")
+                        downloaded = strtoull(val.c_str(), nullptr, 10);
+                }
+                else if (depth > 1 &&
+                         (key == "BytesToDownload" || key == "BytesDownloaded"))
+                {
+                    deeper.push_back("depth " + std::to_string(depth) + " " +
+                                     key + "=" + val);
+                }
             }
 
             fclose(f);
@@ -476,6 +478,9 @@ inline void dumpStatus(FILE* out)
                          "BytesDownloaded=%llu -> %s\n",
                     e->d_name, name.c_str(), flags, toDownload, downloaded,
                     counts ? "COUNTS" : "ignored");
+
+            for (const auto& d : deeper)
+                fprintf(out, "      per-depot: %s\n", d.c_str());
 
             if (!counts)
             {
