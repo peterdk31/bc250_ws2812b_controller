@@ -66,7 +66,11 @@ public:
             }
             if (fill > 1.0f) fill = 1.0f;
 
-            float x = (float)i / leds;
+            // spatial coordinate for the wash/shimmer mirrored about the
+            // center (distance outward, 0..1), so both halves flow
+            // symmetrically rather than the pattern sweeping straight
+            // across the strip in one screen direction
+            float x = d;
 
             // aurora-style hue curtains: two sines at unrelated
             // frequencies drifting in opposite directions, so the wash
