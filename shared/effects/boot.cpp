@@ -1,10 +1,12 @@
 #include <math.h>
 #include "effect.hpp"
 
-// CRT-style power-on, the mirror of the shutdown effect: a white-hot point
-// ignites at the center, whips outward into a full-width scan line, the
-// line resolves from white into the body color, and the strip then holds —
-// alive with a faint drifting scanline shimmer — for as long as it runs.
+// CRT-style power-on, the exact mirror of the shutdown effect: where
+// shutdown collapses the full line inward to a single white-hot point, boot
+// runs it backwards — a white-hot point at the center whips outward into a
+// full-width scan line, the line resolves from white into the body color,
+// and the strip then holds, alive with a faint drifting scanline shimmer,
+// for as long as it runs.
 //
 // Unlike shutdown, boot never reports finished and never fades to black: it
 // owns the strip from power-on until the host daemon connects and sends its
@@ -16,9 +18,9 @@
 // sidesteps the timing entirely.
 //
 // config:
-//   intro_seconds  time for the ignite + scan + resolve power-on (default 3)
-//   color          body color RRGGBB (default 0028ff)
-//   flash_color    hot ignition / scan-line color RRGGBB (default ffffff)
+//   intro_seconds  time for the scan + resolve power-on (default 3)
+//   color          body color RRGGBB (default ffffff)
+//   flash_color    hot scan-line color RRGGBB (default ffffff)
 class Boot : public Effect
 {
 public:
@@ -30,7 +32,7 @@ public:
                              cfg.getFloat("duration_seconds", 3.0f));
         if (intro <= 0) intro = 3.0f;
 
-        uint32_t color = cfg.getColor("color", 0x0028ff);
+        uint32_t color = cfg.getColor("color", 0xffffff);
         r = (color >> 16) & 0xFF;
         g = (color >> 8) & 0xFF;
         b = color & 0xFF;
@@ -55,27 +57,12 @@ public:
         for (int i = 0; i < leds; i++)
             strip.setPixel(i, 0, 0, 0);
 
-        if (u < IGNITE_END)
+        if (u < SCAN_END)
         {
-            // a white-hot point flares up at the center (the gun warming)
-            float k = u / IGNITE_END; // 0..1
-            float twoSigSq = 2.0f * 0.9f * 0.9f;
-
-            for (int i = 0; i < leds; i++)
-            {
-                float d = i - center;
-                float bright = k * expf(-(d * d) / twoSigSq);
-                if (bright <= 0.002f) continue;
-
-                strip.setPixel(i, (uint8_t)(fr * bright),
-                               (uint8_t)(fg * bright), (uint8_t)(fb * bright));
-            }
-        }
-        else if (u < SCAN_END)
-        {
-            // the point whips outward into a full-width bright line: fast
-            // out, easing as the fronts reach the ends
-            float k = (u - IGNITE_END) / (SCAN_END - IGNITE_END);
+            // a white-hot point at the center whips outward into a full-width
+            // bright line: fast out, easing as the fronts reach the ends.
+            // This is shutdown's collapse run in reverse.
+            float k = u / SCAN_END;
             float ce = 1.0f - (1.0f - k) * (1.0f - k);
             float radius = ce * maxRadius;
             if (radius < 0.6f) radius = 0.6f; // keep the center lit through the seam
@@ -122,13 +109,12 @@ public:
     bool finished() const override { return false; }
 
 private:
-    // phase boundaries as fractions of the intro: ignite, scan out, resolve
-    // to body color, then the open-ended living-glow hold
-    static constexpr float IGNITE_END = 0.18f;
+    // phase boundaries as fractions of the intro: scan out from the center
+    // point, resolve to body color, then the open-ended living-glow hold
     static constexpr float SCAN_END = 0.55f;
     static constexpr float RESOLVE_END = 1.0f;
 
-    uint8_t r = 0, g = 40, b = 255;
+    uint8_t r = 255, g = 255, b = 255;
     uint8_t fr = 255, fg = 255, fb = 255;
     float intro = 3.0f;
 };
