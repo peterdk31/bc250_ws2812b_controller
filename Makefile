@@ -56,6 +56,14 @@ install: led
 	systemctl daemon-reload
 	-@$(MAKE) --no-print-directory serial-perms
 
+# force-overwrite the deployed config with the repo's and apply it.
+# `install` leaves an existing /etc config untouched (so a fresh deploy
+# can't clobber local tweaks); use this after editing config.json in the
+# repo. try-restart only restarts the daemon if it's already running.
+install-config:
+	install -Dm644 config.json /etc/led-controller/config.json
+	-systemctl try-restart led-controller
+
 uninstall:
 	-systemctl disable --now led-controller
 	rm -f /etc/systemd/system/led-controller.service
