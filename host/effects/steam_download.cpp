@@ -37,6 +37,8 @@ class SteamDownload : public Effect
 public:
     void init(const EffectConfig& cfg, int) override
     {
+        setFrameDelay(cfg, 33);
+
         uint32_t color = cfg.getColor("color", 0x00a0ff);
 
         r = (color >> 16) & 0xFF;
@@ -177,8 +179,6 @@ public:
                            (uint8_t)(b * v));
         }
     }
-
-    int frameDelayMs() const override { return 33; }
 
 private:
     uint8_t r = 0, g = 160, b = 255;

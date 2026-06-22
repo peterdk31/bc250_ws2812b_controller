@@ -12,6 +12,8 @@ class Breathe : public Effect
 public:
     void init(const EffectConfig& cfg, int) override
     {
+        setFrameDelay(cfg, 33);
+
         uint32_t color = cfg.getColor("color", 0xff7818);
 
         r = (color >> 16) & 0xFF;
@@ -33,8 +35,6 @@ public:
             strip.setPixel(i, (uint8_t)(r * v), (uint8_t)(g * v),
                            (uint8_t)(b * v));
     }
-
-    int frameDelayMs() const override { return 33; }
 
 private:
     uint8_t r = 255, g = 120, b = 24;

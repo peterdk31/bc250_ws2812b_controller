@@ -23,6 +23,8 @@ class Load : public Effect
 public:
     void init(const EffectConfig& cfg, int) override
     {
+        setFrameDelay(cfg, 33);
+
         smoothing = cfg.getFloat("smoothing_seconds", 0.7f);
         hueMin = cfg.getFloat("hue_min", 0.45f);
         hueMax = cfg.getFloat("hue_max", 0.83f);
@@ -88,8 +90,6 @@ public:
             strip.setPixel(i, r, g, b);
         }
     }
-
-    int frameDelayMs() const override { return 33; }
 
 private:
     // busy share of /proc/stat ticks since the previous call, 0..1

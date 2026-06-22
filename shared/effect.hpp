@@ -157,8 +157,25 @@ public:
     // stop the shutdown effect
     virtual bool finished() const { return false; }
 
-    // delay between frames
-    virtual int frameDelayMs() const { return 16; }
+    // delay between frames. Returns the value resolved by setFrameDelay()
+    // (an effect's own default, overridable by a `frame_ms` setting); cycle
+    // overrides this to defer to whichever sub-effect it's currently running.
+    virtual int frameDelayMs() const { return frameMs_; }
+
+protected:
+    // resolve the per-frame delay in init(): a `frame_ms` setting wins if
+    // present — rule settings first, then top-level config as a global
+    // default — otherwise the effect's own default `def`. Effects that step
+    // state per frame read frameDelayMs() as their timestep, so the one value
+    // drives both the refresh rate and dt: lowering it smooths motion without
+    // changing speed. Floored at 1ms so the render loop can't busy-spin.
+    void setFrameDelay(const EffectConfig& cfg, int def)
+    {
+        int ms = cfg.getInt("frame_ms", def);
+        frameMs_ = ms < 1 ? 1 : ms;
+    }
+
+    int frameMs_ = 16;
 };
 
 using EffectFactory = std::unique_ptr<Effect> (*)();

@@ -25,6 +25,8 @@ class CpuTemp : public Effect
 public:
     void init(const EffectConfig& cfg, int) override
     {
+        setFrameDelay(cfg, 33);
+
         ramp = color::Ramp(cfg.getColor("cold_color", 0x0000ff),
                            cfg.getColor("hot_color", 0xff0000));
 
@@ -86,8 +88,6 @@ public:
                            (uint8_t)(b * k));
         }
     }
-
-    int frameDelayMs() const override { return 33; }
 
 private:
     std::string sensorPath;

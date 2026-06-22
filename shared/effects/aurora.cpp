@@ -13,6 +13,8 @@ class Aurora : public Effect
 public:
     void init(const EffectConfig& cfg, int) override
     {
+        setFrameDelay(cfg, 33);
+
         speed = cfg.getFloat("speed", 1.0f);
         hueMin = cfg.getFloat("hue_min", 0.30f);
         hueMax = cfg.getFloat("hue_max", 0.85f);
@@ -38,8 +40,6 @@ public:
             strip.setPixel(i, r, g, b);
         }
     }
-
-    int frameDelayMs() const override { return 33; }
 
 private:
     float speed = 1.0f;

@@ -11,6 +11,8 @@ class Alarm : public Effect
 public:
     void init(const EffectConfig& cfg, int) override
     {
+        setFrameDelay(cfg, 16);
+
         uint32_t color = cfg.getColor("color", 0xff0000);
 
         r = (color >> 16) & 0xFF;

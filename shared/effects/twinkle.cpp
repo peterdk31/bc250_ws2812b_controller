@@ -14,6 +14,8 @@ class Twinkle : public Effect
 public:
     void init(const EffectConfig& cfg, int leds) override
     {
+        setFrameDelay(cfg, 33);
+
         uint32_t spark = cfg.getColor("color", 0xffffff);
         uint32_t base = cfg.getColor("base_color", 0x000020);
 
@@ -57,8 +59,6 @@ public:
             strip.setPixel(i, rgb[0], rgb[1], rgb[2]);
         }
     }
-
-    int frameDelayMs() const override { return 33; }
 
 private:
     float sparkRgb[3] = {255, 255, 255};

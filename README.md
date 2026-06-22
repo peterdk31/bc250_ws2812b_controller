@@ -409,6 +409,17 @@ Colors are `"RRGGBB"` or `"#RRGGBB"`. Effect settings come from the
 matching rule's `"settings"`, falling back to top-level config keys,
 then the defaults above.
 
+Every effect also takes `frame_ms` — the delay between frames in
+milliseconds (lower is smoother). Like any setting it resolves per-rule
+first, so a top-level `"frame_ms": 16` is a global default that an
+individual rule's `"settings"` can override. Effects default to 33ms
+(~30fps); a few one-shot/transition effects (`alarm`, `boot`, `comet`,
+`rainbow`, `shutdown`) default to 16ms (~60fps). Effects that integrate
+state per frame (`load`, `comet`, `twinkle`, `steam_download`) use this
+as their timestep too, so lowering it makes the motion smoother without
+changing its speed. The floor is 1ms, but the serial link and WS2812
+refresh set the practical ceiling on frame rate.
+
 `cycle` composes the others: each entry in its `"effects"` list carries
 its own `"settings"` (resolved exactly like a rule's — entry settings
 first, then top-level keys, then that effect's defaults) and an optional

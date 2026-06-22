@@ -26,6 +26,8 @@ class Shutdown : public Effect
 public:
     void init(const EffectConfig& cfg, int) override
     {
+        setFrameDelay(cfg, 16);
+
         duration = cfg.getFloat("duration_seconds", 5.0f);
         if (duration <= 0) duration = 5.0f;
 

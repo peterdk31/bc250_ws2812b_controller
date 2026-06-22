@@ -26,6 +26,8 @@ class Boot : public Effect
 public:
     void init(const EffectConfig& cfg, int) override
     {
+        setFrameDelay(cfg, 16);
+
         // accept the legacy duration_seconds as a fallback so existing
         // configs keep a sensible intro pace
         intro = cfg.getFloat("intro_seconds",

@@ -16,6 +16,8 @@ class Fire : public Effect
 public:
     void init(const EffectConfig& cfg, int leds) override
     {
+        setFrameDelay(cfg, 33);
+
         speed = cfg.getFloat("speed", 1.0f);
         minHeat = cfg.getFloat("min_heat", 0.25f);
 
@@ -59,8 +61,6 @@ public:
             strip.setPixel(i, r, g, b);
         }
     }
-
-    int frameDelayMs() const override { return 33; }
 
 private:
     float speed = 1.0f;
