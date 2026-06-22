@@ -5,11 +5,11 @@
         "host_timeout_ms": 5000
     },
     "strip": {
-        "leds": 58,
+        "leds": 26,
         "pin": 13,
         "reverse": false,
-        "brightness": 0.2,
-        "gamma": "2.2",
+        "brightness": 1.0,
+        "gamma": "1.9 1.8 1.7",
         "white_balance": "b4ffff"
     },
     "transition_seconds": 0.6,
