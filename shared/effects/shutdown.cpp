@@ -1,16 +1,17 @@
 #include <math.h>
 #include "effect.hpp"
 
-// power-down sequence styled after an old CRT television switching off:
-// the whole strip is lit, then the picture collapses fast from both ends
-// into a single white-hot point at the center (the electron beam focusing
-// down — the shrinking core gets brighter, not dimmer), which blooms and
-// then fades out slowly with phosphor persistence. The collapse is a quick
-// snap; the long dying glow is what makes it linger, so the strip keeps
-// glowing through the OS power-down instead of blanking seconds early. It
-// reports finished once the glow is gone so a player can stop and leave the
-// strip dark — unlike boot, this one must end (the strip is independently
-// powered and outlives the host, so it can't hold a glow forever).
+// power-down sequence styled after an old CRT television switching off,
+// kept deliberately simple so it reads as one motion at a time: the whole
+// strip holds the picture for a beat, the lit line then snap-collapses from
+// both ends into the center (body color the entire time — only the width
+// changes), there's a single white flash at the center point, and that dot
+// fades quietly to black. The collapse is a quick snap; the dying glow is
+// what makes it linger, so the strip keeps glowing through the OS power-down
+// instead of blanking seconds early. It reports finished once the glow is
+// gone so a player can stop and leave the strip dark — unlike boot, this one
+// must end (the strip is independently powered and outlives the host, so it
+// can't hold a glow forever).
 //
 // self-contained (it doesn't depend on whatever was on the strip), so it
 // looks the same whether the daemon plays it on SIGTERM or the receiver
@@ -54,37 +55,34 @@ public:
 
         if (u < COLLAPSE_END)
         {
-            // the picture collapses inward to a point: the lit half-width
-            // races to zero (fast in, easing as it lands) while the color
-            // surges from the body color to the hot beam color, so the
-            // shrinking core reads as energy concentrating, not dying.
-            float k = u / COLLAPSE_END;                  // 0..1
-            float ce = 1.0f - (1.0f - k) * (1.0f - k);   // fast start, settle
-            float litHalf = (leds / 2.0f) * (1.0f - ce);
-
-            uint8_t cr = (uint8_t)(r + (fr - r) * ce);
-            uint8_t cg = (uint8_t)(g + (fg - g) * ce);
-            uint8_t cb = (uint8_t)(b + (fb - b) * ce);
+            // hold the full picture for a beat, then snap-collapse the lit
+            // line inward to the center. Body color stays constant the whole
+            // time — only the width changes, so there's one thing to watch.
+            float litHalf;
+            if (u < HOLD_END)
+            {
+                litHalf = leds / 2.0f;
+            }
+            else
+            {
+                float k = (u - HOLD_END) / (COLLAPSE_END - HOLD_END); // 0..1
+                float ce = 1.0f - (1.0f - k) * (1.0f - k);            // fast in, settle
+                litHalf = (leds / 2.0f) * (1.0f - ce);
+            }
 
             for (int i = 0; i < leds; i++)
-            {
-                float d = fabsf(i - center);
-
-                if (d <= litHalf)
-                    strip.setPixel(i, cr, cg, cb);
-                else if (d <= litHalf + 1.0f)
-                    strip.setPixel(i, fr, fg, fb); // bright collapsing edge
-            }
+                if (fabsf(i - center) <= litHalf)
+                    strip.setPixel(i, r, g, b);
         }
         else
         {
-            // the white-hot dot blooms, then fades with phosphor
-            // persistence: a fast exponential decay trailing into a long
-            // faint afterglow. It narrows toward a single pixel as it dies.
+            // a single white dot at the center: it flashes bright, then
+            // fades quietly to black with phosphor persistence (fast
+            // exponential decay into a faint afterglow). Fixed, tight glow
+            // so the dot just dims in place rather than drifting or blooming.
             float k = (u - COLLAPSE_END) / (1.0f - COLLAPSE_END); // 0..1
-            float glow = expf(-k * DECAY);                         // 1 -> ~0
-            float sigma = 0.6f + 1.8f * glow;                      // tightens as it fades
-            float twoSigSq = 2.0f * sigma * sigma;
+            float glow = expf(-k * DECAY);                        // 1 -> ~0
+            float twoSigSq = 2.0f * SIGMA * SIGMA;
 
             for (int i = 0; i < leds; i++)
             {
@@ -101,10 +99,12 @@ public:
     bool finished() const override { return elapsed >= duration; }
 
 private:
-    // collapse stays a fixed-feeling ~0.5s snap at the default duration; the
-    // rest of the (now longer) run is the lingering phosphor afterglow
-    static constexpr float COLLAPSE_END = 0.1f; // fraction spent collapsing
-    static constexpr float DECAY = 3.0f;        // phosphor fade steepness
+    // hold the picture, then a fixed-feeling ~0.5s collapse snap at the
+    // default duration; the rest of the run is the lingering phosphor glow
+    static constexpr float HOLD_END = 0.12f;     // fraction holding full picture
+    static constexpr float COLLAPSE_END = 0.22f; // fraction up to fully collapsed
+    static constexpr float DECAY = 3.0f;         // phosphor fade steepness
+    static constexpr float SIGMA = 0.9f;         // center-dot tightness (pixels)
 
     uint8_t r = 0, g = 40, b = 255;
     uint8_t fr = 255, fg = 255, fb = 255;
