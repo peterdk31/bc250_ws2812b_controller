@@ -105,7 +105,8 @@ public:
           leds(other.leds),
           pin(other.pin),
           reversed(other.reversed),
-          lut(other.lut)
+          lut(other.lut),
+          frame_(other.frame_)
     {
         other.fd = -1;
     }
@@ -137,6 +138,8 @@ public:
 
     void beginFrame()
     {
+        frame_++; // advances the per-frame dither (see ColorLut)
+
         if (leds <= 0) return;
 
         buf[0] = 0xAA;
@@ -155,9 +158,9 @@ public:
 
         int p = 5 + i * 3;
 
-        buf[p++] = lut.map(0, r);
-        buf[p++] = lut.map(1, g);
-        buf[p]   = lut.map(2, b);
+        buf[p++] = lut.map(0, r, ditherThreshold(frame_, i, 0));
+        buf[p++] = lut.map(1, g, ditherThreshold(frame_, i, 1));
+        buf[p]   = lut.map(2, b, ditherThreshold(frame_, i, 2));
     }
 
     bool show()
@@ -324,4 +327,5 @@ private:
     int pin;
     bool reversed = false;
     ColorLut lut;
+    uint32_t frame_ = 0; // per-frame dither phase, bumped in beginFrame()
 };

@@ -93,6 +93,7 @@ ColorLut standaloneLut;
 std::unique_ptr<Effect> standalone;
 unsigned long standaloneStartMs = 0;
 unsigned long lastStandaloneMs = 0;
+uint32_t standaloneFrame = 0; // phases the temporal dither (see ColorLut)
 bool shuttingDown = false;
 bool standaloneDone = false;
 
@@ -250,7 +251,7 @@ void tickStandalone(unsigned long now)
 
     lastStandaloneMs = now;
 
-    Esp32Strip sink(strip, currentCount, standaloneLut);
+    Esp32Strip sink(strip, currentCount, standaloneLut, standaloneFrame++);
     sink.beginFrame();
     standalone->render(sink, (now - standaloneStartMs) / 1000.0f);
     strip->show();

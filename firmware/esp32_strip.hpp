@@ -28,8 +28,12 @@
 class Esp32Strip
 {
 public:
-    Esp32Strip(Freenove_ESP32_WS2812* strip, int count, const ColorLut& lut)
-        : strip_(strip), count_(count), lut_(lut) {}
+    // frame is the receiver's standalone frame counter; it phases the
+    // temporal dither (see ColorLut) so slow gradients don't step. Defaults
+    // to 0 for callers that render a single static frame.
+    Esp32Strip(Freenove_ESP32_WS2812* strip, int count, const ColorLut& lut,
+               uint32_t frame = 0)
+        : strip_(strip), count_(count), lut_(lut), frame_(frame) {}
 
     void beginFrame() {} // no framing on this side; here for API parity
 
@@ -38,8 +42,10 @@ public:
         if (i < 0 || i >= count_ || !strip_)
             return;
 
-        strip_->setLedColorData(i, lut_.map(0, r), lut_.map(1, g),
-                                lut_.map(2, b));
+        strip_->setLedColorData(i,
+                                lut_.map(0, r, ditherThreshold(frame_, i, 0)),
+                                lut_.map(1, g, ditherThreshold(frame_, i, 1)),
+                                lut_.map(2, b, ditherThreshold(frame_, i, 2)));
     }
 
     int size() const { return count_; }
@@ -48,4 +54,5 @@ private:
     Freenove_ESP32_WS2812* strip_;
     int count_;
     const ColorLut& lut_;
+    uint32_t frame_;
 };
