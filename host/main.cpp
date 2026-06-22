@@ -6,6 +6,7 @@
 #include <chrono>
 #include <vector>
 #include "effect.hpp"
+#include "motion.hpp"
 #include "rules.hpp"
 #include "steam.hpp"
 
@@ -204,7 +205,9 @@ int main(int argc, char** argv)
         if (!fadeFrom.empty() && fadeFrom.size() == cur.size()
             && now - fadeStart < fadeDur)
         {
-            float a = (float)((now - fadeStart) / fadeDur);
+            // ease the dissolve so a switch starts and settles gently
+            // rather than crossfading at a constant rate
+            float a = motion::ease((float)((now - fadeStart) / fadeDur));
 
             for (size_t i = 0; i < cur.size(); i++)
             {

@@ -1,12 +1,20 @@
 #include <math.h>
 #include "effect.hpp"
+#include "motion.hpp"
 
-// "Larson scanner": a bright eye bounces end to end leaving a fading tail
+// "Larson scanner": a bright eye sweeps end to end leaving a fading tail.
+// The turnaround at each end is eased so the eye decelerates into the wall
+// and accelerates away instead of reversing instantly; with mirror on, a
+// second eye runs the opposite way so the pair meet and part at the center.
 //
 // config:
 //   color             RRGGBB (default ff0000)
 //   sweeps_per_second end-to-end sweeps per second (default 0.5)
 //   tail_pixels       tail length (default 8)
+//   turn_ease         turnaround easing 0 (linear) .. 1 (fully eased)
+//                     (default 1.0)
+//   mirror            1 for a second eye mirrored about the center
+//                     (default 0)
 class Comet : public Effect
 {
 public:
@@ -21,6 +29,9 @@ public:
         b = color & 0xFF;
 
         speed = cfg.getFloat("sweeps_per_second", 0.5f);
+        turnEase = cfg.getFloat("turn_ease", 1.0f);
+        mirror = cfg.getInt("mirror", 0) != 0;
+
         float tail = cfg.getFloat("tail_pixels", 8.0f);
         if (tail < 1) tail = 1;
 
@@ -41,15 +52,12 @@ public:
         for (int i = 0; i < leds; i++)
             trail[i] *= fadePerFrame;
 
-        // triangle wave bounces the head between the strip ends
-        float phase = fmodf(t * speed, 2.0f);
-        float pos = (phase < 1.0f ? phase : 2.0f - phase) * (leds - 1);
+        // eased ping-pong bounces the head between the strip ends
+        float pos = motion::pingpong(t * speed, turnEase) * (leds - 1);
 
-        int head = (int)pos;
-        float frac = pos - head;
-
-        bump(head, 1.0f - frac);
-        bump(head + 1, frac);
+        depositHead(pos);
+        if (mirror)
+            depositHead((leds - 1) - pos);
 
         for (int i = 0; i < leds; i++)
             strip.setPixel(i, (uint8_t)(r * trail[i]),
@@ -58,6 +66,15 @@ public:
     }
 
 private:
+    void depositHead(float pos)
+    {
+        int head = (int)pos;
+        float frac = pos - head;
+
+        bump(head, 1.0f - frac);
+        bump(head + 1, frac);
+    }
+
     void bump(int i, float v)
     {
         if (i >= 0 && i < (int)trail.size() && trail[i] < v)
@@ -66,6 +83,8 @@ private:
 
     uint8_t r = 255, g = 0, b = 0;
     float speed = 0.5f;
+    float turnEase = 1.0f;
+    bool mirror = false;
     float fadePerFrame = 1.0f;
     std::vector<float> trail;
 };

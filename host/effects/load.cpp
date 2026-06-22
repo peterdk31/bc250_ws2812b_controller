@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include "effect.hpp"
 #include "color.hpp"
+#include "motion.hpp"
 #include "hwmon.hpp"
 
 // CPU and GPU load as two soft bars growing from the center of the strip
@@ -15,9 +16,11 @@
 //
 // config:
 //   smoothing_seconds  load smoothing time constant (default 0.7)
-//   hue_min            low end of the cool hue band 0..1 (default 0.45, teal)
-//   hue_max            high end of the cool hue band 0..1 (default 0.83, purple)
+//   palette            comma-separated stops the wash walks
+//                      (default cool teal -> blue -> violet)
 //   speed              drift / shimmer rate multiplier (default 1.0)
+//   noise              flow/noise blend 0 (sine flow) .. 1 (noise) (default 0.3)
+//   floor_brightness   dim wash on the unlit track 0..1 (default 0.04)
 class Load : public Effect
 {
 public:
@@ -26,9 +29,10 @@ public:
         setFrameDelay(cfg, 33);
 
         smoothing = cfg.getFloat("smoothing_seconds", 0.7f);
-        hueMin = cfg.getFloat("hue_min", 0.45f);
-        hueMax = cfg.getFloat("hue_max", 0.83f);
+        palette = color::Gradient(cfg.get("palette", "00e0c0,2060ff,a040ff"));
         speed = cfg.getFloat("speed", 1.0f);
+        noiseMix = cfg.getFloat("noise", 0.3f);
+        floorLevel = cfg.getFloat("floor_brightness", 0.04f);
 
         if (!gpuLoad.available())
             fprintf(stderr, "load: no gpu load source found yet, "
@@ -61,12 +65,11 @@ public:
             // soft tip: full inside the bar, fading over the single pixel
             // straddling its end (distance in pixels is d * half)
             float fill = (level - d) * half + 0.5f;
-            if (fill <= 0.0f)
-            {
-                strip.setPixel(i, 0, 0, 0);
-                continue;
-            }
             if (fill > 1.0f) fill = 1.0f;
+
+            // the unlit track keeps a faint wash rather than going black,
+            // so the bar fades down into a living floor instead of an edge
+            if (fill < floorLevel) fill = floorLevel;
 
             // spatial coordinate for the wash/shimmer mirrored about the
             // center (distance outward, 0..1), so both halves flow
@@ -74,20 +77,21 @@ public:
             // across the strip in one screen direction
             float x = d;
 
-            // aurora-style hue curtains: two sines at unrelated
-            // frequencies drifting in opposite directions, so the wash
-            // never visibly repeats
-            float w = 0.5f + 0.25f * sinf(x * 5.1f + t * 0.31f * speed)
-                           + 0.25f * sinf(x * 2.3f - t * 0.17f * speed);
-            float h = hueMin + (hueMax - hueMin) * w;
+            // aurora-style wash walking the palette: a flow field blended
+            // with value noise, so the color drifts and never repeats
+            float w = motion::mix(motion::flow(x, t, speed),
+                                  motion::noise(x, t, speed), noiseMix);
 
             // a separate slow field shimmers the brightness, so even a
             // full bar is always gently moving
-            float v = 0.6f + 0.4f * sinf(x * 3.7f + t * 0.23f * speed + 1.7f);
+            float v = 0.6f + 0.4f * motion::shimmer(x, t, speed);
 
             uint8_t r, g, b;
-            color::toRgb(h, 1.0f, v * fill, r, g, b);
-            strip.setPixel(i, r, g, b);
+            palette.at(w, r, g, b);
+
+            float k = v * fill;
+            strip.setPixel(i, (uint8_t)(r * k), (uint8_t)(g * k),
+                           (uint8_t)(b * k));
         }
     }
 
@@ -114,9 +118,10 @@ private:
     }
 
     float smoothing = 0.7f;
-    float hueMin = 0.45f;
-    float hueMax = 0.83f;
+    color::Gradient palette;
     float speed = 1.0f;
+    float noiseMix = 0.3f;
+    float floorLevel = 0.04f;
     float cpu = 0;
     float gpu = 0;
 

@@ -35,7 +35,7 @@ ESP32_URL = https://espressif.github.io/arduino-esp32/package_esp32_index.json
 HEADERS = host/ws2812_serial.hpp host/config_loader.hpp vendor/json.hpp \
           shared/effect.hpp host/condition.hpp shared/color.hpp \
           host/hwmon.hpp host/steam.hpp host/rules.hpp \
-          shared/color_lut.hpp shared/protocol.hpp
+          shared/color_lut.hpp shared/protocol.hpp shared/motion.hpp
 
 # every effect compiles in and registers itself. shared/effects/*
 # are host-independent (also linked into the firmware); host/effects/*
@@ -115,6 +115,7 @@ receiver-toolchain:
 RECEIVER_SRC = esp32_receiver/src
 SHARED = shared/protocol.hpp shared/color_lut.hpp firmware/esp32_strip.hpp \
          shared/effect.hpp shared/effect_registry.cpp \
+         shared/color.hpp shared/motion.hpp \
          $(wildcard shared/effects/*.cpp)
 
 receiver-shared:

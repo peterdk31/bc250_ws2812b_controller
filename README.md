@@ -320,9 +320,9 @@ list — the daemon sends no frames and leaves the strip dark.
 ```jsonc
 {
     "if": "proc:gamescope & temp>75",
-    "effect": "fire",
+    "effect": "ember",
     "hold": 5,                       // optional, min seconds since last
-    "settings": { "speed": 1.6 }     // switch; optional, effect-specific
+    "settings": { "speed": 1.4 }     // switch; optional, effect-specific
 }
 ```
 
@@ -334,7 +334,8 @@ debouncing sets its own.
 
 A switch isn't abrupt: the daemon crossfades from the last displayed
 frame into the new effect over the top-level `transition_seconds`
-(default 0.6; set 0 for an instant cut). The dissolve runs on
+(default 0.6; set 0 for an instant cut). The dissolve is eased (it starts
+and settles gently rather than at a constant rate) and runs on
 wall-clock, so it's the same length whatever the effects' frame rates,
 and the very first effect after startup appears immediately (nothing to
 fade from).
@@ -391,23 +392,30 @@ root (the systemd unit does).
 
 | name | description | settings (defaults) |
 |---|---|---|
-| `alarm` | whole-strip pulse | `color` (ff0000), `pulses_per_second` (2) |
-| `aurora` | slow drifting color curtains | `speed` (1.0), `hue_min` (0.30), `hue_max` (0.85) |
+| `alarm` | urgent heartbeat (lub-dub) throbbing from the center outward | `color` (ff0000), `pulses_per_second` (2), `min_brightness` (0.16), `radiate` (0.12) |
+| `aurora` | slow drifting color curtains (flow + value noise) walking a palette | `palette` (10ff80,10a0ff,8040ff), `speed` (1.0), `noise` (0.3) |
 | `boot` | power-on: a CRT-style ignition — a white-hot point flares at the center, whips outward into a scan line, resolves to the body color, then holds a living glow indefinitely (never finishes, never fades); the host's first frame ends it | `intro_seconds` (3), `color` (0028ff), `flash_color` (ffffff) |
-| `breathe` | single color on a slow sine | `color` (ff7818), `period_seconds` (5), `min_brightness` (0.05) |
-| `comet` | Larson scanner with fading tail | `color` (ff0000), `sweeps_per_second` (0.5), `tail_pixels` (8) |
-| `cpu_temp` | temperature bar graph along a hue ramp, soft tip + slow brightness shimmer | `temp_min` (40), `temp_max` (85), `cold_color` (0000ff), `hot_color` (ff0000), `speed` (1.0), `sensors` |
+| `breathe` | single color on a slow breath, with a soft brighter band drifting along the strip | `color` (ff7818), `period_seconds` (5), `min_brightness` (0.05), `wave_depth` (0.30) |
+| `comet` | Larson scanner with fading tail, eased turnaround, optional mirrored second eye | `color` (ff0000), `sweeps_per_second` (0.5), `tail_pixels` (8), `turn_ease` (1.0), `mirror` (0) |
+| `cpu_temp` | temperature bar graph along a hue ramp, soft tip + slow shimmer, faint cold glow on the unlit track | `temp_min` (40), `temp_max` (85), `cold_color` (0000ff), `hot_color` (ff0000), `speed` (1.0), `floor_brightness` (0.04), `sensors` |
 | `cycle` | rotates through a list of other effects, switching to a random next one each period | `period_seconds` (30), `effects` (list of `{effect, settings, seconds}`) |
-| `fire` | per-LED candle flicker with a slow flowing drift | `speed` (1.0), `min_heat` (0.25) |
-| `load` | CPU/GPU bars from center, aurora-washed with soft tips + shimmer | `smoothing_seconds` (0.7), `hue_min` (0.45), `hue_max` (0.83), `speed` (1.0) |
-| `rainbow` | scrolling hue cycle | `cycles_per_second` (0.625) |
+| `drift` | soft glows wandering slowly over a dark base | `color` (6078ff), `base_color` (000014), `blobs` (3), `width` (0.10), `speed` (1.0) |
+| `ember` | slow warm aurora-style flow (flow + noise) through an ember palette | `palette` (2a0a00,ff7d1e), `speed` (1.0), `min_brightness` (0.18), `noise` (0.4) |
+| `load` | CPU/GPU bars from center, palette wash (flow + noise) with soft tips + shimmer, faint floor wash | `smoothing_seconds` (0.7), `palette` (00e0c0,2060ff,a040ff), `speed` (1.0), `noise` (0.3), `floor_brightness` (0.04) |
+| `plasma` | summed drifting sines + value noise walking a palette; organic, never repeats | `palette` (0040ff,00d0a0,c040ff,0040ff), `speed` (1.0), `noise` (0.5) |
+| `pulse` | soft rings born at the center, expanding and fading outward | `color` (30c0ff), `base_color` (000010), `period_seconds` (4), `width` (0.18), `travel` (1.4) |
+| `rainbow` | scrolling hue cycle, lit from within (shimmer + saturation breathing) | `cycles_per_second` (0.625), `shimmer_depth` (0.18), `sat_depth` (0.15) |
 | `shutdown` | power-down sequence: a CRT-style collapse — the picture snaps inward to a white-hot point, then fades out slowly with phosphor persistence so it lingers through the OS power-down; reports finished | `duration_seconds` (5.0), `color` (0028ff), `flash_color` (ffffff) |
 | `steam_download` | Steam download bar, slow breath + flow sweep, green pulse at 100 | `color` (00a0ff), `done_color` (00ff40), `smoothing_seconds` (0.4), `flow_period` (2.5), `flow_depth` (0.35), `shimmer_depth` (0.15), `shimmer_period` (6.0) |
-| `twinkle` | sparks fading over a base color | `color` (ffffff), `base_color` (000020), `sparks_per_second` (6), `fade_seconds` (1.0) |
+| `tide` | a palette gradient sliding and breathing along the strip | `palette` (102060,ff5028,ffb020,4060c0,102060), `speed` (1.0), `span` (1.0) |
 
-Colors are `"RRGGBB"` or `"#RRGGBB"`. Effect settings come from the
-matching rule's `"settings"`, falling back to top-level config keys,
-then the defaults above.
+Colors are `"RRGGBB"` or `"#RRGGBB"`. A `palette` is a list of those
+separated by anything non-hex, e.g. `"2a0a00, ff7d1e, ffd060"`; the
+stops are spaced evenly and blended in RGB, so for a vivid multi-hue
+sweep add the in-between colors as stops rather than relying on one long
+blend, and repeat the first color as the last for a seamless loop.
+Effect settings come from the matching rule's `"settings"`, falling back
+to top-level config keys, then the defaults above.
 
 Every effect also takes `frame_ms` — the delay between frames in
 milliseconds (lower is smoother). Like any setting it resolves per-rule
@@ -415,7 +423,7 @@ first, so a top-level `"frame_ms": 16` is a global default that an
 individual rule's `"settings"` can override. Effects default to 33ms
 (~30fps); a few one-shot/transition effects (`alarm`, `boot`, `comet`,
 `rainbow`, `shutdown`) default to 16ms (~60fps). Effects that integrate
-state per frame (`load`, `comet`, `twinkle`, `steam_download`) use this
+state per frame (`load`, `comet`, `steam_download`) use this
 as their timestep too, so lowering it makes the motion smoother without
 changing its speed. The floor is 1ms, but the serial link and WS2812
 refresh set the practical ceiling on frame rate.

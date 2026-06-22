@@ -55,13 +55,14 @@
         },
         {
             "if": "file:/tmp/led-night",
-            "effect": "twinkle",
+            "effect": "drift",
             "hold": 0,
             "settings": {
-                "color": "ffffff",
-                "base_color": "000020",
-                "sparks_per_second": 6,
-                "fade_seconds": 1.0
+                "color": "6078ff",
+                "base_color": "000014",
+                "blobs": 3,
+                "width": 0.10,
+                "speed": 1.0
             }
         },
         {
@@ -75,27 +76,28 @@
             "hold": 0,
             "settings": {
                 "smoothing_seconds": 0.7,
-                "hue_min": 0.45,
-                "hue_max": 0.83,
+                "palette": "00e0c0,2060ff,a040ff",
                 "speed": 1.0
             }
         },
         {
             "if": "proc:gamescope & temp>75 | proc:steam & temp>75",
-            "effect": "fire",
+            "effect": "ember",
             "hold": 0,
             "settings": {
-                "speed": 1.6,
-                "min_heat": 0.45
+                "palette": "3a0a00,ff5a0a,ffb030",
+                "speed": 1.4,
+                "min_brightness": 0.35
             }
         },
         {
             "if": "proc:gamescope | proc:steam",
-            "effect": "fire",
+            "effect": "ember",
             "hold": 0,
             "settings": {
+                "palette": "2a0a00,ff7d1e",
                 "speed": 1.0,
-                "min_heat": 0.25
+                "min_brightness": 0.18
             }
         },
         {
@@ -113,8 +115,7 @@
             "hold": 0,
             "settings": {
                 "speed": 1.0,
-                "hue_min": 0.3,
-                "hue_max": 0.85
+                "palette": "10ff80,10a0ff,8040ff"
             }
         },
         {
@@ -135,17 +136,42 @@
                         "effect": "aurora",
                         "settings": {
                             "speed": 1.0,
-                            "hue_min": 0.3,
-                            "hue_max": 0.85
+                            "palette": "10ff80,10a0ff,8040ff"
                         }
                     },
                     {
-                        "effect": "twinkle",
+                        "effect": "drift",
                         "settings": {
-                            "color": "ffffff",
-                            "base_color": "000020",
-                            "sparks_per_second": 6,
-                            "fade_seconds": 1.0
+                            "color": "6078ff",
+                            "base_color": "000014",
+                            "blobs": 3,
+                            "width": 0.10,
+                            "speed": 1.0
+                        }
+                    },
+                    {
+                        "effect": "plasma",
+                        "settings": {
+                            "palette": "0040ff,00d0a0,c040ff,0040ff",
+                            "speed": 1.0
+                        }
+                    },
+                    {
+                        "effect": "tide",
+                        "settings": {
+                            "palette": "102060,ff5028,ffb020,4060c0,102060",
+                            "speed": 1.0,
+                            "span": 1.0
+                        }
+                    },
+                    {
+                        "effect": "pulse",
+                        "settings": {
+                            "color": "30c0ff",
+                            "base_color": "000010",
+                            "period_seconds": 4,
+                            "width": 0.18,
+                            "travel": 1.4
                         }
                     },
                     {
@@ -154,7 +180,9 @@
                         "settings": {
                             "color": "00ffaa",
                             "sweeps_per_second": 0.5,
-                            "tail_pixels": 8
+                            "tail_pixels": 8,
+                            "turn_ease": 1.0,
+                            "mirror": 1
                         }
                     }
                 ]

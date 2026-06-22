@@ -20,6 +20,7 @@
 //   cold_color  RRGGBB at the bar's start (default 0000ff)
 //   hot_color   RRGGBB at the bar's end (default ff0000)
 //   speed       shimmer rate multiplier (default 1.0)
+//   floor_brightness  dim cold glow on the unlit track 0..1 (default 0.04)
 class CpuTemp : public Effect
 {
 public:
@@ -33,6 +34,11 @@ public:
         tempMin = cfg.getFloat("temp_min", 40.0f);
         tempMax = cfg.getFloat("temp_max", 85.0f);
         speed = cfg.getFloat("speed", 1.0f);
+        floorLevel = cfg.getFloat("floor_brightness", 0.04f);
+
+        // the unlit track glows faintly in the cold color, so the strip
+        // reads as alive even with the bar empty
+        ramp.at(0.0f, coldR, coldG, coldB);
 
         if (tempMax <= tempMin)
             tempMax = tempMin + 1;
@@ -69,19 +75,24 @@ public:
         for (int i = 0; i < leds; i++)
         {
             float fill = level - i;
-            if (fill <= 0.0f)
-            {
-                strip.setPixel(i, 0, 0, 0);
-                continue;
-            }
             if (fill > 1.0f) fill = 1.0f;
 
             float pos = (float)i / leds;
-            uint8_t r, g, b;
-            ramp.at(pos, r, g, b);
 
             // slow brightness shimmer travelling along the bar
             float s = 0.7f + 0.3f * sinf(pos * 3.7f + t * 0.23f * speed + 1.7f);
+
+            if (fill <= 0.0f)
+            {
+                // unlit track: faint cold glow rather than black
+                float k = floorLevel * s;
+                strip.setPixel(i, (uint8_t)(coldR * k), (uint8_t)(coldG * k),
+                               (uint8_t)(coldB * k));
+                continue;
+            }
+
+            uint8_t r, g, b;
+            ramp.at(pos, r, g, b);
             float k = fill * s;
 
             strip.setPixel(i, (uint8_t)(r * k), (uint8_t)(g * k),
@@ -95,6 +106,8 @@ private:
     float tempMin = 40.0f;
     float tempMax = 85.0f;
     float speed = 1.0f;
+    float floorLevel = 0.04f;
+    uint8_t coldR = 0, coldG = 0, coldB = 255;
 };
 
 REGISTER_EFFECT("cpu_temp", CpuTemp)

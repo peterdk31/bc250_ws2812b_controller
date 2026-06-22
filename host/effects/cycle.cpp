@@ -27,9 +27,9 @@ class Cycle : public Effect
 public:
     void init(const EffectConfig& cfg, int leds) override
     {
-        // seed rand() once (shared with twinkle/fire/comet) so the
-        // cycle's order — and those effects' flicker — differ per boot
-        // instead of replaying the same sequence every restart
+        // seed rand() once (shared with comet) so the cycle's order
+        // differs per boot instead of replaying the same sequence every
+        // restart
         static bool seeded = (srand((unsigned)time(nullptr)), true);
         (void)seeded;
 

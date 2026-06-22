@@ -1,13 +1,26 @@
 #include <math.h>
 #include "effect.hpp"
+#include "color.hpp"
+#include "motion.hpp"
 
+// scrolling hue cycle, lit from within: a slow shimmer field dips the
+// brightness and a second field eases the saturation up and down, so the
+// scroll drifts and breathes instead of reading as a flat conveyor belt.
+//
+// config:
+//   cycles_per_second hue scroll rate (default 0.625)
+//   shimmer_depth     how far the brightness dips 0..1 (default 0.18)
+//   sat_depth         how far the saturation eases off 0..1 (default 0.15)
 class Rainbow : public Effect
 {
 public:
     void init(const EffectConfig& cfg, int) override
     {
         setFrameDelay(cfg, 16);
+
         speed = cfg.getFloat("cycles_per_second", 0.625f);
+        shimmerDepth = cfg.getFloat("shimmer_depth", 0.18f);
+        satDepth = cfg.getFloat("sat_depth", 0.15f);
     }
 
     void render(Strip& strip, float t) override
@@ -16,10 +29,14 @@ public:
 
         for (int i = 0; i < strip.size(); i++)
         {
-            float h = fmodf(((float)i / strip.size()) + offset, 1.0f);
+            float x = (float)i / strip.size();
+
+            float h = fmodf(x + offset, 1.0f);
+            float v = 1.0f - shimmerDepth + shimmerDepth * motion::shimmer(x, t);
+            float s = 1.0f - satDepth * (1.0f - motion::shimmer(x, t, 1.0f, 4.0f));
 
             uint8_t r, g, b;
-            hsv_to_rgb(h, r, g, b);
+            color::toRgb(h, s, v, r, g, b);
 
             strip.setPixel(i, r, g, b);
         }
@@ -27,33 +44,8 @@ public:
 
 private:
     float speed = 0.625f;
-
-    static void hsv_to_rgb(float h, uint8_t &r, uint8_t &g, uint8_t &b)
-    {
-        float s = 1.0f, v = 1.0f;
-
-        float c = v * s;
-        float x = c * (1 - fabsf(fmodf(h * 6, 2) - 1));
-        float m = v - c;
-
-        float rp, gp, bp;
-
-        int i = (int)(h * 6);
-
-        switch (i)
-        {
-            case 0: rp = c; gp = x; bp = 0; break;
-            case 1: rp = x; gp = c; bp = 0; break;
-            case 2: rp = 0; gp = c; bp = x; break;
-            case 3: rp = 0; gp = x; bp = c; break;
-            case 4: rp = x; gp = 0; bp = c; break;
-            default: rp = c; gp = 0; bp = x; break;
-        }
-
-        r = (rp + m) * 255;
-        g = (gp + m) * 255;
-        b = (bp + m) * 255;
-    }
+    float shimmerDepth = 0.18f;
+    float satDepth = 0.15f;
 };
 
 REGISTER_EFFECT("rainbow", Rainbow)

@@ -1,13 +1,17 @@
-#include <math.h>
 #include "effect.hpp"
+#include "color.hpp"
+#include "motion.hpp"
 
-// slow drifting curtains of color: two sine fields blended per LED,
-// mapped into a hue band, with a third field varying the brightness
+// slow drifting curtains of color: a flow field (blended with value noise
+// for an organic, never-repeating drift) walks each LED through a
+// configurable palette, while a separate shimmer field varies the
+// brightness so the curtains breathe.
 //
 // config:
+//   palette  comma-separated stops (default aurora green -> blue -> violet)
 //   speed    drift rate multiplier (default 1.0)
-//   hue_min  low end of the hue band 0..1 (default 0.30, green)
-//   hue_max  high end of the hue band 0..1 (default 0.85, purple)
+//   noise    flow/noise blend 0 (pure sine flow) .. 1 (pure noise)
+//            (default 0.3)
 class Aurora : public Effect
 {
 public:
@@ -15,9 +19,9 @@ public:
     {
         setFrameDelay(cfg, 33);
 
+        palette = color::Gradient(cfg.get("palette", "10ff80,10a0ff,8040ff"));
         speed = cfg.getFloat("speed", 1.0f);
-        hueMin = cfg.getFloat("hue_min", 0.30f);
-        hueMax = cfg.getFloat("hue_max", 0.85f);
+        noiseMix = cfg.getFloat("noise", 0.3f);
     }
 
     void render(Strip& strip, float t) override
@@ -26,52 +30,22 @@ public:
         {
             float x = (float)i / strip.size();
 
-            // two waves at unrelated frequencies drifting in opposite
-            // directions, so the pattern never visibly repeats
-            float w = 0.5f + 0.25f * sinf(x * 5.1f + t * 0.31f * speed)
-                           + 0.25f * sinf(x * 2.3f - t * 0.17f * speed);
-
-            float h = hueMin + (hueMax - hueMin) * w;
-            float v = 0.55f + 0.45f * sinf(x * 3.7f + t * 0.23f * speed + 1.7f);
+            float field = motion::mix(motion::flow(x, t, speed),
+                                      motion::noise(x, t, speed), noiseMix);
+            float v = 0.1f + 0.9f * motion::shimmer(x, t, speed);
 
             uint8_t r, g, b;
-            hsv_to_rgb(h, v, r, g, b);
+            palette.at(field, r, g, b);
 
-            strip.setPixel(i, r, g, b);
+            strip.setPixel(i, (uint8_t)(r * v), (uint8_t)(g * v),
+                           (uint8_t)(b * v));
         }
     }
 
 private:
+    color::Gradient palette;
     float speed = 1.0f;
-    float hueMin = 0.30f;
-    float hueMax = 0.85f;
-
-    static void hsv_to_rgb(float h, float v, uint8_t &r, uint8_t &g, uint8_t &b)
-    {
-        h = fmodf(h, 1.0f);
-        if (h < 0) h += 1.0f;
-
-        float c = v;
-        float x = c * (1 - fabsf(fmodf(h * 6, 2) - 1));
-
-        float rp, gp, bp;
-
-        int i = (int)(h * 6);
-
-        switch (i)
-        {
-            case 0: rp = c; gp = x; bp = 0; break;
-            case 1: rp = x; gp = c; bp = 0; break;
-            case 2: rp = 0; gp = c; bp = x; break;
-            case 3: rp = 0; gp = x; bp = c; break;
-            case 4: rp = x; gp = 0; bp = c; break;
-            default: rp = c; gp = 0; bp = x; break;
-        }
-
-        r = (uint8_t)(rp * 255);
-        g = (uint8_t)(gp * 255);
-        b = (uint8_t)(bp * 255);
-    }
+    float noiseMix = 0.3f;
 };
 
 REGISTER_EFFECT("aurora", Aurora)

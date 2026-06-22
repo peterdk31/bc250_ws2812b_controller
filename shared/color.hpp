@@ -2,6 +2,9 @@
 
 #include <math.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string>
+#include <vector>
 
 // RRGGBB ↔ HSV helpers and a two-color ramp, shared by effects that
 // build gradients from configurable colors
@@ -102,6 +105,83 @@ public:
 private:
     Hsv a, b;
     float dh = 0;
+};
+
+// a palette of evenly-spaced color stops, sampled 0..1 with linear RGB
+// interpolation between adjacent stops. Built from a spec string of hex
+// colors separated by anything non-hex (comma/space/#), e.g.
+// "2a0a00, ff7d1e, ffd060". Linear RGB stays clean as long as adjacent
+// stops are near each other in hue — for a vivid multi-hue sweep add the
+// intermediate colors as stops rather than relying on one long blend
+// (a single red→green blend would pass through mud; red,yellow,green
+// won't). Unlike Ramp it never walks the hue wheel, so it can't wrap the
+// long way around. Works on both backends (host + receiver).
+class Gradient
+{
+public:
+    Gradient() { add(0xffffff); }
+
+    explicit Gradient(const std::string& spec)
+    {
+        const char* s = spec.c_str();
+
+        while (*s)
+        {
+            while (*s && !isHex(*s)) s++;     // skip separators
+            if (!*s) break;
+
+            char* end;
+            unsigned long c = strtoul(s, &end, 16);
+            if (end == s) break;              // no progress; bail
+
+            add((uint32_t)c);
+            s = end;
+        }
+
+        if (r.empty()) add(0xffffff);
+    }
+
+    int stops() const { return (int)r.size(); }
+
+    // x 0 (first stop) .. 1 (last stop)
+    void at(float x, uint8_t& ro, uint8_t& go, uint8_t& bo) const
+    {
+        int n = (int)r.size();
+
+        if (n == 1)
+        {
+            ro = (uint8_t)r[0]; go = (uint8_t)g[0]; bo = (uint8_t)b[0];
+            return;
+        }
+
+        if (x < 0) x = 0;
+        if (x > 1) x = 1;
+
+        float p = x * (n - 1);
+        int i = (int)p;
+        if (i >= n - 1) i = n - 2;
+        float f = p - i;
+
+        ro = (uint8_t)(r[i] + (r[i + 1] - r[i]) * f);
+        go = (uint8_t)(g[i] + (g[i + 1] - g[i]) * f);
+        bo = (uint8_t)(b[i] + (b[i + 1] - b[i]) * f);
+    }
+
+private:
+    std::vector<float> r, g, b;
+
+    static bool isHex(char c)
+    {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+            || (c >= 'A' && c <= 'F');
+    }
+
+    void add(uint32_t c)
+    {
+        r.push_back((c >> 16) & 0xFF);
+        g.push_back((c >> 8) & 0xFF);
+        b.push_back(c & 0xFF);
+    }
 };
 
 } // namespace color
