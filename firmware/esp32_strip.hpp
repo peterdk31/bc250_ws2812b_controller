@@ -19,6 +19,15 @@
 #ifndef STRIP_GAMMA
 #define STRIP_GAMMA 2.2f
 #endif
+// dither mode: spatial (default, flicker-free, relies on the diffuser) or
+// temporal — see color_lut.hpp. Passed as a bareword -D (no quotes) so it
+// survives arduino-cli's build-property string; stringify it at the use
+// site with STRIP_DITHER_STR(STRIP_DITHER).
+#ifndef STRIP_DITHER
+#define STRIP_DITHER spatial
+#endif
+#define STRIP_DITHER_STR2(x) #x
+#define STRIP_DITHER_STR(x) STRIP_DITHER_STR2(x)
 
 // the receiver-side `Strip` backend: the same setPixel/size surface the
 // effects render against, but it writes through the shared color LUT into
@@ -29,8 +38,8 @@ class Esp32Strip
 {
 public:
     // frame is the receiver's standalone frame counter; it phases the
-    // temporal dither (see ColorLut) so slow gradients don't step. Defaults
-    // to 0 for callers that render a single static frame.
+    // temporal dither (see ColorLut) so slow gradients don't step. Ignored
+    // by the spatial dither. Defaults to 0 for a single static frame.
     Esp32Strip(Freenove_ESP32_WS2812* strip, int count, const ColorLut& lut,
                uint32_t frame = 0)
         : strip_(strip), count_(count), lut_(lut), frame_(frame) {}
@@ -43,9 +52,9 @@ public:
             return;
 
         strip_->setLedColorData(i,
-                                lut_.map(0, r, ditherThreshold(frame_, i, 0)),
-                                lut_.map(1, g, ditherThreshold(frame_, i, 1)),
-                                lut_.map(2, b, ditherThreshold(frame_, i, 2)));
+                                lut_.map(0, r, frame_, i),
+                                lut_.map(1, g, frame_, i),
+                                lut_.map(2, b, frame_, i));
     }
 
     int size() const { return count_; }

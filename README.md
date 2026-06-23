@@ -231,9 +231,11 @@ into one per-channel lookup table, so they cost nothing per frame. See
         "gamma": "2.2",         // perceptual correction; 1.0 disables.
                                 // three space-separated values ("2.0 2.2
                                 // 2.4") set it per R/G/B channel
-        "white_balance": "b4ffff" // RRGGBB "white" that reads neutral
+        "white_balance": "b4ffff", // RRGGBB "white" that reads neutral
                                   // through the diffuser/filter; ffffff
                                   // disables
+        "dither": "spatial"     // "spatial" (default) or "temporal";
+                                // how sub-code levels are dithered
     },
     "sensors": [ ... ],         // temp sensor candidates, see below
     "esp32": {                  // effects the receiver runs on its own,
@@ -277,6 +279,28 @@ drifting in color because the WS2812's three dies don't track each
 other near their PWM floor. White balance can't fix that (it's the
 same gain at every level); a per-channel gamma can, because it bends
 the midtones without moving the endpoints.
+
+**`dither`** (`"spatial"` default, or `"temporal"`) — how the host
+fakes the brightness levels between two adjacent 8-bit codes. Gamma plus
+a low brightness collapse the 256 input codes onto only a few dozen
+outputs, so a slowly drifting effect would otherwise hold flat for many
+frames then jump a whole code — visible stepping. Both modes round
+neighbouring values opposite ways so the average lands in between; they
+differ in *where* that averaging happens:
+
+- **`spatial`** dithers across adjacent LEDs and lets the diffuser blend
+  them optically. It carries no frame-to-frame change, so it never
+  flickers, and through a diffuser it resolves the finest gradients. This
+  is the right choice for a diffused strip.
+- **`temporal`** dithers across frames, letting the eye average over
+  time. It works on a *bare* (undiffused) strip where there are no
+  neighbours to blend, but at low brightness the per-LED toggle is a
+  large relative step and, at the 30–60 fps frame rate, falls below
+  flicker fusion — so it reads as a low-level scintillation. Use it only
+  without a diffuser.
+
+A reflash (`make flash`) propagates the mode to the receiver's
+standalone animations; the daemon picks it up on restart.
 
 Suggested order when dialing it in:
 

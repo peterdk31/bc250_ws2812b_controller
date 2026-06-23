@@ -335,6 +335,7 @@ void setup()
     standaloneLut.setGamma(STRIP_GAMMA);
     standaloneLut.setWhiteBalance(STRIP_WHITE_BALANCE);
     standaloneLut.setBrightness(STRIP_BRIGHTNESS);
+    standaloneLut.setDither(STRIP_DITHER_STR(STRIP_DITHER));
 
     // bring the strip up immediately for the power-on animation; the
     // first host frame re-inits if the geometry changed meanwhile

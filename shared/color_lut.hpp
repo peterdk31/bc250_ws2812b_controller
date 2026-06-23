@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <math.h>
+#include <string.h>
 
 // the per-channel color correction the strip applies to every pixel:
 // gamma curves each channel, a white-balance gain rescales it, then a
@@ -13,12 +14,24 @@
 // so a breathe rendered on the receiver matches what the daemon sends.
 //
 // The table is kept at 8 extra fractional bits (a uint16 = output * 256)
-// so the final 8-bit round-down can be temporally dithered: see map() and
-// ditherThreshold() below. Without this, gamma + a low brightness collapse
-// the 256 input codes onto only a few dozen output codes, so a slow
-// gradient holds flat for many frames then jumps a whole code — visible
-// stepping. Dithering toggles the LSB between frames so the eye averages
-// it back to the in-between value.
+// so the final 8-bit round-down can be dithered: see map() below. Without
+// this, gamma + a low brightness collapse the 256 input codes onto only a
+// few dozen output codes, so a slow gradient holds flat for many frames
+// then jumps a whole code — visible stepping.
+//
+// *How* the round-down is biased is a pluggable DitherStrategy, picked by
+// the `strip.dither` config key (firmware: STRIP_DITHER):
+//
+//   spatial  (default) — a static per-pixel/channel threshold, so adjacent
+//            LEDs round opposite ways and a diffuser blends them optically
+//            into the in-between value. No temporal component, so nothing
+//            flickers; through a diffuser it resolves finer gradients than
+//            the temporal scheme.
+//   temporal — toggles each LED's LSB between frames so the eye averages it
+//            over time. Resolves gradients on a bare (undiffused) strip, but
+//            at low brightness the ±1 toggle is a 50–100% per-LED modulation
+//            and at 30–60 fps it falls below flicker fusion, reading as a
+//            low-level scintillation. Prefer it only without a diffuser.
 
 // reverse the bits of a byte (0b00000001 -> 0b10000000)
 inline uint8_t bitReverse8(uint8_t b)
@@ -29,16 +42,58 @@ inline uint8_t bitReverse8(uint8_t b)
     return b;
 }
 
-// ordered temporal dither threshold in [0,255] for one pixel/channel on
-// one frame. The frame counter is bit-reversed so consecutive frames land
-// at opposite ends of the range (0, 128, 64, 192, ...): a sub-LSB value is
-// approximated within a handful of frames rather than over a slow ramp.
-// A per-pixel/channel offset keeps neighbours from toggling in lockstep,
-// which would read as a whole-strip flicker instead of dither.
-inline uint8_t ditherThreshold(uint32_t frame, int pixel, int channel)
+// a dither yields, for one pixel/channel (and frame, if it dithers in time),
+// an ordered threshold in [0,255] that biases ColorLut::map()'s round-down.
+// Stateless; the concrete strategies below are shared singletons.
+struct DitherStrategy
 {
-    return (uint8_t)(bitReverse8((uint8_t)frame)
-                     + (uint8_t)(pixel * 59 + channel * 131));
+    virtual ~DitherStrategy() = default;
+    virtual uint8_t threshold(uint32_t frame, int pixel, int channel) const = 0;
+};
+
+// spatial: static per pixel/channel, no frame dependence. Bit-reversing the
+// pixel index hands neighbours far-apart thresholds, so a uniform region
+// dithers at high spatial frequency and the diffuser averages it cleanly;
+// the channel offset keeps R/G/B from rounding identically.
+struct SpatialDither : DitherStrategy
+{
+    uint8_t threshold(uint32_t, int pixel, int channel) const override
+    {
+        return bitReverse8((uint8_t)(pixel + channel * 85));
+    }
+};
+
+// temporal: bit-reverse the frame counter so consecutive frames land at
+// opposite ends of the range (0, 128, 64, 192, ...) — a sub-LSB value is
+// approximated within a handful of frames rather than over a slow ramp.
+// The per-pixel/channel offset keeps neighbours from toggling in lockstep.
+struct TemporalDither : DitherStrategy
+{
+    uint8_t threshold(uint32_t frame, int pixel, int channel) const override
+    {
+        return (uint8_t)(bitReverse8((uint8_t)frame)
+                         + (uint8_t)(pixel * 59 + channel * 131));
+    }
+};
+
+// shared stateless singletons, so copying a ColorLut just copies a pointer
+// — no ownership, no heap, fine on the ESP32
+inline const DitherStrategy& spatialDither()
+{
+    static const SpatialDither s;
+    return s;
+}
+inline const DitherStrategy& temporalDither()
+{
+    static const TemporalDither t;
+    return t;
+}
+
+// map a `strip.dither` config string to a strategy; unknown -> spatial
+inline const DitherStrategy& ditherStrategyByName(const char* name)
+{
+    return (name && strcmp(name, "temporal") == 0) ? temporalDither()
+                                                    : spatialDither();
 }
 
 class ColorLut
@@ -87,19 +142,27 @@ public:
         rebuild();
     }
 
+    // select how map() dithers the round-down: by name (config/firmware
+    // string) or with a strategy directly. Independent of the LUT contents,
+    // so no rebuild() is needed.
+    void setDither(const char* name) { dither_ = &ditherStrategyByName(name); }
+    void setDither(const DitherStrategy& d) { dither_ = &d; }
+
     // channel 0=R, 1=G, 2=B. Rounds the high-precision entry to nearest.
     uint8_t map(int channel, uint8_t value) const
     {
         return (uint8_t)((lut_[channel][value] + 128) >> 8);
     }
 
-    // dithered variant: bias the round-down by a per-pixel/per-frame
-    // threshold (see ditherThreshold) instead of rounding. With the
-    // threshold uniform over [0,255] the result averages exactly to the
-    // true sub-code value, so a slow gradient glides instead of stepping.
-    uint8_t map(int channel, uint8_t value, uint8_t dither) const
+    // dithered variant: the active strategy biases the round-down by a
+    // per-pixel (and, for temporal, per-frame) threshold instead of
+    // rounding. With the threshold uniform over [0,255] the result averages
+    // exactly to the true sub-code value, so a slow gradient glides instead
+    // of stepping — across space or time, per the strategy.
+    uint8_t map(int channel, uint8_t value, uint32_t frame, int pixel) const
     {
-        return (uint8_t)((lut_[channel][value] + dither) >> 8);
+        return (uint8_t)((lut_[channel][value]
+                          + dither_->threshold(frame, pixel, channel)) >> 8);
     }
 
 private:
@@ -118,4 +181,8 @@ private:
     float gamma_[3];
     float wb_[3];
     uint16_t lut_[3][256];
+
+    // flicker-free spatial dither by default; copying a ColorLut copies this
+    // pointer, both pointing at the same shared singleton
+    const DitherStrategy* dither_ = &spatialDither();
 };

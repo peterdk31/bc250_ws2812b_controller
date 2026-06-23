@@ -45,6 +45,10 @@ public:
 
         strip.setBrightness(brightness);
 
+        // dither: "spatial" (default; the diffuser blends adjacent LEDs)
+        // or "temporal" (for a bare strip). See color_lut.hpp.
+        strip.setDither(cfg.get("strip.dither", "spatial").c_str());
+
         // flip the logical-to-physical mapping when the strip is wired
         // so LED 0 is at the far end; effects stay direction-agnostic
         strip.setReversed(cfg.getBool("strip.reverse", false));
@@ -135,6 +139,7 @@ public:
     void setGamma(float g) { lut.setGamma(g); }
     void setGamma(float r, float g, float b) { lut.setGamma(r, g, b); }
     void setWhiteBalance(uint32_t rgb) { lut.setWhiteBalance(rgb); }
+    void setDither(const char* name) { lut.setDither(name); }
 
     void beginFrame()
     {
@@ -158,9 +163,9 @@ public:
 
         int p = 5 + i * 3;
 
-        buf[p++] = lut.map(0, r, ditherThreshold(frame_, i, 0));
-        buf[p++] = lut.map(1, g, ditherThreshold(frame_, i, 1));
-        buf[p]   = lut.map(2, b, ditherThreshold(frame_, i, 2));
+        buf[p++] = lut.map(0, r, frame_, i);
+        buf[p++] = lut.map(1, g, frame_, i);
+        buf[p]   = lut.map(2, b, frame_, i);
     }
 
     bool show()

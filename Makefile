@@ -29,6 +29,7 @@ LED_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),13)
 BRIGHTNESS ?= $(or $(shell $(CONFIG_GET) strip.brightness 2>/dev/null),0.2)
 # strip a leading '#' if present; default to ffffff (no correction)
 WHITE_BALANCE ?= $(or $(shell $(CONFIG_GET) strip.white_balance 2>/dev/null | tr -d '\#'),ffffff)
+DITHER ?= $(or $(shell $(CONFIG_GET) strip.dither 2>/dev/null),spatial)
 FQBN ?= esp32:esp32:esp32
 ESP32_URL = https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
@@ -137,7 +138,7 @@ receiver-shared:
 # freshly built daemon (the firmware's baked-in defaults come from it)
 receiver: led receiver-toolchain receiver-shared
 	arduino-cli compile --fqbn $(FQBN) \
-		--build-property "compiler.cpp.extra_flags=-DESP32_BUILD -DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS) -DDEFAULT_LED_COUNT=$(LEDS) -DDEFAULT_LED_PIN=$(LED_PIN) -DSTRIP_BRIGHTNESS=$(BRIGHTNESS) -DSTRIP_WHITE_BALANCE=0x$(WHITE_BALANCE)" \
+		--build-property "compiler.cpp.extra_flags=-DESP32_BUILD -DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS) -DDEFAULT_LED_COUNT=$(LEDS) -DDEFAULT_LED_PIN=$(LED_PIN) -DSTRIP_BRIGHTNESS=$(BRIGHTNESS) -DSTRIP_WHITE_BALANCE=0x$(WHITE_BALANCE) -DSTRIP_DITHER=$(DITHER)" \
 		esp32_receiver
 
 # the daemon holds the serial port open, so stop it around the upload
