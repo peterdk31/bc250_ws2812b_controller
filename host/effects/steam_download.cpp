@@ -73,7 +73,7 @@ public:
         shown = target;
     }
 
-    void render(WS2812Serial& strip, float t) override
+    void render(Strip& strip, float t) override
     {
         const steam::Downloads& dl = steam::downloads();
 

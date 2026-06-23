@@ -1,68 +1,53 @@
 #include <Freenove_WS2812_Lib_for_ESP32.h>
 #include <Preferences.h>
+#include <LittleFS.h>
 
 // shared with the host (copied into src/ by `make receiver`): the wire
-// protocol, the color LUT, and the actual effect code so the receiver's
-// standalone animations are the same effects the daemon runs, not a
-// hand-kept copy. ESP32_BUILD (set by the Makefile) selects the
-// receiver-side Strip/EffectConfig backends inside effect.hpp.
+// protocol, the streaming frame parser, and the recording format + replay
+// logic. The receiver renders no effects — the daemon records the power-on/
+// shutdown animations to frames and streams them here (CMD_REC_*); this
+// firmware stores them in flash and replays them. So an effect tweak no longer
+// means a reflash; it's picked up on the next daemon start and shown one power
+// cycle later. The only device-specific parts left are LittleFS save/load, the
+// WS2812 output, the UART, and millis() — everything else is shared/recording.hpp.
 #include "src/protocol.hpp"
-#include "src/effect.hpp"
+#include "src/receiver.hpp"
+#include "src/recording.hpp"
 
 #define CHANNEL 0
 #define MAX_LEDS 2048
 
-// cold-start defaults for the power-on and shutdown effects, used until
-// the daemon pushes the configured ones (the config.json "esp32" block)
-// over serial, which the receiver then remembers in NVS. So a fresh,
-// never-driven board shows these; after the first daemon run it uses the
-// configured effects. Any shared/effects/* name works
-#ifndef DEFAULT_POWER_ON_EFFECT
-#define DEFAULT_POWER_ON_EFFECT "boot"
-#endif
-#ifndef DEFAULT_SHUTDOWN_EFFECT
-#define DEFAULT_SHUTDOWN_EFFECT "shutdown"
-#endif
-
-// boot-time baud; `make flash` overrides this with serial.baud from
-// the host config. The receiver re-hunts (below) when traffic doesn't
-// decode and remembers the rate that worked, so this only determines
-// how fast the first-ever lock happens
+// boot-time baud; `make flash` overrides this with serial.baud from the host
+// config. The receiver re-hunts (below) when traffic doesn't decode and
+// remembers the rate that worked, so this only sets how fast the first lock
+// happens
 #ifndef HOST_BAUD
 #define HOST_BAUD 921600
 #endif
 
-// blank the strip when the host stops sending (crash, unplug); the
-// last frame would otherwise stay lit forever. `make flash` overrides
-// this with serial.host_timeout_ms from the host config
+// blank the strip when the host stops sending (crash, unplug); the last frame
+// would otherwise stay lit forever. `make flash` overrides this with
+// serial.host_timeout_ms from the host config
 #ifndef HOST_TIMEOUT_MS
 #define HOST_TIMEOUT_MS 5000
 #endif
 
-// strip geometry for the standalone power-on animation, before the
-// host has said anything. `make flash` overrides these with
-// strip.leds/strip.pin from the host config; geometry from the last
-// valid frame (saved in NVS) outranks both. A count of 0 disables the
-// animation until the first frame ever
-#ifndef DEFAULT_LED_COUNT
-#define DEFAULT_LED_COUNT 0
-#endif
-#ifndef DEFAULT_LED_PIN
-#define DEFAULT_LED_PIN 13
-#endif
-
-// the strip-level correction (brightness/white balance/gamma) the host
-// applies before sending lives in esp32_strip.hpp now, shared with the
-// daemon and baked in by `make flash`.
-
-// when bytes keep arriving but never form a valid frame, the host is
-// probably talking at another rate: step through the candidates (the
-// same set the host's baudToSpeed() supports) until frames decode.
-// Even the slowest effect sends a frame every 200 ms, so 500 ms per
-// candidate is enough to recognize a lock. A silent line never hunts,
-// so a host that merely stopped finds the receiver where it left it
+// when bytes keep arriving but never form a valid frame, the host is probably
+// talking at another rate: step through the candidates (the same set the
+// host's baudToSpeed() supports) until frames decode. Even the slowest replay
+// shows a frame well inside 500 ms, so that's enough per candidate to
+// recognize a lock. A silent line never hunts, so a host that merely stopped
+// finds the receiver where it left it
 #define HUNT_AFTER_MS 500
 #define HUNT_MIN_BYTES 64
+
+// the recording files live here; one per slot (see shared/protocol.hpp)
+#define REC_PATH_POWER_ON "/boot.rec"
+#define REC_PATH_SHUTDOWN "/shutdown.rec"
+
+// upper bound on one recording (frameCount*count*3) so a corrupt header can't
+// trigger a huge allocation; far above any real animation (~tens of KB)
+#define REC_MAX_BYTES (512u * 1024u)
 
 const uint32_t BAUDS[] = {
     9600, 19200, 38400, 57600, 115200, 230400, 460800, 500000,
@@ -74,58 +59,46 @@ Freenove_ESP32_WS2812 *strip = nullptr;
 uint16_t currentCount = 0;
 uint8_t currentPin = 13;
 
-uint8_t *frameBuffer = nullptr;
-size_t frameBufferSize = 0;
-
-// the OS takes a while to start the daemon, so between power-on and the
-// first valid frame the receiver runs an effect on its own (the configured
-// power-on slot, or DEFAULT_POWER_ON_EFFECT) instead of sitting dark. The
-// same machinery plays the shutdown effect after the host sends a shutdown
-// command and exits.
+// the OS takes a while to start the daemon, so between power-on and the first
+// host frame the receiver replays its stored power-on recording (instead of
+// sitting dark). The same player runs the shutdown recording after the host
+// sends a shutdown command and exits.
 bool hostSeen = false;
+bool shuttingDown = false; // replaying the shutdown recording (host has gone)
 
-// the standalone animation currently playing (power-on or shutdown), the
-// shared color LUT it renders through, and its timing. `shuttingDown`
-// marks the post-host shutdown effect; `standaloneDone` latches once a
-// standalone effect finishes so it isn't auto-restarted (the strip holds
-// its last frame), until a host frame takes over again.
-ColorLut standaloneLut;
-std::unique_ptr<Effect> standalone;
-unsigned long standaloneStartMs = 0;
-unsigned long lastStandaloneMs = 0;
-uint32_t standaloneFrame = 0; // phases the temporal dither (see ColorLut)
-bool shuttingDown = false;
-bool standaloneDone = false;
+// the recording currently playing (held in RAM so re-recording its on-flash
+// file can never race playback), and the shared stepper that paces it
+rec::Recording active;
+rec::Player player;
+
+// incoming recording being streamed from the host, accumulated in RAM by the
+// shared receiver and committed to flash on END (one write — so flash stalls
+// can't drop UART bytes mid-stream). recSlot is the slot its END must name.
+rec::RecordingReceiver recRx;
+uint8_t recSlot = 0;
 
 unsigned long lastFrameMs = 0;
 unsigned long lastHuntMs = 0;
-uint32_t bytesSinceValid = 0;
 size_t baudIdx = 0;
 bool blanked = false;
 
-// the last rate that produced valid frames, persisted in NVS so a
-// host baud change without a reflash costs one hunt per change, not
-// one per power cycle
+// the last rate that produced valid frames, persisted in NVS so a host baud
+// change without a reflash costs one hunt per change, not one per power cycle
 Preferences prefs;
 uint32_t currentBaud = HOST_BAUD;
 uint32_t savedBaud = 0;
 uint32_t savedFlashed = 0;
 
-// strip geometry from the last valid frame, persisted alongside the
-// baud so the power-on effect lights the right pixels on the right
-// pin even when the flashed defaults are stale
+// strip geometry from the last valid host frame, persisted so a never-recorded
+// board can still bring the strip up (blank) on the right pin/count before the
+// host arrives; a loaded recording's own geometry outranks it
 uint16_t savedCount = 0;
 uint8_t savedPin = 0;
 
-// one configured slot: which effect, and its settings as key=value pairs.
-// Defined here, above the first function, because arduino-cli emits its
-// generated prototypes there — including ones that return/take SlotConfig
-// — so the type must be visible before that point.
-struct SlotConfig
+const char* recPath(uint8_t slot)
 {
-    std::string effect;
-    EffectConfig::Settings settings;
-};
+    return slot == proto::SLOT_SHUTDOWN ? REC_PATH_SHUTDOWN : REC_PATH_POWER_ON;
+}
 
 void initStrip(uint16_t count, uint8_t pin)
 {
@@ -135,36 +108,11 @@ void initStrip(uint16_t count, uint8_t pin)
         strip = nullptr;
     }
 
-    strip = new Freenove_ESP32_WS2812(
-        count,
-        pin,
-        CHANNEL,
-        TYPE_GRB);
-
+    strip = new Freenove_ESP32_WS2812(count, pin, CHANNEL, TYPE_GRB);
     strip->begin();
 
     currentCount = count;
     currentPin = pin;
-}
-
-bool readExact(uint8_t *buffer, size_t len)
-{
-    size_t received = 0;
-
-    while (received < len)
-    {
-        int n = Serial.readBytes(
-            buffer + received,
-            len - received);
-
-        if (n <= 0)
-            return false;
-
-        received += n;
-        bytesSinceValid += n;
-    }
-
-    return true;
 }
 
 void blankStrip()
@@ -178,97 +126,82 @@ void blankStrip()
     strip->show();
 }
 
-// parse a slot string (effect name on the first line, then key=value
-// lines — see protocol.hpp). A blank/missing effect line falls back to
-// the given default
-SlotConfig parseSlot(const std::string& s, const char* fallback)
+// device side of the recording store: LittleFS read/write around the shared
+// header codec (shared/recording.hpp). The format and field layout live there.
+bool loadRecording(uint8_t slot, rec::Recording& out)
 {
-    SlotConfig c;
-    size_t start = 0;
-    bool firstLine = true;
+    File f = LittleFS.open(recPath(slot), "r");
+    if (!f)
+        return false;
 
-    while (start <= s.size())
+    uint8_t hdr[rec::Recording::kHeaderLen];
+    if (f.read(hdr, sizeof hdr) != sizeof hdr || !out.decodeHeader(hdr))
     {
-        size_t nl = s.find('\n', start);
-        std::string line =
-            s.substr(start, nl == std::string::npos ? std::string::npos
-                                                    : nl - start);
-
-        if (firstLine)
-        {
-            c.effect = line;
-            firstLine = false;
-        }
-        else if (!line.empty())
-        {
-            size_t eq = line.find('=');
-            if (eq != std::string::npos)
-                c.settings.emplace_back(line.substr(0, eq),
-                                        line.substr(eq + 1));
-        }
-
-        if (nl == std::string::npos)
-            break;
-        start = nl + 1;
+        f.close();
+        return false;
     }
 
-    if (c.effect.empty())
-        c.effect = fallback;
+    size_t bytes = (size_t)out.frameCount * out.frameBytes();
+    if (out.count == 0 || out.count > MAX_LEDS || out.frameCount == 0 ||
+        bytes > REC_MAX_BYTES)
+    {
+        f.close();
+        return false;
+    }
 
-    return c;
+    out.data.resize(bytes);
+    bool ok = f.read(out.data.data(), bytes) == bytes;
+    f.close();
+
+    if (!ok)
+    {
+        out.clear();
+        return false;
+    }
+
+    return true;
 }
 
-// the slot the daemon stored in NVS (key "po" or "sd"), or the cold-start
-// default if the host hasn't pushed config yet
-SlotConfig loadSlot(const char* key, const char* fallback)
+void saveRecording(uint8_t slot, const rec::Recording& r)
 {
-    return parseSlot(prefs.getString(key, "").c_str(), fallback);
+    File f = LittleFS.open(recPath(slot), "w");
+    if (!f)
+        return;
+
+    uint8_t hdr[rec::Recording::kHeaderLen];
+    r.encodeHeader(hdr);
+    f.write(hdr, sizeof hdr);
+
+    if (!r.data.empty())
+        f.write(r.data.data(), r.data.size());
+
+    f.close();
 }
 
-// begin a standalone effect, rendered through the shared LUT with the
-// given settings. The settings only need to outlive init(), which copies
-// what the effect needs, so a caller can pass a temporary
-void startStandalone(const SlotConfig& slot, unsigned long now)
+// the hash stored in a slot's file, or 0 if missing/invalid; lets begin()
+// decide whether an upload is unchanged without reading the whole file
+uint32_t storedHash(uint8_t slot)
 {
-    standalone = createEffect(slot.effect);
-    standaloneStartMs = now;
-    lastStandaloneMs = 0; // render the first frame immediately
+    File f = LittleFS.open(recPath(slot), "r");
+    if (!f)
+        return 0;
 
-    if (standalone)
-        standalone->init(EffectConfig(slot.settings), currentCount);
+    uint8_t hdr[rec::Recording::kHeaderLen];
+    bool ok = f.read(hdr, sizeof hdr) == sizeof hdr;
+    f.close();
+
+    return ok ? rec::Recording::headerHash(hdr) : 0;
 }
 
-// advance the standalone effect one frame if its frame delay has elapsed;
-// when it reports finished, stop and hold (a looping effect never does)
-void tickStandalone(unsigned long now)
+// start replaying whatever is in `active`, re-initing the strip if the
+// recording's geometry differs from what's currently up
+void beginReplay()
 {
-    if (!standalone || !strip)
-        return;
+    if (active.valid() &&
+        (active.count != currentCount || active.pin != currentPin))
+        initStrip(active.count, active.pin);
 
-    if (lastStandaloneMs != 0 &&
-        now - lastStandaloneMs < (unsigned long)standalone->frameDelayMs())
-        return;
-
-    lastStandaloneMs = now;
-
-    Esp32Strip sink(strip, currentCount, standaloneLut, standaloneFrame++);
-    sink.beginFrame();
-    standalone->render(sink, (now - standaloneStartMs) / 1000.0f);
-    strip->show();
-
-    if (!standalone->finished())
-        return;
-
-    // the effect has played once. The shutdown effect ends on a blanked
-    // strip; a finite power-on effect just stops on its last frame (boot
-    // ends dark). Either way, don't auto-start anything else — a user who
-    // wants e.g. boot-then-idle composes that into one effect, or sets a
-    // looping power-on effect. A host frame clears this and takes over.
-    if (shuttingDown)
-        blankStrip();
-
-    standalone.reset();
-    standaloneDone = true;
+    player.start(&active);
 }
 
 // a validated command frame from the host
@@ -276,205 +209,84 @@ void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
 {
     if (cmd == proto::CMD_SHUTDOWN)
     {
-        // the host has sent this and exited; play the configured shutdown
-        // effect (remembered in NVS) to completion, then stay dark.
-        // hostSeen stops the power-on path from resuming; clearing
-        // standaloneDone lets shutdown run even if a finite power-on
-        // effect had already finished
+        // the host has sent this and exited; replay the stored shutdown
+        // recording to completion, then stay dark. hostSeen stops the
+        // power-on path from resuming.
         hostSeen = true;
         shuttingDown = true;
-        standaloneDone = false;
-        startStandalone(loadSlot("sd", DEFAULT_SHUTDOWN_EFFECT), millis());
+
+        if (loadRecording(proto::SLOT_SHUTDOWN, active))
+            beginReplay();
+        else
+            blankStrip(); // nothing recorded yet
     }
-    else if (cmd == proto::CMD_CONFIG)
+    else if (cmd == proto::CMD_REC_BEGIN)
     {
-        // payload: power-on slot string '\0' shutdown slot string '\0'.
-        // terminate defensively so a malformed payload can't run off the
-        // buffer, then remember both for the next power-on and shutdown
-        if (len < frameBufferSize)
-            frameBuffer[len] = 0;
-
-        const char* po = (const char*)payload;
-        uint16_t poLen = 0;
-        while (poLen < len && payload[poLen])
-            poLen++;
-        const char* sd = (poLen < len) ? (const char*)payload + poLen + 1 : "";
-
-        prefs.putString("po", po);
-        prefs.putString("sd", sd);
-    }
-}
-
-void setup()
-{
-    prefs.begin("ledrx", false);
-    savedBaud = prefs.getUInt("baud", 0);
-    savedFlashed = prefs.getUInt("flashed", 0);
-    savedCount = prefs.getUShort("count", 0);
-    savedPin = prefs.getUChar("pin", DEFAULT_LED_PIN);
-
-    // trust the remembered rate only if the firmware default is the
-    // same one it was saved under — a reflash with a new HOST_BAUD
-    // means the host config changed, so the new default outranks it
-    if (savedBaud != 0 && savedFlashed == HOST_BAUD)
-        currentBaud = savedBaud;
-
-    Serial.begin(currentBaud);
-
-    // align the hunt cycle with the boot baud when it's in the list
-    for (size_t i = 0; i < NUM_BAUDS; i++)
-        if (BAUDS[i] == currentBaud)
-            baudIdx = i;
-
-    frameBufferSize = MAX_LEDS * 3;
-    frameBuffer = (uint8_t *)malloc(frameBufferSize);
-
-    // the standalone animations render through the same correction the
-    // host bakes into its frames, so they match (values from the flash
-    // config; see esp32_strip.hpp)
-    standaloneLut.setGamma(STRIP_GAMMA);
-    standaloneLut.setWhiteBalance(STRIP_WHITE_BALANCE);
-    standaloneLut.setBrightness(STRIP_BRIGHTNESS);
-    standaloneLut.setDither(STRIP_DITHER_STR(STRIP_DITHER));
-
-    // bring the strip up immediately for the power-on animation; the
-    // first host frame re-inits if the geometry changed meanwhile
-    uint16_t bootCount = savedCount ? savedCount : DEFAULT_LED_COUNT;
-
-    if (bootCount > 0 && bootCount <= MAX_LEDS)
-        initStrip(bootCount, savedPin);
-}
-
-void loop()
-{
-    while (Serial.available())
-    {
-        bytesSinceValid++;
-
-        if (Serial.read() != proto::SYNC0)
-            continue;
-
-        uint8_t sync;
-
-        if (!readExact(&sync, 1))
-            break;
-
-        // command frame: cmd, a little-endian length, the payload, then a
-        // checksum over all of those (see protocol.hpp)
-        if (sync == proto::CMD_SYNC)
+        rec::BeginInfo bi;
+        if (bi.decode(payload, len))
         {
-            uint8_t hdr[3]; // cmd, len_lo, len_hi
-
-            if (!readExact(hdr, 3))
-                break;
-
-            uint8_t cmd = hdr[0];
-            uint16_t len = hdr[1] | (hdr[2] << 8);
-
-            // a bogus length (noise) would stall readExact; drop and resync
-            if (len > frameBufferSize)
-                continue;
-
-            if (len && !readExact(frameBuffer, len))
-                break;
-
-            uint8_t checksum;
-
-            if (!readExact(&checksum, 1))
-                break;
-
-            uint8_t expected = cmd ^ hdr[1] ^ hdr[2];
-            for (uint16_t i = 0; i < len; i++)
-                expected ^= frameBuffer[i];
-
-            if (checksum != expected)
-                continue;
-
-            bytesSinceValid = 0;
-            handleCommand(cmd, frameBuffer, len);
-            continue;
+            recSlot = bi.slot;
+            // unchanged upload (hash matches the stored file): drop it instead
+            // of rewriting flash
+            recRx.begin(bi, bi.hash == storedHash(bi.slot));
         }
+    }
+    else if (cmd == proto::CMD_REC_FRAME)
+    {
+        recRx.frame(payload, len);
+    }
+    else if (cmd == proto::CMD_REC_END)
+    {
+        // commit the buffered recording in one write (no mid-stream stalls); a
+        // skipped/short/mismatched upload just clears state
+        if (recRx.complete() && len >= 1 && payload[0] == recSlot)
+            saveRecording(recSlot, recRx.rec);
 
-        if (sync != proto::SYNC1)
-            continue;
+        recRx.reset();
+    }
+}
 
-        uint8_t header[3];
-
-        if (!readExact(header, 3))
-            break;
-
-        uint8_t pin = header[0];
-
-        uint16_t ledCount =
-            header[1] |
-            (header[2] << 8);
-
-        if (ledCount == 0 || ledCount > MAX_LEDS)
-            continue;
-
-        size_t rgbBytes = ledCount * 3;
-
-        if (!readExact(frameBuffer, rgbBytes))
-            break;
-
-        uint8_t checksum;
-
-        if (!readExact(&checksum, 1))
-            break;
-
-        // XOR of pin, count and pixel bytes; a mismatch means we
-        // latched onto pixel data that looked like a header — drop the
-        // frame and rescan
-        uint8_t expected = header[0] ^ header[1] ^ header[2];
-
-        for (size_t i = 0; i < rgbBytes; i++)
-            expected ^= frameBuffer[i];
-
-        if (checksum != expected)
-            continue;
-
-        if (pin != currentPin ||
-            ledCount != currentCount)
+// the host endpoint: a proto::FrameHandler that drives the real strip. The
+// shared parser (src/receiver.hpp) does all the AA-55 framing and checksum
+// work and calls these when a clean frame lands, so this side only says what a
+// frame *means* on the hardware. The same handler interface the on-screen
+// viewer implements (host/virtual_strip.cpp).
+struct StripHandler : proto::FrameHandler
+{
+    void onPixels(uint8_t pin, uint16_t count, const uint8_t* rgb) override
+    {
+        if (pin != currentPin || count != currentCount)
         {
-            // pixels past the new count (or on the old pin) would
-            // otherwise latch their last color forever
-            if (strip &&
-                (ledCount < currentCount || pin != currentPin))
-            {
+            // pixels past the new count (or on the old pin) would otherwise
+            // latch their last color forever
+            if (strip && (count < currentCount || pin != currentPin))
                 blankStrip();
-            }
 
-            initStrip(ledCount, pin);
+            initStrip(count, pin);
         }
 
-        for (uint16_t i = 0; i < ledCount; i++)
+        for (uint16_t i = 0; i < count; i++)
         {
-            uint8_t *p = &frameBuffer[i * 3];
-
-            strip->setLedColorData(
-                i,
-                p[0],
-                p[1],
-                p[2]);
+            const uint8_t* p = &rgb[i * 3];
+            strip->setLedColorData(i, p[0], p[1], p[2]);
         }
 
         strip->show();
 
         lastFrameMs = millis();
-        bytesSinceValid = 0;
         blanked = false;
         hostSeen = true;
 
-        // the host is (back) in control: drop any standalone animation
-        // and clear the shutdown latch so a stop/start resumes cleanly
+        // the host is (back) in control: drop any standalone replay and free
+        // its RAM, and clear the shutdown latch so a stop/start resumes cleanly
         shuttingDown = false;
-        standaloneDone = false;
-        if (standalone)
-            standalone.reset();
+        player.stop();
+        if (active.frameCount)
+            active.clear();
 
-        // a checksummed frame proves this rate works; writes happen
-        // only when something actually changed, so NVS wear is one
-        // write per baud change or reflash
+        // a checksummed frame proves this rate works; writes happen only when
+        // something actually changed, so NVS wear is one write per baud change
+        // or reflash
         if (currentBaud != savedBaud || savedFlashed != HOST_BAUD)
         {
             prefs.putUInt("baud", currentBaud);
@@ -483,7 +295,8 @@ void loop()
             savedFlashed = HOST_BAUD;
         }
 
-        // remember the geometry for the next power-on effect
+        // remember the geometry so a never-recorded board can still bring the
+        // strip up before the host arrives next time
         if (currentCount != savedCount || currentPin != savedPin)
         {
             prefs.putUShort("count", currentCount);
@@ -493,13 +306,77 @@ void loop()
         }
     }
 
+    void onCommand(uint8_t cmd, const uint8_t* payload, uint16_t len) override
+    {
+        handleCommand(cmd, payload, len);
+    }
+};
+
+StripHandler handler;
+proto::Receiver receiver(handler, MAX_LEDS);
+
+void setup()
+{
+    prefs.begin("ledrx", false);
+    savedBaud = prefs.getUInt("baud", 0);
+    savedFlashed = prefs.getUInt("flashed", 0);
+    savedCount = prefs.getUShort("count", 0);
+    savedPin = prefs.getUChar("pin", 13);
+
+    // trust the remembered rate only if the firmware default is the same one
+    // it was saved under — a reflash with a new HOST_BAUD means the host
+    // config changed, so the new default outranks it
+    if (savedBaud != 0 && savedFlashed == HOST_BAUD)
+        currentBaud = savedBaud;
+
+    // a bigger RX buffer so a recording upload (many frames back-to-back)
+    // can't outrun us while we copy each frame into RAM
+    Serial.setRxBufferSize(1024);
+    Serial.begin(currentBaud);
+
+    // align the hunt cycle with the boot baud when it's in the list
+    for (size_t i = 0; i < NUM_BAUDS; i++)
+        if (BAUDS[i] == currentBaud)
+            baudIdx = i;
+
+    recRx.maxBytes = REC_MAX_BYTES;
+
+    LittleFS.begin(true); // format on first boot if there's no filesystem yet
+
+    // start replaying the stored power-on recording immediately; the first host
+    // frame drops it and takes over (see onPixels). With no recording yet,
+    // bring the strip up blank on the last known geometry so a never-recorded
+    // board isn't undefined.
+    if (loadRecording(proto::SLOT_POWER_ON, active))
+        beginReplay();
+    else if (savedCount > 0 && savedCount <= MAX_LEDS)
+        initStrip(savedCount, savedPin);
+}
+
+void loop()
+{
+    // drain whatever the UART has and push it through the shared parser
+    // (src/receiver.hpp); it carries state across these chunks, recognizes
+    // complete frames and calls the StripHandler, which lights the strip
+    // (onPixels) or acts on a command (onCommand).
+    while (Serial.available())
+    {
+        uint8_t chunk[256];
+        int avail = Serial.available();
+        int want = avail < (int)sizeof chunk ? avail : (int)sizeof chunk;
+        int n = Serial.readBytes(chunk, want);
+
+        if (n > 0)
+            receiver.feed(chunk, (size_t)n);
+    }
+
     unsigned long now = millis();
 
-    // only after the host has talked once, and only when no standalone
-    // animation owns the strip: a silent host that never sent a shutdown
-    // command (a crash/unplug) still goes dark on the timeout. The
-    // shutdown effect drives its own blank, so don't pre-empt it
-    if (hostSeen && strip && !blanked && !shuttingDown && !standaloneDone &&
+    // only after the host has talked once, and only when no shutdown replay
+    // owns the strip: a silent host that never sent a shutdown command (a
+    // crash/unplug) still goes dark on the timeout. The shutdown replay drives
+    // its own blank, so don't pre-empt it.
+    if (hostSeen && strip && !blanked && !shuttingDown &&
         now - lastFrameMs > HOST_TIMEOUT_MS)
     {
         blankStrip();
@@ -509,10 +386,11 @@ void loop()
     unsigned long sinceGood =
         now - (lastHuntMs > lastFrameMs ? lastHuntMs : lastFrameMs);
 
-    // don't hunt for a baud once the host has intentionally gone (shutdown):
-    // there's nothing to lock onto and we'd disturb the animation
-    if (!shuttingDown && !standaloneDone &&
-        bytesSinceValid >= HUNT_MIN_BYTES &&
+    // hunt for the host's baud until it's found (including all through the
+    // power-on replay — that's exactly when we want to lock on). Don't hunt
+    // once the host has intentionally gone (shutdown): there's nothing to lock
+    // onto and we'd disturb the animation.
+    if (!shuttingDown && receiver.bytesSinceValid() >= HUNT_MIN_BYTES &&
         sinceGood > HUNT_AFTER_MS)
     {
         baudIdx = (baudIdx + 1) % NUM_BAUDS;
@@ -522,17 +400,26 @@ void loop()
         while (Serial.available())
             Serial.read();
 
-        bytesSinceValid = 0;
+        // drop any half-frame caught at the old rate and zero the byte counter,
+        // so the next hunt is timed from a clean scan
+        receiver.reset();
         lastHuntMs = now;
     }
 
-    // standalone animations own the strip before the host's first frame
-    // (power-on) and during a shutdown after its last
-    if (((!hostSeen) || shuttingDown) && !standaloneDone && strip)
+    // the replay owns the strip before the host's first frame (power-on) and
+    // during a shutdown after its last. Player::done() holds the final frame.
+    if (((!hostSeen) || shuttingDown) && !player.done() && strip)
     {
-        if (!standalone && !hostSeen)
-            startStandalone(loadSlot("po", DEFAULT_POWER_ON_EFFECT), now);
+        if (const uint8_t* px = player.tick(now))
+        {
+            for (uint16_t i = 0; i < active.count; i++)
+                strip->setLedColorData(i, px[i * 3], px[i * 3 + 1], px[i * 3 + 2]);
+            strip->show();
+        }
 
-        tickStandalone(now);
+        // the shutdown recording ends on its own near-black frame; blank once
+        // it's done so the strip goes truly dark
+        if (player.done() && shuttingDown)
+            blankStrip();
     }
 }

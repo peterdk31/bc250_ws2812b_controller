@@ -1,5 +1,6 @@
 # Build output (make / g++)
 /led
+/virtual-strip
 *.o
 *.d
 

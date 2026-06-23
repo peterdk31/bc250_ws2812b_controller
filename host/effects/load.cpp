@@ -41,7 +41,7 @@ public:
         hwmon::readCpuCounters(prevBusy, prevTotal);
     }
 
-    void render(WS2812Serial& strip, float t) override
+    void render(Strip& strip, float t) override
     {
         float dt = frameDelayMs() / 1000.0f;
         float alpha = smoothing > 0 ? 1.0f - expf(-dt / smoothing) : 1.0f;

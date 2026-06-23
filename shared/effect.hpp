@@ -7,16 +7,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-// Effects render against `Strip`, a thin pixel sink (setPixel/size), and
-// read tuning through `EffectConfig`. Both have two backends so the same
-// effect source compiles on the host and on the ESP32 receiver:
-//   host  -> Strip is WS2812Serial, EffectConfig reads the JSON config
-//   ESP32 -> Strip is Esp32Strip,   EffectConfig just echoes defaults
-// (the receiver has no JSON; strip-level brightness/white balance are
-// baked into Esp32Strip at flash time). Define ESP32_BUILD for the latter.
+// Effects render against `Strip`, a thin pixel sink (setPixel/size), and read
+// tuning through `EffectConfig` (the triggering rule's settings, over JSON).
+// This is host-only: the ESP32 receiver renders no effects — it replays
+// recordings the daemon streams (see host/recorder.hpp, shared/protocol.hpp).
 
 // "RRGGBB" or "#RRGGBB" -> 0xRRGGBB; returns def for an empty string.
-// shared by both EffectConfig backends so they parse colors identically
 inline uint32_t parseHexColor(const std::string& v, uint32_t def)
 {
     if (v.empty())
@@ -26,60 +22,8 @@ inline uint32_t parseHexColor(const std::string& v, uint32_t def)
     return (uint32_t)strtoul(s, nullptr, 16);
 }
 
-#ifdef ESP32_BUILD
-
-#include "esp32_strip.hpp"
-using Strip = Esp32Strip;
-
-// the receiver has no JSON parser: an effect's settings arrive as flat
-// key=value string pairs (decoded from a CMD_CONFIG frame, see
-// protocol.hpp). A default-constructed config has none, so every getter
-// returns its default — that's the cold-start case before the host has
-// pushed any config.
-class EffectConfig
-{
-public:
-    using Settings = std::vector<std::pair<std::string, std::string>>;
-
-    EffectConfig() = default;
-    explicit EffectConfig(const Settings& settings) : settings(&settings) {}
-
-    std::string get(const std::string& key, const std::string& def = "") const
-    {
-        if (settings)
-            for (auto& kv : *settings)
-                if (kv.first == key)
-                    return kv.second;
-
-        return def;
-    }
-
-    int getInt(const std::string& key, int def = 0) const
-    {
-        std::string v = get(key);
-        return v.empty() ? def : atoi(v.c_str());
-    }
-
-    float getFloat(const std::string& key, float def = 0.0f) const
-    {
-        std::string v = get(key);
-        return v.empty() ? def : (float)atof(v.c_str());
-    }
-
-    uint32_t getColor(const std::string& key, uint32_t def) const
-    {
-        return parseHexColor(get(key), def);
-    }
-
-private:
-    const Settings* settings = nullptr;
-};
-
-#else
-
 #include "config_loader.hpp"
-#include "ws2812_serial.hpp"
-using Strip = WS2812Serial;
+#include "strip.hpp"
 
 // config view for one effect activation: the triggering rule's
 // "settings" object, falling back to top-level keys for config shared
@@ -134,8 +78,6 @@ private:
     const Config& cfg;
     const json::Value* overrides;
 };
-
-#endif
 
 class Effect
 {

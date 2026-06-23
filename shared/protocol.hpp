@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-// the host→receiver wire format, shared by the daemon (ws2812_serial.hpp)
+// the host→receiver wire format, shared by the daemon (host/serial_sink.hpp)
 // and the ESP32 firmware so the two can never drift on the byte values.
 //
 // pixel frame:   SYNC0 SYNC1 pin lo hi <pixels...> checksum
@@ -10,9 +10,9 @@
 //
 // the command frame uses a distinct second sync byte so the receiver's
 // pixel-frame parser skips right over it. It's length-prefixed so it can
-// carry a payload (the receiver config), and ends in a checksum (XOR of
-// cmd, the two length bytes and the payload) so noise that happens to
-// start AA 56 almost never validates.
+// carry a payload (a recording header, one recorded frame, ...), and ends in
+// a checksum (XOR of cmd, the two length bytes and the payload) so noise that
+// happens to start AA 56 almost never validates.
 namespace proto
 {
 
@@ -20,15 +20,53 @@ static const uint8_t SYNC0 = 0xAA; // both frame types start here
 static const uint8_t SYNC1 = 0x55; // ...then this for a pixel frame
 static const uint8_t CMD_SYNC = 0x56; // ...or this for a command frame
 
-static const uint8_t CMD_SHUTDOWN = 0x01; // play the shutdown effect (no payload)
-static const uint8_t CMD_CONFIG = 0x02;   // set power-on/shutdown effects
+// The receiver no longer renders effects: the daemon records the configured
+// power-on/shutdown effects to sequences of already-corrected pixel frames
+// and streams them over; the receiver stores them in flash and replays them
+// frame-by-frame during the windows the daemon can't drive the line (cold
+// boot before the daemon is up, and after it exits on shutdown). These three
+// commands carry one recording; CMD_SHUTDOWN triggers shutdown playback.
 
-// CMD_CONFIG payload: two NUL-terminated slot strings, power-on then
-// shutdown. A slot string is the effect name on the first line, then one
-// `key=value` setting per line:
+static const uint8_t CMD_SHUTDOWN = 0x01; // play the stored shutdown recording (no payload)
+
+// CMD_REC_BEGIN: start streaming a recording for one slot. Payload (15 bytes,
+// all little-endian) describes what follows and lets the receiver skip an
+// unchanged upload without a return channel — it compares `hash` against the
+// hash stored in the slot's file and, on a match, drops the incoming frames
+// instead of rewriting flash (one transmit, zero wear). Layout:
 //
-//     rainbow\ncycles_per_second=1\n\0shutdown\ncolor=0028ff\n\0
+//     slot(1) frameMs(2) count(2) pin(1) flags(1) frameCount(2) loopStart(2) hash(4)
 //
-// an empty slot string means "use the firmware's built-in default".
+//   slot       SLOT_POWER_ON / SLOT_SHUTDOWN
+//   frameMs    delay between frames on replay (the effect's frame_ms)
+//   count      LEDs per frame
+//   pin        data pin the recording was rendered for
+//   flags      bit0 = loop (replay wraps); else hold the last frame
+//   frameCount number of CMD_REC_FRAME frames that follow
+//   loopStart  frame to wrap back to when looping (lets a one-shot intro lead
+//              into a looping tail — see the "sequence" config); 0 = whole thing
+//   hash       FNV-1a over the recording's fields and pixel bytes
+static const uint8_t CMD_REC_BEGIN = 0x02;
+
+// CMD_REC_FRAME: one recorded frame, payload = count*3 corrected RGB bytes
+// (count from the preceding CMD_REC_BEGIN). Sent frameCount times in order.
+static const uint8_t CMD_REC_FRAME = 0x03;
+
+// CMD_REC_END: finish the recording for `slot` (payload: slot(1)). The
+// receiver commits the buffered frames to flash (or, in skip mode, no-ops).
+static const uint8_t CMD_REC_END = 0x04;
+
+static const uint8_t SLOT_POWER_ON = 0x00;
+static const uint8_t SLOT_SHUTDOWN = 0x01;
+
+// on-flash recording header (little-endian), written once at the head of a
+// slot's file, then frameCount * count*3 pixel bytes. MAGIC/VERSION let the
+// receiver reject a stale or truncated file; `hash` is the same value
+// CMD_REC_BEGIN carries, so the skip-unchanged check is a header read.
+static const uint8_t REC_MAGIC0 = 'L';
+static const uint8_t REC_MAGIC1 = 'R';
+static const uint8_t REC_VERSION = 2; // 2 added loopStart; a v1 file is rejected
+
+static const uint8_t REC_FLAG_LOOP = 0x01;
 
 } // namespace proto

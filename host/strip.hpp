@@ -1,31 +1,35 @@
 #pragma once
 
 #include <stdint.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <termios.h>
-#include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
 #include <vector>
+#include <string>
 #include "config_loader.hpp"
 #include "color_lut.hpp"
 #include "protocol.hpp"
 
-class WS2812Serial
+// The host-side LED canvas. Effects render into it via setPixel(); it owns
+// the color LUT (brightness/gamma/white-balance/dither) and assembles the
+// wire frame (header + mapped pixels + checksum, see shared/protocol.hpp).
+//
+// It owns no output. endFrame() stamps the checksum and hands back the
+// finished wire bytes; the daemon passes those to whatever Sinks it built
+// from config — the serial hardware, the on-screen viewer, or none at all
+// (see host/sink.hpp). Splitting the canvas from the transport this way is
+// what lets the daemon run with no serial device attached.
+class Strip
 {
 public:
-    static WS2812Serial fromConfig(const Config& cfg)
+    static Strip fromConfig(const Config& cfg)
     {
-        std::string port = cfg.get("serial.port", "/dev/ttyUSB0");
-        int baud = cfg.getInt("serial.baud", 921600);
         int leds = cfg.getInt("strip.leds", 10);
         int pin = cfg.getInt("strip.pin", 13);
         float brightness = cfg.getFloat("strip.brightness", 0.1f);
 
-        WS2812Serial strip(port.c_str(), baud);
+        Strip strip;
 
         strip.setLeds(leds);
         strip.setPin(pin);
@@ -56,68 +60,10 @@ public:
         return strip;
     }
 
-    WS2812Serial(const char* port, int baud = 921600)
+    Strip()
     {
-        speed_t speed = baudToSpeed(baud);
-
-        if (speed == B0)
-        {
-            fprintf(stderr, "unsupported baud rate: %d\n", baud);
-            exit(1);
-        }
-
-        fd = open(port, O_WRONLY | O_NOCTTY);
-
-        if (fd < 0)
-        {
-            perror("serial open");
-            exit(1);
-        }
-
-        // raw mode at the receiver's baud rate; the port may be left in
-        // any state by previous users
-        termios tio;
-
-        if (tcgetattr(fd, &tio) != 0)
-        {
-            perror("tcgetattr");
-            exit(1);
-        }
-
-        cfmakeraw(&tio);
-        tio.c_cflag |= CLOCAL;
-        tio.c_cflag &= ~CRTSCTS;
-        cfsetispeed(&tio, speed);
-        cfsetospeed(&tio, speed);
-
-        if (tcsetattr(fd, TCSANOW, &tio) != 0)
-        {
-            perror("tcsetattr");
-            exit(1);
-        }
-
         leds = 0;
         pin = 0;
-    }
-
-    WS2812Serial(const WS2812Serial&) = delete;
-    WS2812Serial& operator=(const WS2812Serial&) = delete;
-
-    WS2812Serial(WS2812Serial&& other) noexcept
-        : fd(other.fd),
-          buf(std::move(other.buf)),
-          leds(other.leds),
-          pin(other.pin),
-          reversed(other.reversed),
-          lut(other.lut),
-          frame_(other.frame_)
-    {
-        other.fd = -1;
-    }
-
-    ~WS2812Serial()
-    {
-        if (fd >= 0) close(fd);
     }
 
     void setLeds(int l)
@@ -147,8 +93,8 @@ public:
 
         if (leds <= 0) return;
 
-        buf[0] = 0xAA;
-        buf[1] = 0x55;
+        buf[0] = proto::SYNC0;
+        buf[1] = proto::SYNC1;
         buf[2] = (uint8_t)pin;
 
         buf[3] = (uint8_t)(leds & 0xFF);
@@ -168,10 +114,14 @@ public:
         buf[p]   = lut.map(2, b, frame_, i);
     }
 
-    bool show()
+    // finalize the current frame and hand back the exact wire bytes (header
+    // + pixels + trailing checksum). Call after the effect has rendered (and
+    // after any host-side compositing); pass the result to each Sink. The
+    // checksum is XOR of pin, count and pixel bytes, so the receiver can drop
+    // corrupt frames and resync. The reference is valid until the next
+    // beginFrame().
+    const std::vector<uint8_t>& endFrame()
     {
-        // trailing checksum: XOR of pin, count and pixel bytes, so the
-        // receiver can drop corrupt frames and resync
         if (!buf.empty())
         {
             uint8_t sum = 0;
@@ -182,23 +132,7 @@ public:
             buf.back() = sum;
         }
 
-        size_t sent = 0;
-
-        while (sent < buf.size())
-        {
-            ssize_t n = write(fd, buf.data() + sent, buf.size() - sent);
-
-            if (n < 0)
-            {
-                if (errno == EINTR) continue;
-                perror("serial write");
-                return false;
-            }
-
-            sent += n;
-        }
-
-        return true;
+        return buf;
     }
 
     int size() const { return leds; }
@@ -209,8 +143,8 @@ public:
     // current frame's already-mapped pixel bytes, or write a blended set
     // back. The header and trailing checksum are left alone, so a
     // snapshot/writePixels pair composites cleanly between beginFrame()
-    // and show(). Values are post-LUT, so blending them is a plain linear
-    // dissolve in the same space the strip displays.
+    // and endFrame(). Values are post-LUT, so blending them is a plain
+    // linear dissolve in the same space the strip displays.
     std::vector<uint8_t> snapshotPixels() const
     {
         if (leds <= 0) return {};
@@ -225,73 +159,7 @@ public:
             buf[5 + i] = px[i];
     }
 
-    // out-of-band command to the receiver (see protocol.hpp): a
-    // length-prefixed, checksummed frame the pixel-frame parser skips
-    // over. Blocks until the bytes are on the wire (tcdrain) so a caller
-    // can send one and exit immediately
-    bool sendCommand(uint8_t cmd, const uint8_t* payload = nullptr,
-                     uint16_t len = 0)
-    {
-        std::vector<uint8_t> frame;
-        frame.reserve(6 + len);
-
-        frame.push_back(proto::SYNC0);
-        frame.push_back(proto::CMD_SYNC);
-        frame.push_back(cmd);
-        frame.push_back((uint8_t)(len & 0xFF));
-        frame.push_back((uint8_t)(len >> 8));
-
-        uint8_t sum = cmd ^ (uint8_t)(len & 0xFF) ^ (uint8_t)(len >> 8);
-
-        for (uint16_t i = 0; i < len; i++)
-        {
-            frame.push_back(payload[i]);
-            sum ^= payload[i];
-        }
-
-        frame.push_back(sum);
-
-        size_t sent = 0;
-
-        while (sent < frame.size())
-        {
-            ssize_t n = write(fd, frame.data() + sent, frame.size() - sent);
-
-            if (n < 0)
-            {
-                if (errno == EINTR) continue;
-                perror("serial write");
-                return false;
-            }
-
-            sent += n;
-        }
-
-        tcdrain(fd);
-        return true;
-    }
-
 private:
-    static speed_t baudToSpeed(int baud)
-    {
-        switch (baud)
-        {
-            case 9600:    return B9600;
-            case 19200:   return B19200;
-            case 38400:   return B38400;
-            case 57600:   return B57600;
-            case 115200:  return B115200;
-            case 230400:  return B230400;
-            case 460800:  return B460800;
-            case 500000:  return B500000;
-            case 921600:  return B921600;
-            case 1000000: return B1000000;
-            case 1500000: return B1500000;
-            case 2000000: return B2000000;
-            default:      return B0;
-        }
-    }
-
     void resize()
     {
         if (leds <= 0)
@@ -325,7 +193,6 @@ private:
     }
 
 private:
-    int fd;
     std::vector<uint8_t> buf;
 
     int leds;

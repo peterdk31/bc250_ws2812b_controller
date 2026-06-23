@@ -1,8 +1,9 @@
 {
-    "serial": {
-        "port": "/dev/ttyUSB0",
-        "baud": 921600,
-        "host_timeout_ms": 5000
+    "sinks": {
+        "serial": {
+            "port": "/dev/ttyUSB0",
+            "baud": 921600
+        }
     },
     "strip": {
         "leds": 26,
@@ -23,11 +24,28 @@
         "nct6686"
     ],
     "esp32": {
+        "host_timeout_ms": 5000,
         "power_on": {
-            "effect": "boot",
-            "settings": {
-                "intro_seconds": 3
-            }
+            "sequence": [
+                {
+                    "effect": "boot",
+                    "record_seconds": 4,
+                    "settings": {
+                        "intro_seconds": 3,
+                        "color": "ff7818"
+                    }
+                },
+                {
+                    "effect": "breathe",
+                    "record_seconds": 5,
+                    "loop": true,
+                    "settings": {
+                        "color": "ff7818",
+                        "period_seconds": 5,
+                        "min_brightness": 0.05
+                    }
+                }
+            ]
         },
         "shutdown": {
             "effect": "shutdown",

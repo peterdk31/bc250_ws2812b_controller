@@ -38,7 +38,7 @@ sudo systemctl enable --now led-controller
 ```
 
 Then adjust `/etc/led-controller/config.json` for your hardware — at
-least `strip.leds`, `strip.pin` and `serial.port` — and
+least `strip.leds`, `strip.pin` and `sinks.serial.port` — and
 `sudo systemctl restart led-controller`.
 
 To test an effect directly, stop the service (it holds the serial
@@ -58,11 +58,13 @@ sudo make flash                     # compile + upload
 sudo make flash PORT=/dev/ttyACM0   # explicit port; FQBN=... for other boards
 ```
 
-The port, baud rate, host timeout, LED count, pin and brightness
-default to the matching keys from `/etc/led-controller/config.json`
-(falling back to the repo's `config.json`), so flashing targets the
-same adapter the daemon uses and bakes the matching settings into the
-sketch. On first run, `flash` installs the ESP32 core and
+The port, baud rate and host timeout default to the matching keys from
+`/etc/led-controller/config.json` (falling back to the repo's
+`config.json`), so flashing targets the same adapter the daemon uses and
+bakes the baud/timeout into the sketch. Nothing else is baked in — strip
+geometry and the power-on/shutdown animations arrive at runtime as frames
+the daemon streams, so a flash is only needed for a firmware change, never
+for a config or effect change. On first run, `flash` installs the ESP32 core and
 the strip library automatically (also available separately as
 `make receiver-setup`); `make receiver` compiles without uploading.
 
@@ -81,56 +83,82 @@ IDE with the ESP32 core and the `Freenove_WS2812_Lib_for_ESP32`
 library installed, and flash from there.
 
 The receiver is generic: pin and LED count come from the host in every
-frame, so it never needs reflashing for config changes.
+frame, and it renders no effects of its own — so it never needs reflashing
+for config or effect changes.
 
-From power-on until the first valid host frame, the receiver runs a
-**power-on effect** on its own, so the strip isn't dark while the OS boots
-and the daemon starts; on a clean shutdown it runs a **shutdown effect**
-after the host has gone. These standalone animations are the *actual* host
-effects compiled into the firmware (`make receiver` mirrors `effect.hpp`,
-the color LUT and every `shared/effects/*.cpp` into the sketch's
-`src/`), so they render through the same correction as the daemon's frames
-and can't drift from it.
+From power-on until the first valid host frame, the receiver replays a
+**power-on recording** so the strip isn't dark while the OS boots and the
+daemon starts; on a clean shutdown it replays a **shutdown recording** after
+the host has gone. These aren't rendered on the device — the daemon renders
+the configured effects through its own Strip (so the bytes are identical to
+what the hardware shows), captures the frames, and streams them over serial;
+the receiver stores each in flash (LittleFS) and clocks them back out
+frame-by-frame. This is why iterating on the boot/shutdown effects no longer
+needs a reflash.
 
-Both slots are configurable from the `esp32` block in `config.json` — set
-each to any **standalone** effect (the host-data effects in
-`host/effects/` can't run on the receiver) with its own settings:
+Both slots are configured from the `esp32` block in `config.json` — set each
+to any **standalone** effect (the host-data effects in `host/effects/` need
+live sensor data, so they're not meaningful here) with its own settings. A
+slot can also be a **`sequence`** of effects played back to back into one
+recording — typically a one-shot intro leading into a looping idle:
 
 ```jsonc
 "esp32": {
-    "power_on": { "effect": "breathe",  "settings": { "color": "ff7818" } },
+    "power_on": {
+        "sequence": [
+            // CRT power-on, plays once
+            { "effect": "boot", "record_seconds": 4,
+              "settings": { "intro_seconds": 3, "color": "ff7818" } },
+            // then a breathing glow that loops until the daemon takes over
+            { "effect": "breathe", "record_seconds": 5, "loop": true,
+              "settings": { "color": "ff7818", "period_seconds": 5 } }
+        ]
+    },
     "shutdown": { "effect": "shutdown", "settings": { "color": "0028ff" } }
 }
 ```
 
-The receiver has no JSON parser, so the daemon sends this config over
-serial at startup and the receiver remembers it in flash (NVS). It takes
-effect on the next daemon (re)start: the **shutdown** slot applies that
-same session, while the **power-on** slot — which runs before the daemon
-is up — applies on the *next* power cycle. A fresh, never-driven board
-uses the firmware's built-in defaults (`boot` / `shutdown`) until the
-daemon first pushes config. A power-on effect that loops (e.g. `rainbow`
-or `boot`) runs until the host takes over; a finite one plays once and then
-holds its last frame until the host takes over. `boot` plays its CRT-style
-power-on intro and then holds a living glow indefinitely, so the strip
-stays lit through limine and the rest of the OS boot rather than going dark
-on a timer — for a boot-then-idle look, set the power-on slot to a looping
-effect or compose one effect that does both. A shutdown effect plays to completion —
-or, if you pick a looping one, until the strip loses power.
+The daemon records both slots once at startup and streams them over, so an
+edited effect is captured on the next daemon (re)start and shown one power
+cycle later (the power-on recording runs *before* the daemon is up, so it's
+always the previous session's capture). An unchanged recording is dropped on
+the device instead of rewritten to flash (the upload carries a hash the
+receiver compares against the stored file), so flash wear is near zero.
 
-Strip geometry comes from the last valid frame (remembered in NVS),
-falling back to the `strip.leds`/`strip.pin` baked in by `make flash`; a
-never-flashed, never-driven board stays dark. The receiver — independently
+Per segment (or for a single-effect slot): a finite effect (one that reports
+finished, like `shutdown`) is captured to completion; an open-ended effect
+(like `boot`) is captured for `record_seconds`. The **last** segment decides
+the tail — `"loop": true` loops the recording from that segment's first frame
+(so the intro plays once, then the tail loops forever), while the default
+holds the last frame. Earlier segments always play once. The whole recording
+replays at one rate (the first segment's `frame_ms`). For a *seamless* loop,
+make the looping segment's `record_seconds` a whole multiple of its period
+(above, breathe's 5 s capture matches its 5 s `period_seconds`). A fresh,
+never-recorded board stays blank until the first recording arrives.
+
+Preview exactly what the receiver will replay — sequence, loop and all —
+without hardware: run the viewer, then record-and-replay a slot to it.
+
+```sh
+make virtual-strip && ./virtual-strip          # one terminal
+LED_PORT=none ./led config.json --preview power_on   # another
+```
+
+(Running a bare effect, `./led config.json boot`, shows the *live* effect
+instead — it won't reflect the `record_seconds` cap, the sequence, or the
+loop/hold the receiver applies.)
+
+Strip geometry comes from each recording's own header, and otherwise from
+the last valid host frame (remembered in NVS). The receiver — independently
 powered — outlives the host, which is what lets it finish the shutdown
-effect. A host that goes quiet *without* sending the shutdown command (a
-crash or pulled cable) still blanks on the host timeout. A later valid
-frame cancels any standalone state, so `systemctl stop` → `start` resumes
-cleanly.
+recording. A host that goes quiet *without* sending the shutdown command (a
+crash or pulled cable) still blanks on the host timeout. A later valid frame
+cancels any replay, so `systemctl stop` → `start` resumes cleanly.
 
 **Host and receiver must be updated together** when the wire protocol
-changes (e.g. it gained a checksum byte, then a command frame — an old
-receiver ignores the shutdown command and falls back to the timeout
-blank; mismatched checksums are rejected outright).
+changes (it carries a checksum and command frames — an old receiver ignores
+unknown commands and falls back to the timeout blank; mismatched checksums
+are rejected outright).
 
 ## Building and installing the host daemon
 
@@ -156,6 +184,27 @@ led <config>            run the rules
 led <config> <effect>   run a single effect forever (testing)
 led --list              list available effects
 ```
+
+### Previewing without hardware
+
+The frame the daemon renders goes to a list of *sinks* — the serial
+transport for the real strip, and/or an on-screen viewer — so it can run
+with no LED hardware attached. Set `LED_PORT=none` (or `sinks.serial.port` to
+`none`/empty in the config) to skip the serial transport; a *real* port that
+fails to open still exits so systemd reopens it.
+
+Run the terminal viewer in one shell and a headless daemon in another:
+
+```
+make virtual-strip
+./virtual-strip                          # on-screen strip; waits for frames
+
+LED_PORT=none led config.json aurora     # renders into the viewer, no device
+```
+
+The viewer shows exactly what the strip would (same bytes, already
+brightness/gamma/white-balance corrected). Drop `LED_PORT=none` to drive a
+real strip and watch the preview at the same time.
 
 ## Wire protocol
 
@@ -187,13 +236,13 @@ and firmware.
 
 The receiver drops frames with a bad checksum and rescans for sync, so
 a desync (sync bytes occurring inside pixel data) recovers within a
-frame. If no valid frame arrives for `serial.host_timeout_ms` (default
+frame. If no valid frame arrives for `esp32.host_timeout_ms` (default
 5000 — host crashed, cable pulled), the receiver blanks the strip.
 
 The baud rate adapts at runtime: when bytes keep arriving but no frame
 decodes for 0.5 s, the receiver steps to the next rate from the host's
 supported set and retries until frames validate ("baud hunting"), then
-remembers the working rate in flash (NVS). So changing `serial.baud`
+remembers the working rate in flash (NVS). So changing `sinks.serial.baud`
 only needs a service restart: the strip recovers within a few seconds,
 once — after that the receiver boots straight into the remembered
 rate, no reflash needed. Reflashing with a new baud also gives an
@@ -213,15 +262,14 @@ into one per-channel lookup table, so they cost nothing per frame. See
 
 ```jsonc
 {
-    "serial": {
-        "port": "/dev/ttyUSB0",
-        "baud": 921600,             // receiver locks onto this by itself;
-                                    // `make flash` bakes it in as the
-                                    // boot default for an instant lock
-        "host_timeout_ms": 5000     // receiver blanks the strip after this
-                                    // long without a frame; only read by
-                                    // `make flash`, not the daemon
-    },
+    "sinks": {                      // where rendered frames go. Each entry is
+        "serial": {                 // a Sink; omit serial (or LED_PORT=none)
+            "port": "/dev/ttyUSB0", // to run headless. The on-screen viewer
+            "baud": 921600          // is a separate Sink with no config (see
+                                    // "Previewing without hardware"); it
+        }                           // attaches automatically.
+    },                              // baud: receiver locks on by itself;
+                                    // `make flash` bakes it as the boot default
     "strip": {
         "leds": 58,
         "pin": 13,              // ESP32 GPIO driving the strip
@@ -238,9 +286,12 @@ into one per-channel lookup table, so they cost nothing per frame. See
                                 // how sub-code levels are dithered
     },
     "sensors": [ ... ],         // temp sensor candidates, see below
-    "esp32": {                  // effects the receiver runs on its own,
-        "power_on": { ... },    // pushed to it over serial; see "Flashing
-        "shutdown": { ... }     // the receiver". Standalone effects only
+    "esp32": {                  // the receiver. See "Flashing the receiver"
+        "host_timeout_ms": 5000, // blanks the strip after this long without
+                                // a frame; baked by `make flash`, not read
+                                // by the daemon
+        "power_on": { ... },    // effects the receiver runs on its own,
+        "shutdown": { ... }     // pushed over serial. Standalone effects only
     },
     "rules": [ ... ]            // see below
 }
@@ -252,8 +303,9 @@ Three `strip` settings shape what reaches your eye. They stack in this
 order — gamma curves each channel, white balance rescales it, then
 brightness scales the whole thing — and all three are folded into one
 per-channel lookup table on the host, so changing them is free per
-frame. A reflash (`make flash`) is only needed to match the receiver's
-standalone power-on animation; the daemon picks up changes on restart.
+frame. No reflash is needed for the power-on/shutdown animations either:
+they're recorded by the daemon through this same correction, so a restart
+re-captures them with the new values.
 
 **`brightness`** (0..1) — overall output, linear in light. Set this
 first, to whatever is comfortable in the room. The two corrections
@@ -299,8 +351,8 @@ differ in *where* that averaging happens:
   flicker fusion — so it reads as a low-level scintillation. Use it only
   without a diffuser.
 
-A reflash (`make flash`) propagates the mode to the receiver's
-standalone animations; the daemon picks it up on restart.
+The power-on/shutdown animations pick up the mode on the next daemon
+restart (they're re-recorded through this correction) — no reflash needed.
 
 Suggested order when dialing it in:
 
@@ -468,8 +520,8 @@ automatically:
 
 - **`shared/effects/`** — pure animation, no host data. Also linked
   into the firmware, so it can be a receiver power-on/shutdown effect.
-  Render against `Strip&` (it's `WS2812Serial` on the host, the receiver's
-  driver on the ESP32).
+  Render against `Strip&` (it's the canvas in `host/strip.hpp` on the host,
+  the receiver's driver on the ESP32).
 - **`host/effects/`** — needs live host data (sensors, Steam, …). Daemon
   only; can't run on the receiver.
 
@@ -488,5 +540,4 @@ public:
 REGISTER_EFFECT("my_effect", MyEffect)
 ```
 
-Use `Strip&` (not `WS2812Serial&`) for a standalone effect so it compiles
-for the firmware too; host-only effects may use either.
+Always render against `Strip&` so the effect compiles for the firmware too.

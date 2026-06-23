@@ -9,9 +9,9 @@
 // global brightness scales the whole thing — all folded into one
 // 3x256 lookup table so applying it per pixel is a single array read.
 //
-// shared by the host transport (ws2812_serial.hpp, which bakes this in
-// before sending) and the ESP32's standalone animations (esp32_strip.hpp),
-// so a breathe rendered on the receiver matches what the daemon sends.
+// used by the host canvas (host/strip.hpp), which bakes this in before the
+// frame goes to a sink, so every sink — real strip, on-screen viewer, or a
+// recording streamed to the receiver — sees the same corrected pixels.
 //
 // The table is kept at 8 extra fractional bits (a uint16 = output * 256)
 // so the final 8-bit round-down can be dithered: see map() below. Without

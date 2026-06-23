@@ -5,10 +5,14 @@
 #include <thread>
 #include <chrono>
 #include <vector>
+#include <memory>
 #include "effect.hpp"
 #include "motion.hpp"
 #include "rules.hpp"
 #include "steam.hpp"
+#include "serial_sink.hpp"
+#include "virtual_sink.hpp"
+#include "recorder.hpp"
 
 // set from a signal handler; the render loops watch it so a SIGTERM
 // from systemd (or Ctrl-C) breaks out and lets us tell the receiver to
@@ -23,51 +27,111 @@ static double now_seconds()
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-// one receiver slot ("esp32.power_on" / "esp32.shutdown") as a slot
-// string: effect name on the first line, then a `key=value` line per
-// setting (see protocol.hpp). Empty when the slot isn't configured, so
-// the receiver keeps its built-in default for it
-static std::string serializeSlot(const Config& cfg, const std::string& path)
+// wrap already-corrected recording pixels into a wire frame (--preview): the
+// bytes are post-LUT, so unlike Strip they must not be re-corrected. Checksum
+// is XOR of pin, count and pixels, matching shared/protocol.hpp.
+static std::vector<uint8_t> framePixels(uint8_t pin, uint16_t count,
+                                        const uint8_t* px)
 {
-    const json::Value* slot = cfg.find(path);
-    std::string out;
+    std::vector<uint8_t> f;
+    f.reserve(5 + (size_t)count * 3 + 1);
 
-    if (!slot)
-        return out;
+    f.push_back(proto::SYNC0);
+    f.push_back(proto::SYNC1);
+    f.push_back(pin);
+    f.push_back(count & 0xFF);
+    f.push_back(count >> 8);
 
-    if (const json::Value* e = slot->find("effect"))
-        out += json::toString(*e);
-    out += '\n';
+    uint8_t sum = pin ^ (uint8_t)(count & 0xFF) ^ (uint8_t)(count >> 8);
 
-    if (const json::Value* s = slot->find("settings"))
-        if (s->isObject())
-            for (auto& m : s->members)
-                out += m.first + "=" + json::toString(m.second) + "\n";
+    for (uint16_t i = 0; i < count * 3; i++)
+    {
+        f.push_back(px[i]);
+        sum ^= px[i];
+    }
 
-    return out;
+    f.push_back(sum);
+    return f;
 }
 
-// push the receiver's power-on/shutdown effect config (the "esp32" block)
-// so it can store it in NVS and use it for the next power-on and for
-// shutdown. Sent once at startup; picked up on the next daemon (re)start.
-// Skipped entirely when there's no "esp32" block, so we never clobber a
-// remembered config with nothing
-static void sendEsp32Config(const Config& cfg, WS2812Serial& strip)
+// render the receiver's power-on/shutdown effects (the "esp32" block) to
+// frames and stream them over so the receiver can store and replay them — at
+// the next power-on (before the daemon is up) and on shutdown (after it
+// exits). The receiver runs no effect code of its own; these recordings are
+// the only thing it plays standalone. Done once at startup, so an edited
+// effect is picked up on the next daemon (re)start and shown one power cycle
+// later. Skipped entirely when there's no "esp32" block. The recording uses
+// `strip` purely as a correction canvas — by value inside record(), so the
+// daemon's own Strip is untouched. Broadcast to every sink; only the serial
+// transport acts on commands, the rest no-op (see host/sink.hpp).
+static void recordAndUpload(const Config& cfg, const Strip& strip,
+                            std::vector<std::unique_ptr<Sink>>& sinks)
 {
     if (!cfg.find("esp32"))
         return;
 
-    std::string po = serializeSlot(cfg, "esp32.power_on");
-    std::string sd = serializeSlot(cfg, "esp32.shutdown");
+    const struct { const char* path; uint8_t id; } slots[] = {
+        {"esp32.power_on", proto::SLOT_POWER_ON},
+        {"esp32.shutdown", proto::SLOT_SHUTDOWN},
+    };
 
-    std::vector<uint8_t> payload;
-    payload.insert(payload.end(), po.begin(), po.end());
-    payload.push_back(0);
-    payload.insert(payload.end(), sd.begin(), sd.end());
-    payload.push_back(0);
+    for (auto& slot : slots)
+    {
+        rec::Recording r;
 
-    strip.sendCommand(proto::CMD_CONFIG, payload.data(),
-                      (uint16_t)payload.size());
+        if (rec::record(cfg, strip, slot.path, r))
+            rec::upload(sinks, slot.id, r);
+    }
+}
+
+// ./led <config> --preview <slot>: record an esp32 slot and play it back to
+// the sinks exactly as the receiver will, so the viewer previews the real
+// recording — its one-shot intro, then the looping tail (or a held last frame)
+// — not just the live effect. `slotArg` is "power_on"/"shutdown" or a dotted
+// config path. Runs until interrupted; returns the process exit code.
+static int runPreview(const Config& cfg, Strip& strip,
+                      std::vector<std::unique_ptr<Sink>>& sinks,
+                      const std::string& slotArg)
+{
+    std::string slot = slotArg;
+    if (slot.find('.') == std::string::npos)
+        slot = "esp32." + slot;
+
+    rec::Recording r;
+
+    if (!rec::record(cfg, strip, slot, r) || !r.valid())
+    {
+        fprintf(stderr, "preview: could not record %s\n", slot.c_str());
+        return 1;
+    }
+
+    fprintf(stderr,
+            "preview %s: %u frames @ %u ms, loop=%d loopStart=%u "
+            "(Ctrl-C to stop)\n",
+            slot.c_str(), r.frameCount, r.frameMs, r.loop, r.loopStart);
+
+    // drive the shared Player exactly as the receiver does
+    rec::Player player;
+    player.start(&r);
+
+    double start = now_seconds();
+    int sleepMs = r.frameMs / 2 < 1 ? 1 : r.frameMs / 2;
+
+    while (!g_stop)
+    {
+        uint32_t nowMs = (uint32_t)((now_seconds() - start) * 1000.0);
+
+        if (const uint8_t* px = player.tick(nowMs))
+        {
+            std::vector<uint8_t> frame = framePixels(r.pin, r.count, px);
+            for (auto& s : sinks)
+                s->send(frame);
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+    }
+
+    return 0;
 }
 
 static void usage(const char* prog)
@@ -75,10 +139,12 @@ static void usage(const char* prog)
     fprintf(stderr,
             "Usage: %s <config>                       run the rules\n"
             "       %s <config> <effect>              run a single effect\n"
+            "       %s <config> --preview <slot>      replay a recorded esp32 slot\n"
+            "                                         (power_on/shutdown) to the viewer\n"
             "       %s --list                         list available effects\n"
             "       %s --steam-status                 dump Steam download detection\n"
             "       %s --config-get <config> <path>   print a config value\n",
-            prog, prog, prog, prog, prog);
+            prog, prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char** argv)
@@ -103,7 +169,7 @@ int main(int argc, char** argv)
 
     // read one value out of the config through the daemon's own parser,
     // so the build (Makefile) can't drift from how the daemon reads the
-    // same file. prints the scalar at <path> (dotted, e.g. "serial.port")
+    // same file. prints the scalar at <path> (dotted, e.g. "sinks.serial.port")
     // and exits 0; exits 1 with no output when the key is absent, so the
     // caller can fall back to its own default
     if (argc == 4 && strcmp(argv[1], "--config-get") == 0)
@@ -122,7 +188,12 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    if (argc != 2 && argc != 3)
+    // ./led <config> --preview <slot>: record an esp32 slot and play it back to
+    // the sinks, exactly as the receiver will — so the viewer previews the real
+    // recording (sequence, loop and hold included), not just the live effect
+    bool previewMode = (argc == 4 && strcmp(argv[2], "--preview") == 0);
+
+    if (!previewMode && argc != 2 && argc != 3)
     {
         usage(argv[0]);
         return 1;
@@ -139,10 +210,27 @@ int main(int argc, char** argv)
     signal(SIGTERM, onStop);
     signal(SIGINT, onStop);
 
-    WS2812Serial strip = WS2812Serial::fromConfig(cfg);
+    Strip strip = Strip::fromConfig(cfg);
 
-    // tell the receiver which effects to run at power-on and shutdown
-    sendEsp32Config(cfg, strip);
+    // outputs the rendered frame goes to. The list is the fan-out: a serial
+    // transport for the real strip (absent when running headless), plus the
+    // on-screen viewer mirror (always attached — it's a no-op until a viewer
+    // binds its socket). An empty list is fine — the daemon just renders to
+    // nothing. (see host/sink.hpp)
+    std::vector<std::unique_ptr<Sink>> sinks;
+
+    if (auto serial = SerialSink::fromConfig(cfg))
+        sinks.push_back(std::move(serial));
+
+    if (auto viewer = VirtualSink::create())
+        sinks.push_back(std::move(viewer));
+
+    if (previewMode)
+        return runPreview(cfg, strip, sinks, argv[3]);
+
+    // record the power-on/shutdown effects and stream them for the receiver
+    // to replay (the receiver renders nothing itself)
+    recordAndUpload(cfg, strip, sinks);
 
     std::unique_ptr<Effect> effect;
     std::string active;
@@ -224,11 +312,19 @@ int main(int argc, char** argv)
 
         lastShown = std::move(cur);
 
-        // exit on write failure so systemd restarts us and reopens the port
-        if (!strip.show())
+        // stamp the checksum and hand the finished wire frame to every sink.
+        // A fatal sink (serial write failure) ends the loop so systemd
+        // restarts us and reopens the port; best-effort sinks (the viewer)
+        // never report one.
+        const std::vector<uint8_t>& frame = strip.endFrame();
+
+        for (auto& s : sinks)
         {
-            fprintf(stderr, "serial write failed, exiting\n");
-            return false;
+            if (!s->send(frame))
+            {
+                fprintf(stderr, "sink send failed, exiting\n");
+                return false;
+            }
         }
 
         std::this_thread::sleep_for(
@@ -237,14 +333,15 @@ int main(int argc, char** argv)
         return true;
     };
 
-    // on shutdown, hand off to the receiver: it plays the shutdown
-    // effect to completion on its own clock, so the daemon can exit
+    // on shutdown, hand off to the receiver: it replays the stored shutdown
+    // recording to completion on its own clock, so the daemon can exit
     // immediately instead of blocking systemd while it fades. The strip
-    // is independently powered, so it outlives us. (Old firmware that
-    // doesn't know the command ignores it and blanks on its host timeout.)
+    // is independently powered, so it outlives us. (A receiver with no
+    // shutdown recording yet just blanks on its host timeout.)
     auto notifyShutdown = [&]()
     {
-        strip.sendCommand(proto::CMD_SHUTDOWN);
+        for (auto& s : sinks)
+            s->sendCommand(proto::CMD_SHUTDOWN);
     };
 
     // single-effect mode, no rules
@@ -266,9 +363,9 @@ int main(int argc, char** argv)
     if (!loadRules(cfg, rules))
         return 1;
 
-    // the boot animation is the receiver's power-on effect (config's
-    // "esp32" block), played at true power-on while the OS comes up — so
-    // the daemon goes straight to the rules instead of replaying it here
+    // the boot animation is the receiver replaying its stored power-on
+    // recording (config's "esp32" block) at true power-on while the OS comes
+    // up — so the daemon goes straight to the rules instead of playing it here
 
     const double evalInterval = 0.5;
 

@@ -38,7 +38,7 @@ public:
 
     const json::Value& root() const { return rootValue; }
 
-    // dotted path into nested objects, e.g. "serial.port"
+    // dotted path into nested objects, e.g. "sinks.serial.port"
     const json::Value* find(const std::string& path) const
     {
         const json::Value* v = &rootValue;

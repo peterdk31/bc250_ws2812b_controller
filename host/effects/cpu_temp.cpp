@@ -59,7 +59,7 @@ public:
         }
     }
 
-    void render(WS2812Serial& strip, float t) override
+    void render(Strip& strip, float t) override
     {
         float temp = hwmon::readTemp(sensorPath);
         int leds = strip.size();
