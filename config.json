@@ -29,10 +29,12 @@
             "sequence": [
                 {
                     "effect": "boot",
-                    "record_seconds": 4,
+                    "record_seconds": 8.5,
                     "settings": {
-                        "intro_seconds": 3,
-                        "color": "ff7818"
+                        "intro_seconds": 7,
+                        "color": "ffffff",
+                        "settle_seconds": 1.5,
+                        "settle_level": 0.05
                     }
                 },
                 {
@@ -40,7 +42,7 @@
                     "record_seconds": 5,
                     "loop": true,
                     "settings": {
-                        "color": "ff7818",
+                        "color": "ffffff",
                         "period_seconds": 5,
                         "min_brightness": 0.05
                     }
