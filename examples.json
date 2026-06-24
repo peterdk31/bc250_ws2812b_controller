@@ -1,0 +1,44 @@
+{
+    "_comment": "Example config snippets to copy into config.json. Each entry's value is a drop-in replacement for the matching top-level key (e.g. the \"esp32\" block). After editing config.json, restart the daemon — it re-renders these, captures the frames and re-uploads the recordings to the ESP32 (no reflash; the device skips the write if nothing changed).",
+
+    "button_spread_power_on_off": {
+        "_comment": "Experimental power-button light-spread effects. button_on bursts a white front out of the button end of the strip and spreads it in, then settles into a breathing pulse; button_off flies the lit strip back into the button. 'reverse' picks which end the button is on (default true) — a plain direction swap for either mount orientation. The button_on intro is recorded for spread_seconds + period_seconds/2 so it ends at the pulse's dim trough, and breathe opens at that same trough (matching period_seconds + min_brightness), so the handoff and the breathe loop are seamless. If the spread comes from the wrong end on the real strip, set reverse to false on both effects.",
+
+        "esp32": {
+            "host_timeout_ms": 5000,
+            "power_on": {
+                "sequence": [
+                    {
+                        "effect": "button_on",
+                        "record_seconds": 4.5,
+                        "settings": {
+                            "reverse": true,
+                            "color": "ffffff",
+                            "spread_seconds": 2.5,
+                            "period_seconds": 4,
+                            "min_brightness": 0.25
+                        }
+                    },
+                    {
+                        "effect": "breathe",
+                        "record_seconds": 4,
+                        "loop": true,
+                        "settings": {
+                            "color": "ffffff",
+                            "period_seconds": 4,
+                            "min_brightness": 0.25
+                        }
+                    }
+                ]
+            },
+            "shutdown": {
+                "effect": "button_off",
+                "settings": {
+                    "reverse": true,
+                    "color": "ffffff",
+                    "duration_seconds": 1.4
+                }
+            }
+        }
+    }
+}
