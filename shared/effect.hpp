@@ -53,6 +53,12 @@ public:
         return v ? json::toFloat(*v, def) : def;
     }
 
+    bool getBool(const std::string& key, bool def = false) const
+    {
+        const json::Value* v = find(key);
+        return v ? json::toBool(*v, def) : def;
+    }
+
     uint32_t getColor(const std::string& key, uint32_t def) const
     {
         return parseHexColor(get(key), def);
