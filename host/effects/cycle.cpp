@@ -14,6 +14,8 @@
 //
 // config:
 //   period_seconds  default seconds to show each effect (default 30)
+//   order           "random" (default) hops to a random next entry;
+//                   "sequential" walks the list in order and wraps
 //   effects         array of:
 //                     { "effect": name,
 //                       "settings": { ... },   (optional, per-effect)
@@ -38,6 +40,8 @@ public:
 
         defaultPeriod = cfg.getFloat("period_seconds", 30.0f);
         if (defaultPeriod <= 0) defaultPeriod = 30.0f;
+
+        sequential = cfg.get("order", "random") == "sequential";
 
         entries.clear();
 
@@ -80,7 +84,8 @@ public:
             return;
         }
 
-        current = (int)(rand() % entries.size());
+        // sequential starts at the top of the list; random picks a seat
+        current = sequential ? 0 : (int)(rand() % entries.size());
         start(current, 0.0f);
     }
 
@@ -127,12 +132,15 @@ private:
         subStart = t;
     }
 
-    // pick a different entry at random (or the only one), then start it
+    // move to the next entry — the one after this in sequential order, or a
+    // different one at random — then start it
     void advance(float t)
     {
         int next = current;
 
-        if (entries.size() > 1)
+        if (sequential)
+            next = (current + 1) % (int)entries.size();
+        else if (entries.size() > 1)
             while (next == current)
                 next = (int)(rand() % entries.size());
 
@@ -146,6 +154,7 @@ private:
     int ledCount = 0;
     float defaultPeriod = 30.0f;
     float subStart = 0.0f;
+    bool sequential = false;
 };
 
 REGISTER_EFFECT("cycle", Cycle)

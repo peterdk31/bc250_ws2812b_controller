@@ -7,7 +7,7 @@
 //
 // config:
 //   color           RRGGBB (default ff7818, warm amber)
-//   period_seconds  seconds per breath (default 5)
+//   period_seconds  seconds per breath (default 3.5)
 //   min_brightness  floor 0..1 so the strip never fully blanks (default 0.05)
 //   wave_depth      how much the drifting band varies brightness 0..1
 //                   (default 0.30); 0 reproduces the old flat breathe
@@ -16,7 +16,7 @@ class Breathe : public Effect
 public:
     void init(const EffectConfig& cfg, int) override
     {
-        setFrameDelay(cfg, 33);
+        setFrameDelay(cfg, 16);
 
         uint32_t color = cfg.getColor("color", 0xff7818);
 
@@ -24,8 +24,8 @@ public:
         g = (color >> 8) & 0xFF;
         b = color & 0xFF;
 
-        period = cfg.getFloat("period_seconds", 5.0f);
-        if (period <= 0) period = 5.0f;
+        period = cfg.getFloat("period_seconds", 3.5f);
+        if (period <= 0) period = 3.5f;
 
         minLevel = cfg.getFloat("min_brightness", 0.05f);
         waveDepth = cfg.getFloat("wave_depth", 0.30f);
@@ -57,7 +57,7 @@ public:
 
 private:
     uint8_t r = 255, g = 120, b = 24;
-    float period = 5.0f;
+    float period = 3.5f;
     float minLevel = 0.05f;
     float waveDepth = 0.30f;
 };

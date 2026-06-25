@@ -8,7 +8,7 @@
 // scroll drifts and breathes instead of reading as a flat conveyor belt.
 //
 // config:
-//   cycles_per_second hue scroll rate (default 0.625)
+//   cycles_per_second hue scroll rate (default 0.9)
 //   shimmer_depth     how far the brightness dips 0..1 (default 0.18)
 //   sat_depth         how far the saturation eases off 0..1 (default 0.15)
 class Rainbow : public Effect
@@ -18,7 +18,7 @@ public:
     {
         setFrameDelay(cfg, 16);
 
-        speed = cfg.getFloat("cycles_per_second", 0.625f);
+        speed = cfg.getFloat("cycles_per_second", 0.9f);
         shimmerDepth = cfg.getFloat("shimmer_depth", 0.18f);
         satDepth = cfg.getFloat("sat_depth", 0.15f);
     }
@@ -43,7 +43,7 @@ public:
     }
 
 private:
-    float speed = 0.625f;
+    float speed = 0.9f;
     float shimmerDepth = 0.18f;
     float satDepth = 0.15f;
 };

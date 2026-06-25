@@ -18,7 +18,7 @@
 //   smoothing_seconds  load smoothing time constant (default 0.7)
 //   palette            comma-separated stops the wash walks
 //                      (default cool teal -> blue -> violet)
-//   speed              drift / shimmer rate multiplier (default 1.0)
+//   speed              drift / shimmer rate multiplier (default 1.4)
 //   noise              flow/noise blend 0 (sine flow) .. 1 (noise) (default 0.3)
 //   floor_brightness   dim wash on the unlit track 0..1 (default 0.04)
 class Load : public Effect
@@ -26,11 +26,11 @@ class Load : public Effect
 public:
     void init(const EffectConfig& cfg, int) override
     {
-        setFrameDelay(cfg, 33);
+        setFrameDelay(cfg, 16);
 
         smoothing = cfg.getFloat("smoothing_seconds", 0.7f);
         palette = color::Gradient(cfg.get("palette", "00e0c0,2060ff,a040ff"));
-        speed = cfg.getFloat("speed", 1.0f);
+        speed = cfg.getFloat("speed", 1.4f);
         noiseMix = cfg.getFloat("noise", 0.3f);
         floorLevel = cfg.getFloat("floor_brightness", 0.04f);
 
@@ -63,9 +63,14 @@ public:
             float level = cpuSide ? cpu : gpu;
 
             // soft tip: full inside the bar, fading over the single pixel
-            // straddling its end (distance in pixels is d * half)
-            float fill = (level - d) * half + 0.5f;
-            if (fill > 1.0f) fill = 1.0f;
+            // straddling its end (distance in pixels is d * half). `live`
+            // is the same ramp before flooring: 1 inside the bar, 0 deep in
+            // the unlit track, crossing 0..1 across the tip pixel.
+            float live = (level - d) * half + 0.5f;
+            if (live < 0.0f) live = 0.0f;
+            if (live > 1.0f) live = 1.0f;
+
+            float fill = live;
 
             // the unlit track keeps a faint wash rather than going black,
             // so the bar fades down into a living floor instead of an edge
@@ -77,14 +82,21 @@ public:
             // across the strip in one screen direction
             float x = d;
 
+            // freeze the animation in the unlit track (scale time by `live`):
+            // the 0.04 floor sits right on the dither's single-code boundary,
+            // so any frame-to-frame motion there flips pixels on and off and
+            // twinkles. A static floor dithers to fixed dots — a calm dim
+            // glow — while the lit bar and its tip keep the full living wash.
+            float at = t * live;
+
             // aurora-style wash walking the palette: a flow field blended
             // with value noise, so the color drifts and never repeats
-            float w = motion::mix(motion::flow(x, t, speed),
-                                  motion::noise(x, t, speed), noiseMix);
+            float w = motion::mix(motion::flow(x, at, speed),
+                                  motion::noise(x, at, speed), noiseMix);
 
             // a separate slow field shimmers the brightness, so even a
             // full bar is always gently moving
-            float v = 0.6f + 0.4f * motion::shimmer(x, t, speed);
+            float v = 0.6f + 0.4f * motion::shimmer(x, at, speed);
 
             uint8_t r, g, b;
             palette.at(w, r, g, b);
@@ -119,7 +131,7 @@ private:
 
     float smoothing = 0.7f;
     color::Gradient palette;
-    float speed = 1.0f;
+    float speed = 1.4f;
     float noiseMix = 0.3f;
     float floorLevel = 0.04f;
     float cpu = 0;

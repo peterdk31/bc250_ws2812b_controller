@@ -1,10 +1,10 @@
 #include <math.h>
 #include "effect.hpp"
 
-// soft rings of light born at the center on a slow period, expanding
-// outward and fading as they travel — a calm, meditative throb. Several
-// rings can be in flight at once so they overlap gently. Deterministic, no
-// randomness.
+// soft rings of light born at the center on a slow period, swelling as they
+// expand outward and fading as they reach the ends — a calm, meditative
+// throb. Several rings can be in flight at once so they overlap gently.
+// Deterministic, no randomness.
 //
 // config:
 //   color           ring color RRGGBB (default 30c0ff)
@@ -19,7 +19,7 @@ class Pulse : public Effect
 public:
     void init(const EffectConfig& cfg, int) override
     {
-        setFrameDelay(cfg, 33);
+        setFrameDelay(cfg, 16);
 
         unpack(cfg.getColor("color", 0x30c0ff), glow);
         unpack(cfg.getColor("base_color", 0x000010), base);
@@ -55,10 +55,14 @@ public:
             for (int k = 0; k <= rings; k++)
             {
                 float age = t - (newest - k) * period;     // >= 0
-                float radius = age / travelT;               // 0 .. ~1
-                if (radius > 1.2f) continue;
+                float radius = age / travelT;               // 0 .. 1
+                if (radius >= 1.0f) continue;               // faded out
 
-                float amp = 1.0f - radius;                  // fade as it grows
+                // a half-sine envelope over the ring's life: zero at birth so
+                // it fades in from the center instead of popping on at full
+                // brightness, peaks mid-flight, then fades back to zero at the
+                // rim. inv: linear `1 - radius` snapped a fresh ring on hard.
+                float amp = sinf(3.14159265f * radius);
                 if (amp <= 0) continue;
 
                 float d = dist - radius;

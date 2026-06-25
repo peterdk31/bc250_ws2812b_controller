@@ -19,21 +19,21 @@
 //   temp_max    °C where the bar is full (default 85)
 //   cold_color  RRGGBB at the bar's start (default 0000ff)
 //   hot_color   RRGGBB at the bar's end (default ff0000)
-//   speed       shimmer rate multiplier (default 1.0)
+//   speed       shimmer rate multiplier (default 1.4)
 //   floor_brightness  dim cold glow on the unlit track 0..1 (default 0.04)
 class CpuTemp : public Effect
 {
 public:
     void init(const EffectConfig& cfg, int) override
     {
-        setFrameDelay(cfg, 33);
+        setFrameDelay(cfg, 16);
 
         ramp = color::Ramp(cfg.getColor("cold_color", 0x0000ff),
                            cfg.getColor("hot_color", 0xff0000));
 
         tempMin = cfg.getFloat("temp_min", 40.0f);
         tempMax = cfg.getFloat("temp_max", 85.0f);
-        speed = cfg.getFloat("speed", 1.0f);
+        speed = cfg.getFloat("speed", 1.4f);
         floorLevel = cfg.getFloat("floor_brightness", 0.04f);
 
         // the unlit track glows faintly in the cold color, so the strip
@@ -105,7 +105,7 @@ private:
     color::Ramp ramp;
     float tempMin = 40.0f;
     float tempMax = 85.0f;
-    float speed = 1.0f;
+    float speed = 1.4f;
     float floorLevel = 0.04f;
     uint8_t coldR = 0, coldG = 0, coldB = 255;
 };

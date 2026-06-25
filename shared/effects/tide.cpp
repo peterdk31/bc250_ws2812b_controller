@@ -11,18 +11,18 @@
 // config:
 //   palette  comma-separated stops (default deep-blue sunset, looped:
 //            "102060,ff5028,ffb020,4060c0,102060")
-//   speed    slide rate multiplier (default 1.0)
+//   speed    slide rate multiplier (default 1.4)
 //   span     full palette sweeps across the strip (default 1.0)
 class Tide : public Effect
 {
 public:
     void init(const EffectConfig& cfg, int) override
     {
-        setFrameDelay(cfg, 33);
+        setFrameDelay(cfg, 16);
 
         palette = color::Gradient(cfg.get("palette",
                                           "102060,ff5028,ffb020,4060c0,102060"));
-        speed = cfg.getFloat("speed", 1.0f);
+        speed = cfg.getFloat("speed", 1.4f);
         span = cfg.getFloat("span", 1.0f);
     }
 
@@ -48,7 +48,7 @@ public:
 
 private:
     color::Gradient palette;
-    float speed = 1.0f;
+    float speed = 1.4f;
     float span = 1.0f;
 };
 

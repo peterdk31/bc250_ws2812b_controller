@@ -11,13 +11,13 @@
 //   base_color  background RRGGBB (default 000014, near-black blue)
 //   blobs       number of wandering glows (default 3)
 //   width       glow half-width as a fraction of the strip (default 0.10)
-//   speed       wander rate multiplier (default 1.0)
+//   speed       wander rate multiplier (default 1.4)
 class Drift : public Effect
 {
 public:
     void init(const EffectConfig& cfg, int) override
     {
-        setFrameDelay(cfg, 33);
+        setFrameDelay(cfg, 16);
 
         unpack(cfg.getColor("color", 0x6078ff), glow);
         unpack(cfg.getColor("base_color", 0x000014), base);
@@ -28,7 +28,7 @@ public:
         width = cfg.getFloat("width", 0.10f);
         if (width < 0.02f) width = 0.02f;
 
-        speed = cfg.getFloat("speed", 1.0f);
+        speed = cfg.getFloat("speed", 1.4f);
     }
 
     void render(Strip& strip, float t) override
@@ -67,7 +67,7 @@ private:
     float base[3] = {0, 0, 20};
     int blobs = 3;
     float width = 0.10f;
-    float speed = 1.0f;
+    float speed = 1.4f;
 
     static void unpack(uint32_t c, float out[3])
     {

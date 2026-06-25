@@ -51,28 +51,36 @@ struct DitherStrategy
     virtual uint8_t threshold(uint32_t frame, int pixel, int channel) const = 0;
 };
 
-// spatial: static per pixel/channel, no frame dependence. Bit-reversing the
-// pixel index hands neighbours far-apart thresholds, so a uniform region
-// dithers at high spatial frequency and the diffuser averages it cleanly;
-// the channel offset keeps R/G/B from rounding identically.
+// spatial: static per pixel, no frame dependence. Bit-reversing the pixel
+// index hands neighbours far-apart thresholds, so a uniform region dithers
+// at high spatial frequency and the diffuser averages it cleanly.
+//
+// The same threshold is used for all three channels on purpose: a dim
+// saturated colour (e.g. a 0.5-code teal floor) then rounds *up together*
+// on the same pixels, so a lit pixel shows the whole colour. Giving each
+// channel its own threshold instead splits that colour across pixels — you
+// get isolated single-channel dots (a pure-green pixel where the floor is
+// teal) — which reads as stray "wrong" colours rather than a dim wash.
 struct SpatialDither : DitherStrategy
 {
-    uint8_t threshold(uint32_t, int pixel, int channel) const override
+    uint8_t threshold(uint32_t, int pixel, int) const override
     {
-        return bitReverse8((uint8_t)(pixel + channel * 85));
+        return bitReverse8((uint8_t)pixel);
     }
 };
 
 // temporal: bit-reverse the frame counter so consecutive frames land at
 // opposite ends of the range (0, 128, 64, 192, ...) — a sub-LSB value is
 // approximated within a handful of frames rather than over a slow ramp.
-// The per-pixel/channel offset keeps neighbours from toggling in lockstep.
+// The per-pixel offset keeps neighbours from toggling in lockstep; like the
+// spatial strategy it shares one threshold across channels so a dim colour
+// stays on-hue instead of fraying into single-channel dots.
 struct TemporalDither : DitherStrategy
 {
-    uint8_t threshold(uint32_t frame, int pixel, int channel) const override
+    uint8_t threshold(uint32_t frame, int pixel, int) const override
     {
         return (uint8_t)(bitReverse8((uint8_t)frame)
-                         + (uint8_t)(pixel * 59 + channel * 131));
+                         + (uint8_t)(pixel * 59));
     }
 };
 

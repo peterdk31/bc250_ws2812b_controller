@@ -11,7 +11,7 @@
 // config:
 //   palette         comma-separated warm stops (default "2a0a00,ff7d1e",
 //                   deep red -> amber; add stops like ",ffd060" for gold)
-//   speed           drift rate multiplier (default 1.0)
+//   speed           drift rate multiplier (default 1.4)
 //   min_brightness  floor 0..1 so it never goes fully dark (default 0.18)
 //   noise           flow/noise blend 0 (sine flow) .. 1 (noise) (default 0.4)
 class Ember : public Effect
@@ -19,10 +19,10 @@ class Ember : public Effect
 public:
     void init(const EffectConfig& cfg, int) override
     {
-        setFrameDelay(cfg, 33);
+        setFrameDelay(cfg, 16);
 
         palette = color::Gradient(cfg.get("palette", "2a0a00,ff7d1e"));
-        speed = cfg.getFloat("speed", 1.0f);
+        speed = cfg.getFloat("speed", 1.4f);
         minBright = cfg.getFloat("min_brightness", 0.18f);
         noiseMix = cfg.getFloat("noise", 0.4f);
     }
@@ -50,7 +50,7 @@ public:
 
 private:
     color::Gradient palette;
-    float speed = 1.0f;
+    float speed = 1.4f;
     float minBright = 0.18f;
     float noiseMix = 0.4f;
 };

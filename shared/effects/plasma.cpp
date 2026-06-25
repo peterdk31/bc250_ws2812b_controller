@@ -12,17 +12,17 @@
 // config:
 //   palette  comma-separated stops (default cool blue -> teal -> violet,
 //            looped: "0040ff,00d0a0,c040ff,0040ff")
-//   speed    drift rate multiplier (default 1.0)
+//   speed    drift rate multiplier (default 1.4)
 //   noise    sine/noise blend 0 (pure sines) .. 1 (pure noise) (default 0.5)
 class Plasma : public Effect
 {
 public:
     void init(const EffectConfig& cfg, int) override
     {
-        setFrameDelay(cfg, 33);
+        setFrameDelay(cfg, 16);
 
         palette = color::Gradient(cfg.get("palette", "0040ff,00d0a0,c040ff,0040ff"));
-        speed = cfg.getFloat("speed", 1.0f);
+        speed = cfg.getFloat("speed", 1.4f);
         noiseMix = cfg.getFloat("noise", 0.5f);
     }
 
@@ -48,7 +48,7 @@ public:
 
 private:
     color::Gradient palette;
-    float speed = 1.0f;
+    float speed = 1.4f;
     float noiseMix = 0.5f;
 };
 

@@ -9,7 +9,7 @@
 //
 // config:
 //   color             RRGGBB (default ff0000)
-//   sweeps_per_second end-to-end sweeps per second (default 0.5)
+//   sweeps_per_second end-to-end sweeps per second (default 0.7)
 //   tail_pixels       tail length (default 8)
 //   turn_ease         turnaround easing 0 (linear) .. 1 (fully eased)
 //                     (default 1.0)
@@ -28,7 +28,7 @@ public:
         g = (color >> 8) & 0xFF;
         b = color & 0xFF;
 
-        speed = cfg.getFloat("sweeps_per_second", 0.5f);
+        speed = cfg.getFloat("sweeps_per_second", 0.7f);
         turnEase = cfg.getFloat("turn_ease", 1.0f);
         mirror = cfg.getInt("mirror", 0) != 0;
 
@@ -82,7 +82,7 @@ private:
     }
 
     uint8_t r = 255, g = 0, b = 0;
-    float speed = 0.5f;
+    float speed = 0.7f;
     float turnEase = 1.0f;
     bool mirror = false;
     float fadePerFrame = 1.0f;
