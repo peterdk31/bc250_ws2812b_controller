@@ -9,8 +9,8 @@
 // scroll.
 //
 // config:
-//   palette  comma-separated stops (default deep-blue sunset, looped:
-//            "102060,ff5028,ffb020,4060c0,102060")
+//   palette  comma-separated stops (default cool tide, looped:
+//            "102060,1890d0,30d0a0,8040ff,102060")
 //   speed    slide rate multiplier (default 1.4)
 //   span     full palette sweeps across the strip (default 1.0)
 class Tide : public Effect
@@ -21,7 +21,7 @@ public:
         setFrameDelay(cfg, 16);
 
         palette = color::Gradient(cfg.get("palette",
-                                          "102060,ff5028,ffb020,4060c0,102060"));
+                                          "102060,1890d0,30d0a0,8040ff,102060"));
         speed = cfg.getFloat("speed", 1.4f);
         span = cfg.getFloat("span", 1.0f);
     }

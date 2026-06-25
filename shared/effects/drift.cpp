@@ -1,5 +1,6 @@
 #include <math.h>
 #include "effect.hpp"
+#include "color.hpp"
 
 // a few soft glows wandering slowly back and forth over a dark base, their
 // halos overlapping and parting. The calm, satisfying motion of the comet's
@@ -7,7 +8,10 @@
 // quiet night sky rather than blinking sparks. Fully smooth, no randomness.
 //
 // config:
-//   color       glow color RRGGBB (default 6078ff, cool blue-white)
+//   palette     glow stops sampled by halo intensity, so the soft fringe and
+//               the bright core differ in hue (default "2858ff,30d0b0",
+//               blue -> teal). Use a single stop for a solid glow, e.g.
+//               "6078ff".
 //   base_color  background RRGGBB (default 000014, near-black blue)
 //   blobs       number of wandering glows (default 3)
 //   width       glow half-width as a fraction of the strip (default 0.10)
@@ -19,7 +23,7 @@ public:
     {
         setFrameDelay(cfg, 16);
 
-        unpack(cfg.getColor("color", 0x6078ff), glow);
+        palette = color::Gradient(cfg.get("palette", "2858ff,30d0b0"));
         unpack(cfg.getColor("base_color", 0x000014), base);
 
         blobs = cfg.getInt("blobs", 3);
@@ -56,14 +60,19 @@ public:
 
             if (light > 1.0f) light = 1.0f;
 
-            strip.setPixel(i, mix(base[0], glow[0], light),
-                           mix(base[1], glow[1], light),
-                           mix(base[2], glow[2], light));
+            // hue follows intensity: faint fringe -> first stop, bright core
+            // -> last stop, then blended down into the base by `light`
+            uint8_t gr, gg, gb;
+            palette.at(light, gr, gg, gb);
+
+            strip.setPixel(i, mix(base[0], gr, light),
+                           mix(base[1], gg, light),
+                           mix(base[2], gb, light));
         }
     }
 
 private:
-    float glow[3] = {96, 120, 255};
+    color::Gradient palette;
     float base[3] = {0, 0, 20};
     int blobs = 3;
     float width = 0.10f;

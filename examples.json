@@ -24,7 +24,7 @@
                         "record_seconds": 4,
                         "loop": true,
                         "settings": {
-                            "color": "ffffff",
+                            "palette": "ffffff",
                             "period_seconds": 4,
                             "min_brightness": 0.25
                         }

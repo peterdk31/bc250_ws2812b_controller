@@ -1,6 +1,7 @@
 #include <math.h>
 #include "effect.hpp"
 #include "motion.hpp"
+#include "color.hpp"
 
 // "Larson scanner": a bright eye sweeps end to end leaving a fading tail.
 // The turnaround at each end is eased so the eye decelerates into the wall
@@ -8,7 +9,12 @@
 // second eye runs the opposite way so the pair meet and part at the center.
 //
 // config:
-//   color             RRGGBB (default ff0000)
+//   palette           comma-separated stops mapped tail -> head, so the eye
+//                     shifts hue along its length (default "8040ff,30c0ff",
+//                     violet tail into a cyan head). Use a single stop for a
+//                     solid color, e.g. "30c0ff". The trail still fades to
+//                     black on its own, so stops just set the hue, not the
+//                     brightness.
 //   sweeps_per_second end-to-end sweeps per second (default 0.7)
 //   tail_pixels       tail length (default 8)
 //   turn_ease         turnaround easing 0 (linear) .. 1 (fully eased)
@@ -22,11 +28,7 @@ public:
     {
         setFrameDelay(cfg, 16);
 
-        uint32_t color = cfg.getColor("color", 0xff0000);
-
-        r = (color >> 16) & 0xFF;
-        g = (color >> 8) & 0xFF;
-        b = color & 0xFF;
+        palette = color::Gradient(cfg.get("palette", "8040ff,30c0ff"));
 
         speed = cfg.getFloat("sweeps_per_second", 0.7f);
         turnEase = cfg.getFloat("turn_ease", 1.0f);
@@ -60,9 +62,16 @@ public:
             depositHead((leds - 1) - pos);
 
         for (int i = 0; i < leds; i++)
-            strip.setPixel(i, (uint8_t)(r * trail[i]),
-                           (uint8_t)(g * trail[i]),
-                           (uint8_t)(b * trail[i]));
+        {
+            // sample the palette by trail intensity: the bright head (≈1)
+            // takes the last stop, the faint tail (≈0) the first
+            uint8_t cr, cg, cb;
+            palette.at(trail[i], cr, cg, cb);
+
+            strip.setPixel(i, (uint8_t)(cr * trail[i]),
+                           (uint8_t)(cg * trail[i]),
+                           (uint8_t)(cb * trail[i]));
+        }
     }
 
 private:
@@ -81,7 +90,7 @@ private:
             trail[i] = v;
     }
 
-    uint8_t r = 255, g = 0, b = 0;
+    color::Gradient palette;
     float speed = 0.7f;
     float turnEase = 1.0f;
     bool mirror = false;

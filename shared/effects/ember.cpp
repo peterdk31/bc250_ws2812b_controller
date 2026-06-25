@@ -10,7 +10,9 @@
 //
 // config:
 //   palette         comma-separated warm stops (default "2a0a00,ff7d1e",
-//                   deep red -> amber; add stops like ",ffd060" for gold)
+//                   deep red -> amber; add stops like ",ffd060" for gold).
+//                   For a cool glow instead of fire, set a blue/teal palette,
+//                   e.g. "041028,18c0d0,8040ff" (deep blue -> teal -> violet).
 //   speed           drift rate multiplier (default 1.4)
 //   min_brightness  floor 0..1 so it never goes fully dark (default 0.18)
 //   noise           flow/noise blend 0 (sine flow) .. 1 (noise) (default 0.4)

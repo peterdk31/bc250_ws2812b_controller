@@ -1,5 +1,6 @@
 #include <math.h>
 #include "effect.hpp"
+#include "color.hpp"
 
 // soft rings of light born at the center on a slow period, swelling as they
 // expand outward and fading as they reach the ends — a calm, meditative
@@ -7,7 +8,10 @@
 // Deterministic, no randomness.
 //
 // config:
-//   color           ring color RRGGBB (default 30c0ff)
+//   palette         ring stops sampled by ring intensity, so the soft halo
+//                   edge and the bright core differ in hue (default
+//                   "5028ff,30d0ff", violet -> cyan). Use a single stop for a
+//                   solid ring color, e.g. "30c0ff".
 //   base_color      background RRGGBB (default 000010)
 //   period_seconds  seconds between rings (default 4)
 //   width           ring half-width as a fraction of the half-strip
@@ -21,7 +25,7 @@ public:
     {
         setFrameDelay(cfg, 16);
 
-        unpack(cfg.getColor("color", 0x30c0ff), glow);
+        palette = color::Gradient(cfg.get("palette", "5028ff,30d0ff"));
         unpack(cfg.getColor("base_color", 0x000010), base);
 
         period = cfg.getFloat("period_seconds", 4.0f);
@@ -71,14 +75,19 @@ public:
 
             if (light > 1.0f) light = 1.0f;
 
-            strip.setPixel(i, mix(base[0], glow[0], light),
-                           mix(base[1], glow[1], light),
-                           mix(base[2], glow[2], light));
+            // hue follows intensity: faint halo edge -> first stop, bright
+            // core -> last stop, then blended down into the base by `light`
+            uint8_t gr, gg, gb;
+            palette.at(light, gr, gg, gb);
+
+            strip.setPixel(i, mix(base[0], gr, light),
+                           mix(base[1], gg, light),
+                           mix(base[2], gb, light));
         }
     }
 
 private:
-    float glow[3] = {48, 192, 255};
+    color::Gradient palette;
     float base[3] = {0, 0, 16};
     float period = 4.0f;
     float width = 0.18f;
