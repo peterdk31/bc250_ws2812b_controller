@@ -22,15 +22,23 @@ inline float ease(float x)
     return x * x * x * (x * (x * 6.0f - 15.0f) + 10.0f);
 }
 
+// fold a value into 0..1 by reflection (triangle wave of period 2, running
+// 0 -> 1 -> 0). Motion that would leave the 0..1 strip bounces back off each
+// end instead of drifting past it.
+inline float reflect(float x)
+{
+    float ph = fmodf(x, 2.0f);
+    if (ph < 0) ph += 2.0f;
+
+    return ph < 1.0f ? ph : 2.0f - ph;
+}
+
 // triangle wave of period 2 that runs 0 -> 1 -> 0, with the turnarounds
 // eased so a bounce decelerates into each end and accelerates away rather
 // than reversing instantly. `e` blends linear (0) .. fully eased (1).
 inline float pingpong(float t, float e = 1.0f)
 {
-    float ph = fmodf(t, 2.0f);
-    if (ph < 0) ph += 2.0f;
-
-    float tri = ph < 1.0f ? ph : 2.0f - ph;   // 0..1..0, constant speed
+    float tri = reflect(t);                    // 0..1..0, constant speed
     return tri + (ease(tri) - tri) * e;
 }
 

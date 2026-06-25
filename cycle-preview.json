@@ -1,0 +1,48 @@
+{
+    "_comment": "Throwaway preview config: cycles through every effect in order, 5s each, so they can be eyeballed in the virtual strip. Run: LED_PORT=none ./led cycle-preview.json cycle",
+
+    "sinks": {
+        "serial": { "port": "/dev/ttyUSB0", "baud": 921600 }
+    },
+    "strip": {
+        "leds": 26,
+        "pin": 13,
+        "reverse": false,
+        "brightness": 1.0,
+        "gamma": "1.9 1.8 1.7",
+        "white_balance": "b4ffff",
+        "dither": "spatial"
+    },
+    "transition_seconds": 0.6,
+    "sensors": [
+        "k10temp:Tctl",
+        "nct6686:CPU",
+        "nct6687:CPU",
+        "nct6686:AMD TSI Addr 98h",
+        "nct6683:AMD TSI Addr 98h",
+        "nct6686"
+    ],
+
+    "period_seconds": 5,
+    "order": "sequential",
+    "effects": [
+        { "effect": "breathe", "settings": { "palette": "0d4a44,30e090", "min_brightness": 0.05 } },
+        { "effect": "aurora", "settings": { "palette": "10ff80,10a0ff,8040ff" } },
+        { "effect": "drift", "settings": { "palette": "2858ff,30d0b0", "base_color": "000014", "blobs": 3, "width": 0.10 } },
+        { "effect": "plasma", "settings": { "palette": "0040ff,00d0a0,c040ff,0040ff" } },
+        { "effect": "lava", "settings": { "palette": "ff0050,ff5a00,ffd000,00e5ff,7a00ff,ff00d0", "blobs": 4, "radius": 0.2 } },
+        { "effect": "tide", "settings": { "palette": "102060,1890d0,30d0a0,8040ff,102060", "span": 1.0 } },
+        { "effect": "pulse", "settings": { "palette": "5028ff,30d0ff", "base_color": "000010", "width": 0.18, "travel": 1.4 } },
+        { "effect": "comet", "seconds": 8, "settings": { "palette": "8040ff,30c0ff", "tail_pixels": 8, "turn_ease": 1.0, "mirror": 1 } },
+        { "effect": "ember", "settings": { "palette": "2a0a00,ff7d1e", "min_brightness": 0.18 } },
+        { "effect": "rainbow" },
+        { "effect": "load", "settings": { "smoothing_seconds": 0.7, "palette": "00e0c0,2060ff,a040ff" } },
+        { "effect": "cpu_temp", "settings": { "temp_min": 40, "temp_max": 85 } },
+        { "effect": "alarm", "settings": { "pulses_per_second": 2 } },
+        { "effect": "steam_download" },
+        { "effect": "boot", "seconds": 8, "settings": { "intro_seconds": 4, "color": "ffffff", "settle_seconds": 1.5, "settle_level": 0.05 } },
+        { "effect": "shutdown", "seconds": 7, "settings": { "color": "0028ff", "duration_seconds": 5.0 } },
+        { "effect": "button_on", "seconds": 6 },
+        { "effect": "button_off", "seconds": 6 }
+    ]
+}

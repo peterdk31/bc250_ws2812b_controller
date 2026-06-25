@@ -169,6 +169,20 @@
                         }
                     },
                     {
+                        "effect": "lava",
+                        "settings": {
+                            "palette": "ff0050,ff5a00,ffd000,00e5ff,7a00ff,ff00d0",
+                            "blobs": 4,
+                            "radius": 0.2,
+                            "speed": 5.0,
+                            "color_speed": 1.0,
+                            "color_span": 0.5,
+                            "core": 1.6,
+                            "white_hot": 2.5,
+                            "min_brightness": 0.0
+                        }
+                    },
+                    {
                         "effect": "tide",
                         "settings": {
                             "palette": "102060,1890d0,30d0a0,8040ff,102060",

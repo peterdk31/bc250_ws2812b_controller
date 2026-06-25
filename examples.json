@@ -40,5 +40,25 @@
                 }
             }
         }
+    },
+
+    "lava_lamp_idle": {
+        "_comment": "A 'lava lamp' idle: soft metaball blobs drift along the strip, and where two overlap their fields add into a brighter, hotter spot. The blobs are intensity-driven — faint edges sample the start of a palette window, hot overlapping cores its end — and that window slides along the palette over time (color_speed), so the whole scene cycles smoothly through every color. This entry is one object for the \"rules\" array — drop it in as the last (catch-all, no \"if\") rule, replacing the default cycle, or insert it earlier behind your own condition. Warm sweep shown here; for a cool 'blue goo' lamp set palette \"1038c8,1ea0ff,90f0ff\". The blobs start uniformly spaced and visibly separate, then drift and merge; keep radius below about 0.5/blobs to preserve that separation. Fewer/larger blobs (blobs 3, radius 0.15) read as a slow lamp; more/smaller (blobs 6, radius 0.07) as a busier bubbling. color_span is how much palette a blob spans (1.0 = whole palette, no sliding); 'core' is the field that maps to the window's hot end / full brightness — lower it for fatter, hotter blobs. white_hot blooms a strong overlap toward white-hot (a rare hard pileup flashes pure white, ordinary merges only white-tip); set it to 0 to keep overlaps fully palette-colored.",
+
+        "rule": {
+            "effect": "lava",
+            "hold": 0,
+            "settings": {
+                "palette": "c81038,ff6a1e,ffe070",
+                "blobs": 4,
+                "radius": 0.10,
+                "speed": 5.0,
+                "color_speed": 1.0,
+                "color_span": 0.5,
+                "core": 1.6,
+                "white_hot": 2.5,
+                "min_brightness": 0.0
+            }
+        }
     }
 }
