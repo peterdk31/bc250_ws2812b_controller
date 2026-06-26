@@ -19,7 +19,8 @@
 //
 // Build: plain g++, no dependencies. Needs a truecolor-capable terminal.
 //
-// Wire frame (shared/protocol.hpp): AA 55 pin lo hi <R G B>*n checksum.
+// Wire frame (shared/protocol.hpp): AA 55 pin lo hi anim(2) xms(2) <R G B>*n
+// checksum. anim/xms drive the crossfade this viewer mirrors (see Viewer).
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +35,7 @@
 #include <string>
 #include <vector>
 #include "receiver.hpp"
+#include "fade.hpp"
 #include "virtual_strip_socket.hpp"
 
 // the daemon's VirtualSink and this viewer share kVirtualStripSocket so the
@@ -69,13 +71,32 @@ static double nowSeconds()
 // place; this just paints whatever valid pixel frame the Receiver hands it.
 // Command frames fall through to the default no-op — the viewer ignores them,
 // just as they aren't mirrored onto the socket in the first place.
+//
+// It is a faithful software ESP32 for transitions too: it keeps the last frame
+// it showed and, when a frame's anim id changes, dissolves the new one in over
+// it with the same shared fader the firmware uses (shared/fade.hpp), so the
+// preview shows the exact crossfades the strip will.
 struct Viewer : proto::FrameHandler
 {
     double fps = 0;    // updated by the loop, shown in the header line
     bool drew = false; // set on each painted frame; the loop polls and clears it
 
-    void onPixels(uint8_t pin, uint16_t count, const uint8_t* rgb) override
+    void onPixels(uint8_t pin, uint16_t count, uint16_t anim, uint16_t xms,
+                  const uint8_t* rgb) override
     {
+        size_t n = (size_t)count * 3;
+        work_.assign(rgb, rgb + n); // a mutable copy we can blend in place
+
+        uint32_t now = (uint32_t)(nowSeconds() * 1000.0);
+
+        // a new animation: freeze the frame on screen and dissolve into this
+        // one. Skip the very first frame (nothing to fade from) and any
+        // geometry change (the held frame no longer lines up).
+        if (haveLast_ && anim != lastAnim_ && lastShown_.size() == n)
+            fader_.begin(lastShown_.data(), count, xms, now);
+
+        fader_.apply(work_.data(), count, now);
+
         std::string out = "\x1b[H"; // home the cursor and repaint over last frame
 
         char hdr[128];
@@ -87,7 +108,7 @@ struct Viewer : proto::FrameHandler
 
         for (int i = 0; i < count; i++)
         {
-            const uint8_t* p = &rgb[i * 3];
+            const uint8_t* p = &work_[i * 3];
             char cell[40];
             // two background-colored spaces per LED — a solid block of its color
             snprintf(cell, sizeof cell, "\x1b[48;2;%d;%d;%dm  ", p[0], p[1], p[2]);
@@ -99,7 +120,18 @@ struct Viewer : proto::FrameHandler
         fputs(out.c_str(), stdout);
         fflush(stdout);
         drew = true;
+
+        lastShown_ = work_;
+        lastAnim_ = anim;
+        haveLast_ = true;
     }
+
+private:
+    fade::Fader fader_;
+    std::vector<uint8_t> work_;     // incoming frame, blended in place
+    std::vector<uint8_t> lastShown_; // the frame currently on screen
+    uint16_t lastAnim_ = 0;
+    bool haveLast_ = false;
 };
 
 // overwrite just the header line with a status note, leaving the last drawn
@@ -147,7 +179,7 @@ int main(int argc, char** argv)
     printf("\x1b[2J\x1b[?25l"); // clear screen, hide cursor
     status("waiting for frames\xe2\x80\xa6  start `led`, or run an effect");
 
-    std::vector<uint8_t> buf(5 + 2048 * 3 + 1); // a max-size ESP32 frame
+    std::vector<uint8_t> buf(proto::PIX_HEADER + 2048 * 3 + 1); // max ESP32 frame
 
     // each datagram is one whole wire frame, but feed it through the shared
     // streaming parser anyway: same framing/checksum as the daemon and ESP32,

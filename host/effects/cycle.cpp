@@ -108,6 +108,11 @@ public:
     // the idle never ends on its own
     bool finished() const override { return false; }
 
+    // report the active child's id so the daemon stamps it on the frame; when
+    // the cycle hops to the next entry the id changes and the receiver
+    // crossfades, with no transition bookkeeping here
+    uint32_t currentId() const override { return sub ? sub->currentId() : id_; }
+
     int frameDelayMs() const override
     {
         return sub ? sub->frameDelayMs() : 33;

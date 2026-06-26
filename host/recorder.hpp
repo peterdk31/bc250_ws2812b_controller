@@ -106,12 +106,14 @@ inline bool record(const Config& cfg, Strip canvas, const std::string& slot,
             effect->render(canvas, t);
             const std::vector<uint8_t>& wire = canvas.endFrame();
 
-            // wire = SYNC0 SYNC1 pin lo hi <pixels> checksum; the pixels are
-            // the exact corrected bytes the strip shows. pin comes straight off
-            // the frame so a recording always names the pin it was rendered for.
+            // wire = header (proto::PIX_HEADER bytes) + pixels + checksum; the
+            // pixels are the exact corrected bytes the strip shows. pin comes
+            // straight off the frame so a recording always names the pin it was
+            // rendered for. The anim id / crossfade header fields are live-only,
+            // so a recording stores just the pixels.
             out.pin = wire[2];
-            out.data.insert(out.data.end(), wire.begin() + 5,
-                            wire.begin() + 5 + out.count * 3);
+            out.data.insert(out.data.end(), wire.begin() + proto::PIX_HEADER,
+                            wire.begin() + proto::PIX_HEADER + out.count * 3);
             out.frameCount++;
 
             bool finished = effect->finished();

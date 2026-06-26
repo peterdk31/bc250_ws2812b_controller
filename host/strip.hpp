@@ -99,6 +99,32 @@ public:
 
         buf[3] = (uint8_t)(leds & 0xFF);
         buf[4] = (uint8_t)(leds >> 8);
+
+        // anim id and crossfade duration (see protocol.hpp). The id may be
+        // re-stamped after the effect renders (a composite reports its active
+        // child), so setAnimId() rewrites these bytes in place before endFrame.
+        buf[5] = (uint8_t)(animId_ & 0xFF);
+        buf[6] = (uint8_t)(animId_ >> 8);
+        buf[7] = (uint8_t)(transitionMs_ & 0xFF);
+        buf[8] = (uint8_t)(transitionMs_ >> 8);
+    }
+
+    // the global crossfade duration stamped on every frame; set once from
+    // config. The receiver dissolves over this whenever the anim id changes.
+    void setTransitionMs(uint16_t ms) { transitionMs_ = ms; }
+
+    // id of the animation this frame belongs to. Call after render() (so a
+    // composite effect's active child is reflected) and before endFrame(); the
+    // receiver crossfades when it sees this change frame-to-frame.
+    void setAnimId(uint16_t id)
+    {
+        animId_ = id;
+
+        if (buf.size() >= proto::PIX_HEADER)
+        {
+            buf[5] = (uint8_t)(id & 0xFF);
+            buf[6] = (uint8_t)(id >> 8);
+        }
     }
 
     void setPixel(int i, uint8_t r, uint8_t g, uint8_t b)
@@ -107,7 +133,7 @@ public:
 
         if (reversed) i = leds - 1 - i;
 
-        int p = 5 + i * 3;
+        int p = proto::PIX_HEADER + i * 3;
 
         buf[p++] = lut.map(0, r, frame_, i);
         buf[p++] = lut.map(1, g, frame_, i);
@@ -139,26 +165,6 @@ public:
 
     float getBrightness() const { return lut.brightness(); }
 
-    // host-side frame compositing (crossfading between effects): grab the
-    // current frame's already-mapped pixel bytes, or write a blended set
-    // back. The header and trailing checksum are left alone, so a
-    // snapshot/writePixels pair composites cleanly between beginFrame()
-    // and endFrame(). Values are post-LUT, so blending them is a plain
-    // linear dissolve in the same space the strip displays.
-    std::vector<uint8_t> snapshotPixels() const
-    {
-        if (leds <= 0) return {};
-        return std::vector<uint8_t>(buf.begin() + 5, buf.begin() + 5 + leds * 3);
-    }
-
-    void writePixels(const std::vector<uint8_t>& px)
-    {
-        if (leds <= 0 || (int)px.size() < leds * 3) return;
-
-        for (int i = 0; i < leds * 3; i++)
-            buf[5 + i] = px[i];
-    }
-
 private:
     void resize()
     {
@@ -168,7 +174,7 @@ private:
             return;
         }
 
-        buf.resize(5 + leds * 3 + 1); // header + pixels + checksum
+        buf.resize(proto::PIX_HEADER + leds * 3 + 1); // header + pixels + checksum
     }
 
     // RRGGBB hex, optionally '#'-prefixed, as 0xRRGGBB
@@ -200,4 +206,6 @@ private:
     bool reversed = false;
     ColorLut lut;
     uint32_t frame_ = 0; // per-frame dither phase, bumped in beginFrame()
+    uint16_t animId_ = 0;       // stamped per frame; change triggers a crossfade
+    uint16_t transitionMs_ = 0; // crossfade duration carried on every frame
 };

@@ -13,6 +13,7 @@
 #include "src/protocol.hpp"
 #include "src/receiver.hpp"
 #include "src/recording.hpp"
+#include "src/fade.hpp"
 
 #define CHANNEL 0
 #define MAX_LEDS 2048
@@ -82,6 +83,21 @@ unsigned long lastHuntMs = 0;
 size_t baudIdx = 0;
 bool blanked = false;
 
+// crossfading, owned here (and mirrored by the host's viewer) rather than by
+// the daemon: we keep the last frame shown and, when the incoming animation's
+// id changes, dissolve the new one in over it with the shared fader. Every
+// frame — live (onPixels) or replayed (boot/shutdown recordings) — goes through
+// show() below carrying an id, so the boot→live and live→shutdown handoffs are
+// just ordinary id changes; there's no "am I replaying?" state to track. Live
+// ids ride the wire; replay frames get a reserved per-slot id (proto::ANIM_*),
+// which the firmware knows from the slot it's playing (see shared/fade.hpp).
+fade::Fader fader;
+uint8_t lastShown[MAX_LEDS * 3]; // last frame written to the strip
+uint8_t frameBuf[MAX_LEDS * 3];  // scratch: the incoming frame, blended in place
+uint16_t lastAnimId = proto::ANIM_NONE; // id of the frame on screen
+uint16_t lastShownCount = 0;     // its LED count: a dissolve needs matching geometry
+uint16_t replayXms = 0;          // crossfade ms for a shutdown replay (from CMD_SHUTDOWN)
+
 // the last rate that produced valid frames, persisted in NVS so a host baud
 // change without a reflash costs one hunt per change, not one per power cycle
 Preferences prefs;
@@ -124,6 +140,47 @@ void blankStrip()
         strip->setLedColorData(i, 0, 0, 0);
 
     strip->show();
+
+    // the strip is black now: record that as the last shown, under a sentinel
+    // id, so the next frame (a returning host, or a replay) dissolves up from
+    // black rather than snapping
+    if ((size_t)currentCount * 3 <= sizeof lastShown)
+    {
+        memset(lastShown, 0, (size_t)currentCount * 3);
+        lastShownCount = currentCount;
+    }
+    lastAnimId = proto::ANIM_NONE;
+}
+
+// the one place a frame reaches the strip. Every source — live frames and
+// replayed recordings alike — calls this with the animation's id; when the id
+// differs from what's on screen we dissolve the new frame in over the last
+// (as long as the geometry matches), then remember it. That single rule covers
+// live switches, the boot→live handoff and the live→shutdown handoff, so no
+// source needs to special-case transitions (see shared/fade.hpp).
+void show(uint16_t animId, uint16_t count, uint16_t xms, const uint8_t* px)
+{
+    if (!strip || (size_t)count * 3 > sizeof frameBuf)
+        return;
+
+    uint32_t now = millis();
+
+    // a new animation, and the held frame still lines up: start the dissolve
+    if (animId != lastAnimId && count == lastShownCount)
+        fader.begin(lastShown, count, xms, now);
+
+    lastAnimId = animId;
+
+    memcpy(frameBuf, px, (size_t)count * 3);
+    fader.apply(frameBuf, count, now);
+
+    for (uint16_t i = 0; i < count; i++)
+        strip->setLedColorData(i, frameBuf[i * 3], frameBuf[i * 3 + 1],
+                               frameBuf[i * 3 + 2]);
+    strip->show();
+
+    memcpy(lastShown, frameBuf, (size_t)count * 3);
+    lastShownCount = count;
 }
 
 // device side of the recording store: LittleFS read/write around the shared
@@ -215,6 +272,12 @@ void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
         hostSeen = true;
         shuttingDown = true;
 
+        // optional 2-byte payload: how long to dissolve from the last live
+        // frame into the shutdown recording (see protocol.hpp). The replay path
+        // stamps proto::ANIM_SHUTDOWN on those frames, so the dissolve happens
+        // through show() like any other id change — no special-casing here.
+        replayXms = len >= 2 ? (uint16_t)(payload[0] | (payload[1] << 8)) : 0;
+
         if (loadRecording(proto::SLOT_SHUTDOWN, active))
             beginReplay();
         else
@@ -253,7 +316,8 @@ void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
 // viewer implements (host/virtual_strip.cpp).
 struct StripHandler : proto::FrameHandler
 {
-    void onPixels(uint8_t pin, uint16_t count, const uint8_t* rgb) override
+    void onPixels(uint8_t pin, uint16_t count, uint16_t anim, uint16_t xms,
+                  const uint8_t* rgb) override
     {
         if (pin != currentPin || count != currentCount)
         {
@@ -265,13 +329,9 @@ struct StripHandler : proto::FrameHandler
             initStrip(count, pin);
         }
 
-        for (uint16_t i = 0; i < count; i++)
-        {
-            const uint8_t* p = &rgb[i * 3];
-            strip->setLedColorData(i, p[0], p[1], p[2]);
-        }
-
-        strip->show();
+        // a switch (the anim id changed) dissolves; a geometry change snaps,
+        // since show() only fades when the held frame's count still matches
+        show(anim, count, xms, rgb);
 
         lastFrameMs = millis();
         blanked = false;
@@ -412,9 +472,15 @@ void loop()
     {
         if (const uint8_t* px = player.tick(now))
         {
-            for (uint16_t i = 0; i < active.count; i++)
-                strip->setLedColorData(i, px[i * 3], px[i * 3 + 1], px[i * 3 + 2]);
-            strip->show();
+            // stamp the slot's reserved id so the handoff is an ordinary id
+            // change: shutdown frames dissolve in over the last live frame
+            // (replayXms); boot frames carry no fade of their own (xms 0) — the
+            // first live frame dissolves over the boot recording's last frame,
+            // using that live frame's own crossfade duration
+            if (shuttingDown)
+                show(proto::ANIM_SHUTDOWN, active.count, replayXms, px);
+            else
+                show(proto::ANIM_BOOT, active.count, 0, px);
         }
 
         // the shutdown recording ends on its own near-black frame; blank once

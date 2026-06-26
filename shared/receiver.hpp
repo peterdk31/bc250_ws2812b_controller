@@ -23,9 +23,13 @@ struct FrameHandler
     virtual ~FrameHandler() = default;
 
     // a validated pixel frame: `count` LEDs as RGB triples at
-    // rgb[0 .. count*3), for the strip on data pin `pin`. The pointer is into
-    // the Receiver's buffer and is valid only for the duration of the call.
-    virtual void onPixels(uint8_t pin, uint16_t count, const uint8_t* rgb) = 0;
+    // rgb[0 .. count*3), for the strip on data pin `pin`. `anim` ids the
+    // animation producing the frame and `xms` is the crossfade duration — when
+    // `anim` differs from the previous frame, dissolve this one in over the
+    // last shown across `xms` ms (see shared/fade.hpp). The pointer is into the
+    // Receiver's buffer and is valid only for the duration of the call.
+    virtual void onPixels(uint8_t pin, uint16_t count, uint16_t anim,
+                          uint16_t xms, const uint8_t* rgb) = 0;
 
     // a validated command frame (protocol.hpp). `payload` is NUL-terminated
     // (one spare byte past `len`) so string payloads need no copy. Default:
@@ -126,11 +130,14 @@ private:
             break;
 
         case PIX_HDR:
+            // pin, count(2), anim(2), xms(2) — see protocol.hpp's PIX_HEADER
             hdr_[have_++] = b;
-            if (have_ == 3)
+            if (have_ == 7)
             {
                 pin_ = hdr_[0];
                 count_ = (uint16_t)(hdr_[1] | (hdr_[2] << 8));
+                anim_ = (uint16_t)(hdr_[3] | (hdr_[4] << 8));
+                xms_ = (uint16_t)(hdr_[5] | (hdr_[6] << 8));
 
                 // zero or too-many LEDs: a header-shaped run of noise. Rescan.
                 if (count_ == 0 || (size_t)count_ * 3 > cap_)
@@ -141,7 +148,8 @@ private:
 
                 need_ = (size_t)count_ * 3;
                 have_ = 0;
-                sum_ = hdr_[0] ^ hdr_[1] ^ hdr_[2];
+                sum_ = hdr_[0] ^ hdr_[1] ^ hdr_[2] ^ hdr_[3] ^ hdr_[4]
+                       ^ hdr_[5] ^ hdr_[6];
                 state_ = PIX_DATA;
             }
             break;
@@ -159,7 +167,7 @@ private:
             if (b == sum_)
             {
                 bytesSinceValid_ = 0;
-                handler_.onPixels(pin_, count_, buf_.data());
+                handler_.onPixels(pin_, count_, anim_, xms_, buf_.data());
             }
             state_ = SCAN;
             break;
@@ -210,13 +218,15 @@ private:
     std::vector<uint8_t> buf_; // cap_ + 1, the extra byte for the NUL above
 
     State state_ = SCAN;
-    uint8_t hdr_[3];          // pin/count or cmd/len, filled in *_HDR
+    uint8_t hdr_[7];          // pixel header (7) or cmd/len (3), filled in *_HDR
     size_t have_ = 0;         // bytes of the current field gathered so far
     size_t need_ = 0;         // bytes expected in the current data run
     uint8_t sum_ = 0;         // running checksum over header + data
 
     uint8_t pin_ = 0;
     uint16_t count_ = 0;
+    uint16_t anim_ = 0;
+    uint16_t xms_ = 0;
     uint8_t cmd_ = 0;
     uint16_t len_ = 0;
 

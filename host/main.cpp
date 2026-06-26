@@ -29,19 +29,27 @@ static double now_seconds()
 
 // wrap already-corrected recording pixels into a wire frame (--preview): the
 // bytes are post-LUT, so unlike Strip they must not be re-corrected. Checksum
-// is XOR of pin, count and pixels, matching shared/protocol.hpp.
+// is XOR of the header and pixel bytes, matching shared/protocol.hpp. A
+// recording is one continuous animation (its own intro/loop is baked in), so
+// every frame carries the same anim id (0) and no crossfade (xms 0) — the
+// viewer plays it straight through with no dissolves.
 static std::vector<uint8_t> framePixels(uint8_t pin, uint16_t count,
                                         const uint8_t* px)
 {
     std::vector<uint8_t> f;
-    f.reserve(5 + (size_t)count * 3 + 1);
+    f.reserve(proto::PIX_HEADER + (size_t)count * 3 + 1);
 
     f.push_back(proto::SYNC0);
     f.push_back(proto::SYNC1);
     f.push_back(pin);
     f.push_back(count & 0xFF);
     f.push_back(count >> 8);
+    f.push_back(0); // anim lo
+    f.push_back(0); // anim hi
+    f.push_back(0); // xms lo
+    f.push_back(0); // xms hi
 
+    // the four zero header bytes XOR out, so the sum is pin/count/pixels
     uint8_t sum = pin ^ (uint8_t)(count & 0xFF) ^ (uint8_t)(count >> 8);
 
     for (uint16_t i = 0; i < count * 3; i++)
@@ -237,14 +245,13 @@ int main(int argc, char** argv)
     const json::Value* activeSettings = nullptr;
     double effectStart = 0;
 
-    // crossfade state: when an effect is replaced we dissolve from the
-    // last displayed frame (frozen) into the new effect over fadeDur
-    // seconds, so switches glide instead of snapping. fadeDur == 0
-    // disables it. fadeFrom is empty when no fade is in flight.
-    const float fadeDur = cfg.getFloat("transition_seconds", 0.6f);
-    std::vector<uint8_t> lastShown; // bytes last pushed to the strip
-    std::vector<uint8_t> fadeFrom;  // outgoing frame held steady mid-fade
-    double fadeStart = 0;
+    // crossfading now lives on the receiver (and the viewer): every frame
+    // carries the rendering effect's id and a global crossfade duration, and
+    // they dissolve whenever the id changes (see shared/fade.hpp). The daemon
+    // just stamps those — it composites nothing itself. The same duration
+    // drives the live→shutdown dissolve (sent with CMD_SHUTDOWN).
+    const uint16_t crossfadeMs = (uint16_t)cfg.getInt("crossfade_ms", 600);
+    strip.setTransitionMs(crossfadeMs);
 
     auto activate = [&](const std::string& name,
                         const json::Value* settings) -> bool
@@ -261,20 +268,6 @@ int main(int argc, char** argv)
         active = name;
         activeSettings = settings;
         effectStart = now_seconds();
-
-        // begin a dissolve from whatever was last on the strip; skip it
-        // on the very first activation (nothing to fade from) or when
-        // disabled, so those appear immediately
-        if (fadeDur > 0 && !lastShown.empty())
-        {
-            fadeFrom = lastShown;
-            fadeStart = effectStart;
-        }
-        else
-        {
-            fadeFrom.clear();
-        }
-
         return true;
     };
 
@@ -285,34 +278,13 @@ int main(int argc, char** argv)
         strip.beginFrame();
         effect->render(strip, (float)(now - effectStart));
 
-        // mid-dissolve: blend the new effect's fresh frame over the held
-        // outgoing one. The dissolve runs on wall-clock so it is the same
-        // length regardless of the effect's frame rate.
-        std::vector<uint8_t> cur = strip.snapshotPixels();
+        // stamp the id of whatever actually rendered — a composite like cycle
+        // reports its active child, so its internal hops change the id and the
+        // receiver crossfades them like any rule-level switch. Done after
+        // render() (cycle may have advanced) and before endFrame().
+        strip.setAnimId((uint16_t)effect->currentId());
 
-        if (!fadeFrom.empty() && fadeFrom.size() == cur.size()
-            && now - fadeStart < fadeDur)
-        {
-            // ease the dissolve so a switch starts and settles gently
-            // rather than crossfading at a constant rate
-            float a = motion::ease((float)((now - fadeStart) / fadeDur));
-
-            for (size_t i = 0; i < cur.size(); i++)
-            {
-                float v = fadeFrom[i] + ((int)cur[i] - (int)fadeFrom[i]) * a;
-                cur[i] = (uint8_t)(v + 0.5f);
-            }
-
-            strip.writePixels(cur);
-        }
-        else
-        {
-            fadeFrom.clear(); // dissolve done (or never started)
-        }
-
-        lastShown = std::move(cur);
-
-        // stamp the checksum and hand the finished wire frame to every sink.
+        // hand the finished wire frame to every sink.
         // A fatal sink (serial write failure) ends the loop so systemd
         // restarts us and reopens the port; best-effort sinks (the viewer)
         // never report one.
@@ -340,8 +312,13 @@ int main(int argc, char** argv)
     // shutdown recording yet just blanks on its host timeout.)
     auto notifyShutdown = [&]()
     {
+        // carry the crossfade duration so the receiver dissolves from the last
+        // live frame into the shutdown recording instead of snapping
+        const uint8_t dur[2] = {(uint8_t)(crossfadeMs & 0xFF),
+                                (uint8_t)(crossfadeMs >> 8)};
+
         for (auto& s : sinks)
-            s->sendCommand(proto::CMD_SHUTDOWN);
+            s->sendCommand(proto::CMD_SHUTDOWN, dur, 2);
     };
 
     // single-effect mode, no rules

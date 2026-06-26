@@ -5,8 +5,17 @@
 // the host→receiver wire format, shared by the daemon (host/serial_sink.hpp)
 // and the ESP32 firmware so the two can never drift on the byte values.
 //
-// pixel frame:   SYNC0 SYNC1 pin lo hi <pixels...> checksum
+// pixel frame:   SYNC0 SYNC1 pin lo hi anim_lo anim_hi xms_lo xms_hi <pixels...> checksum
 // command frame: SYNC0 CMD_SYNC cmd len_lo len_hi <payload[len]> checksum
+//
+// the pixel header carries, after pin and the 16-bit LED count, two more
+// 16-bit fields: `anim`, an id for the animation producing this frame (the
+// rendering effect instance — a composite like `cycle` reports its active
+// child), and `xms`, the crossfade duration in ms. The receiver keeps the last
+// frame it showed and, whenever `anim` changes from the previous frame,
+// dissolves the new frame in over it across `xms` (shared/fade.hpp). Both ride
+// every frame so a frame is self-describing and a dropped frame can't strand a
+// transition (the next frame still carries the changed id). xms == 0 snaps.
 //
 // the command frame uses a distinct second sync byte so the receiver's
 // pixel-frame parser skips right over it. It's length-prefixed so it can
@@ -20,6 +29,10 @@ static const uint8_t SYNC0 = 0xAA; // both frame types start here
 static const uint8_t SYNC1 = 0x55; // ...then this for a pixel frame
 static const uint8_t CMD_SYNC = 0x56; // ...or this for a command frame
 
+// bytes a pixel frame carries before the pixel data: SYNC0 SYNC1 pin count(2)
+// anim(2) xms(2). Use this rather than a literal so a header change is one edit.
+static const uint8_t PIX_HEADER = 9;
+
 // The receiver no longer renders effects: the daemon records the configured
 // power-on/shutdown effects to sequences of already-corrected pixel frames
 // and streams them over; the receiver stores them in flash and replays them
@@ -27,7 +40,10 @@ static const uint8_t CMD_SYNC = 0x56; // ...or this for a command frame
 // boot before the daemon is up, and after it exits on shutdown). These three
 // commands carry one recording; CMD_SHUTDOWN triggers shutdown playback.
 
-static const uint8_t CMD_SHUTDOWN = 0x01; // play the stored shutdown recording (no payload)
+// play the stored shutdown recording. Optional payload: 2 bytes (little-endian)
+// crossfade ms — the receiver dissolves from the last live frame into the
+// recording over it, just like a live anim change. Absent/0 = snap.
+static const uint8_t CMD_SHUTDOWN = 0x01;
 
 // CMD_REC_BEGIN: start streaming a recording for one slot. Payload (15 bytes,
 // all little-endian) describes what follows and lets the receiver skip an
@@ -58,6 +74,17 @@ static const uint8_t CMD_REC_END = 0x04;
 
 static const uint8_t SLOT_POWER_ON = 0x00;
 static const uint8_t SLOT_SHUTDOWN = 0x01;
+
+// reserved anim ids the receiver stamps on the recording frames it replays (it
+// knows which slot is playing). This makes the boot→live and live→shutdown
+// handoffs ordinary anim-id changes that crossfade through the same path as a
+// live switch — so the firmware needs no separate "am I replaying?" state. The
+// daemon's live ids come from a per-instance effect counter starting at 1 and
+// must stay out of this top range (a collision would only cost one stray
+// fade, since only adjacent frames are ever compared).
+static const uint16_t ANIM_NONE = 0xFFFD;     // nothing shown yet / strip blanked
+static const uint16_t ANIM_BOOT = 0xFFFE;     // power-on recording replay
+static const uint16_t ANIM_SHUTDOWN = 0xFFFF; // shutdown recording replay
 
 // on-flash recording header (little-endian), written once at the head of a
 // slot's file, then frameCount * count*3 pixel bytes. MAGIC/VERSION let the

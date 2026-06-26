@@ -33,7 +33,7 @@ HEADERS = host/strip.hpp host/config_loader.hpp vendor/json.hpp \
           host/sink.hpp host/serial_sink.hpp host/virtual_sink.hpp \
           host/virtual_strip_socket.hpp host/recorder.hpp \
           shared/color_lut.hpp shared/protocol.hpp shared/motion.hpp \
-          shared/recording.hpp
+          shared/recording.hpp shared/fade.hpp
 
 # every effect compiles in and registers itself. shared/effects/*
 # are host-independent (also linked into the firmware); host/effects/*
@@ -52,7 +52,7 @@ led: $(SRCS) $(HEADERS)
 # hardware and no extra deps — plain g++. Built on demand, not part of `all`,
 # so the deploy path is unchanged. Run it, then start `led` (or run a single
 # effect) to preview an animation before pushing it to the BC-250.
-virtual-strip: host/virtual_strip.cpp host/virtual_strip_socket.hpp shared/receiver.hpp shared/protocol.hpp
+virtual-strip: host/virtual_strip.cpp host/virtual_strip_socket.hpp shared/receiver.hpp shared/protocol.hpp shared/fade.hpp shared/motion.hpp
 	$(CXX) $(CXXFLAGS) host/virtual_strip.cpp -o $@
 
 install: led
@@ -125,7 +125,8 @@ receiver-toolchain:
 # compiles a sketch's src/ subdir, so mirror the shared headers in there (flat,
 # which is why includes are path-less); it's regenerated each build and gitignored.
 RECEIVER_SRC = esp32_receiver/src
-SHARED = shared/protocol.hpp shared/receiver.hpp shared/recording.hpp
+SHARED = shared/protocol.hpp shared/receiver.hpp shared/recording.hpp \
+         shared/fade.hpp shared/motion.hpp
 
 receiver-shared:
 	rm -rf $(RECEIVER_SRC)

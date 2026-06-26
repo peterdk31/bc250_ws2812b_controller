@@ -14,7 +14,7 @@
         "white_balance": "b4ffff",
         "dither": "spatial"
     },
-    "transition_seconds": 0.6,
+    "crossfade_ms": 600,
     "frame_ms": 16,
     "sensors": [
         "k10temp:Tctl",

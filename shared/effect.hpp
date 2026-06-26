@@ -88,6 +88,14 @@ private:
 class Effect
 {
 public:
+    // each instance gets a unique id at construction. The daemon stamps the
+    // rendering effect's id on every frame; the receiver crossfades whenever it
+    // changes (see shared/protocol.hpp, shared/fade.hpp). Because the id is
+    // per-instance, re-activating the same effect with new settings, or a
+    // composite hopping to the next child, naturally yields a new id — no
+    // explicit "a transition happened" bookkeeping anywhere.
+    Effect() : id_(++s_nextId) {}
+
     virtual ~Effect() = default;
 
     // called once when the effect becomes active
@@ -96,6 +104,11 @@ public:
         (void)cfg;
         (void)leds;
     }
+
+    // the id of whatever is actually producing pixels right now. A leaf effect
+    // is itself; a composite (cycle) overrides this to report its active child,
+    // so its internal switches change the stamped id like any other switch.
+    virtual uint32_t currentId() const { return id_; }
 
     // fill the current frame; t is seconds since this effect became active
     virtual void render(Strip& strip, float t) = 0;
@@ -124,6 +137,10 @@ protected:
     }
 
     int frameMs_ = 16;
+    uint32_t id_; // unique per instance; see the constructor
+
+private:
+    inline static uint32_t s_nextId = 0;
 };
 
 using EffectFactory = std::unique_ptr<Effect> (*)();
