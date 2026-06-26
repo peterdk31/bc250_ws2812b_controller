@@ -10,7 +10,7 @@
 // Effects render against `Strip`, a thin pixel sink (setPixel/size), and read
 // tuning through `EffectConfig` (the triggering rule's settings, over JSON).
 // This is host-only: the ESP32 receiver renders no effects — it replays
-// recordings the daemon streams (see host/recorder.hpp, shared/protocol.hpp).
+// recordings the daemon streams (see daemon/output/recorder.hpp, common/protocol.hpp).
 
 // "RRGGBB" or "#RRGGBB" -> 0xRRGGBB; returns def for an empty string.
 inline uint32_t parseHexColor(const std::string& v, uint32_t def)
@@ -90,7 +90,7 @@ class Effect
 public:
     // each instance gets a unique id at construction. The daemon stamps the
     // rendering effect's id on every frame; the receiver crossfades whenever it
-    // changes (see shared/protocol.hpp, shared/fade.hpp). Because the id is
+    // changes (see common/protocol.hpp, common/fade.hpp). Because the id is
     // per-instance, re-activating the same effect with new settings, or a
     // composite hopping to the next child, naturally yields a new id — no
     // explicit "a transition happened" bookkeeping anywhere.

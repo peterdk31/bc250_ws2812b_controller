@@ -10,7 +10,7 @@
 // renders to nothing (e.g. a headless run with no viewer attached).
 //
 // The bytes handed in are exactly the bytes on the wire (header + pixels +
-// checksum, see shared/protocol.hpp), already brightness/gamma/white-balance
+// checksum, see common/protocol.hpp), already brightness/gamma/white-balance
 // corrected by the Strip, so every sink sees precisely what the strip shows.
 struct Sink
 {
@@ -21,7 +21,7 @@ struct Sink
     // device); best-effort sinks swallow their errors and return true.
     virtual bool send(const std::vector<uint8_t>& frame) = 0;
 
-    // out-of-band command to the ESP32 receiver (see shared/protocol.hpp).
+    // out-of-band command to the ESP32 receiver (see common/protocol.hpp).
     // Only the serial transport carries these; for every other sink it's a
     // no-op, mirroring how the viewer ignores command frames on the wire.
     virtual bool sendCommand(uint8_t cmd, const uint8_t* payload = nullptr,

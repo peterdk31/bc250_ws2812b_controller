@@ -9,7 +9,7 @@
 // global brightness scales the whole thing — all folded into one
 // 3x256 lookup table so applying it per pixel is a single array read.
 //
-// used by the host canvas (host/strip.hpp), which bakes this in before the
+// used by the host canvas (daemon/output/strip.hpp), which bakes this in before the
 // frame goes to a sink, so every sink — real strip, on-screen viewer, or a
 // recording streamed to the receiver — sees the same corrected pixels.
 //

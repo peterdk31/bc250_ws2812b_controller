@@ -13,7 +13,7 @@
 // rendering effect instance — a composite like `cycle` reports its active
 // child), and `xms`, the crossfade duration in ms. The receiver keeps the last
 // frame it showed and, whenever `anim` changes from the previous frame,
-// dissolves the new frame in over it across `xms` (shared/fade.hpp). Both ride
+// dissolves the new frame in over it across `xms` (common/fade.hpp). Both ride
 // every frame so a frame is self-describing and a dropped frame can't strand a
 // transition (the next frame still carries the changed id). xms == 0 snaps.
 //

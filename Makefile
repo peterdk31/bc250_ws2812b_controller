@@ -1,9 +1,12 @@
 CXX = g++
-# source is grouped by where it runs: shared/ compiles into both the
-# daemon and the firmware, host/ is daemon-only, vendor/ is third-party.
-# includes stay path-less, so each dir goes on the include path here and
-# the receiver build (which copies the shared files flat) needs no -I
-CXXFLAGS = -O2 -std=c++17 -Wall -Wextra -Ishared -Ihost -Ivendor
+# source is grouped by where it runs: common/ compiles into both the daemon
+# and the firmware (the daemon<->receiver link layer only), daemon/ is the
+# host daemon, firmware/ is the ESP32 sketch, vendor/ is third-party.
+# includes stay path-less, so each source dir goes on the include path here
+# and the receiver build (which copies the common files flat) needs no -I
+CXXFLAGS = -O2 -std=c++17 -Wall -Wextra \
+           -Icommon -Idaemon -Idaemon/rules -Idaemon/output \
+           -Idaemon/sources -Idaemon/color -Idaemon/effects -Ivendor
 PREFIX = /usr/local
 
 # ESP32 receiver flashing via arduino-cli. PORT, BAUD and TIMEOUT_MS default
@@ -12,7 +15,7 @@ PREFIX = /usr/local
 # are baked into the sketch so receiver and daemon agree. The receiver renders
 # no effects, so it needs no strip/effect config baked in — geometry and the
 # power-on/shutdown animations arrive as recordings the daemon streams at
-# runtime (see shared/protocol.hpp).
+# runtime (see common/protocol.hpp).
 #
 # the values are read through the daemon's own JSON parser (`led
 # --config-get <dotted.path>`) rather than scraped, so they can't drift
@@ -27,20 +30,21 @@ TIMEOUT_MS ?= $(or $(shell $(CONFIG_GET) esp32.host_timeout_ms 2>/dev/null),5000
 FQBN ?= esp32:esp32:esp32
 ESP32_URL = https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
-HEADERS = host/strip.hpp host/config_loader.hpp vendor/json.hpp \
-          shared/effect.hpp host/condition.hpp shared/color.hpp \
-          host/hwmon.hpp host/steam.hpp host/rules.hpp \
-          host/sink.hpp host/serial_sink.hpp host/virtual_sink.hpp \
-          host/virtual_strip_socket.hpp host/recorder.hpp \
-          shared/color_lut.hpp shared/protocol.hpp shared/motion.hpp \
-          shared/recording.hpp shared/fade.hpp
+HEADERS = daemon/output/strip.hpp daemon/config_loader.hpp vendor/json.hpp \
+          daemon/effects/effect.hpp daemon/rules/condition.hpp daemon/color/color.hpp \
+          daemon/sources/hwmon.hpp daemon/sources/steam.hpp daemon/rules/rules.hpp \
+          daemon/output/sink.hpp daemon/output/serial_sink.hpp daemon/output/virtual_sink.hpp \
+          daemon/output/virtual_strip_socket.hpp daemon/output/recorder.hpp \
+          daemon/color/color_lut.hpp common/protocol.hpp common/motion.hpp \
+          common/recording.hpp common/fade.hpp
 
-# every effect compiles in and registers itself. shared/effects/*
-# are host-independent (also linked into the firmware); host/effects/*
-# need live host data (sensors, Steam) and only run on the daemon
-EFFECT_SRCS = $(wildcard shared/effects/*.cpp host/effects/*.cpp)
-SRCS = host/main.cpp shared/effect_registry.cpp host/conditions.cpp \
-       host/rules.cpp $(EFFECT_SRCS)
+# every effect compiles in and registers itself. all effects are daemon-only:
+# the framework (daemon/effects/effect.hpp) depends on host strip/config, and
+# the receiver replays recordings rather than rendering. registry.cpp is the
+# self-registration table and is picked up by the same wildcard.
+EFFECT_SRCS = $(wildcard daemon/effects/*.cpp)
+SRCS = daemon/main.cpp daemon/rules/conditions.cpp daemon/rules/rules.cpp \
+       $(EFFECT_SRCS)
 
 all: led
 
@@ -48,12 +52,12 @@ led: $(SRCS) $(HEADERS)
 	$(CXX) $(CXXFLAGS) $(SRCS) -o $@ -lm
 
 # on-screen virtual LED strip: a standalone terminal viewer that renders the
-# wire frames the daemon mirrors to it (see host/virtual_sink.hpp). No
+# wire frames the daemon mirrors to it (see daemon/output/virtual_sink.hpp). No
 # hardware and no extra deps — plain g++. Built on demand, not part of `all`,
 # so the deploy path is unchanged. Run it, then start `led` (or run a single
 # effect) to preview an animation before pushing it to the BC-250.
-virtual-strip: host/virtual_strip.cpp host/virtual_strip_socket.hpp shared/receiver.hpp shared/protocol.hpp shared/fade.hpp shared/motion.hpp
-	$(CXX) $(CXXFLAGS) host/virtual_strip.cpp -o $@
+virtual-strip: tools/virtual_strip.cpp daemon/output/virtual_strip_socket.hpp common/receiver.hpp common/protocol.hpp common/fade.hpp common/motion.hpp
+	$(CXX) $(CXXFLAGS) tools/virtual_strip.cpp -o $@
 
 install: led
 	install -Dm755 led $(PREFIX)/bin/led
@@ -120,13 +124,13 @@ receiver-toolchain:
 		$(MAKE) receiver-setup
 
 # the receiver shares only the wire protocol, the streaming frame parser and
-# the recording format/replay logic with the daemon — no effect code, no color
-# LUT (it replays already-corrected recordings the daemon streams). arduino-cli
-# compiles a sketch's src/ subdir, so mirror the shared headers in there (flat,
-# which is why includes are path-less); it's regenerated each build and gitignored.
-RECEIVER_SRC = esp32_receiver/src
-SHARED = shared/protocol.hpp shared/receiver.hpp shared/recording.hpp \
-         shared/fade.hpp shared/motion.hpp
+# the recording format/replay logic with the daemon — i.e. all of common/, no
+# effect code, no color LUT (it replays already-corrected recordings the daemon
+# streams). arduino-cli compiles a sketch's src/ subdir, so mirror the common
+# headers in there (flat, which is why includes are path-less); it's
+# regenerated each build and gitignored.
+RECEIVER_SRC = firmware/src
+SHARED = $(wildcard common/*.hpp)
 
 receiver-shared:
 	rm -rf $(RECEIVER_SRC)
@@ -143,7 +147,7 @@ receiver-shared:
 receiver: led receiver-toolchain receiver-shared
 	arduino-cli compile --fqbn $(FQBN) \
 		--build-property "compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS)" \
-		esp32_receiver
+		firmware
 
 # the daemon holds the serial port open, so stop it around the upload
 # and only restart it if it was running
@@ -151,7 +155,7 @@ flash: receiver
 	-@$(MAKE) --no-print-directory serial-perms
 	@active=0; systemctl is-active --quiet led-controller && active=1; \
 	[ $$active = 1 ] && systemctl stop led-controller; \
-	arduino-cli upload -p $(PORT) --fqbn $(FQBN) esp32_receiver; \
+	arduino-cli upload -p $(PORT) --fqbn $(FQBN) firmware; \
 	rc=$$?; \
 	[ $$active = 1 ] && systemctl start led-controller; \
 	exit $$rc

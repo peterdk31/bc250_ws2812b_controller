@@ -9,7 +9,7 @@
 // streaming accumulator that turns CMD_REC_* frames into a stored recording,
 // and the replay stepper. The ESP32 firmware and the host daemon both use
 // these, so the format and the playback math can't drift between them — and,
-// like shared/receiver.hpp, it all compiles and gets tested on the host even
+// like common/receiver.hpp, it all compiles and gets tested on the host even
 // though the firmware itself can't be built there.
 //
 // What stays on the device: LittleFS save/load, the WS2812 output, the UART,
@@ -71,7 +71,7 @@ struct Recording
         return h;
     }
 
-    // CMD_REC_BEGIN payload (15 bytes, little-endian; see shared/protocol.hpp):
+    // CMD_REC_BEGIN payload (15 bytes, little-endian; see common/protocol.hpp):
     //   slot frameMs count pin flags frameCount loopStart hash
     void encodeBegin(uint8_t* out, uint8_t slot) const
     {

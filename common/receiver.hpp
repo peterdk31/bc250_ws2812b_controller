@@ -26,7 +26,7 @@ struct FrameHandler
     // rgb[0 .. count*3), for the strip on data pin `pin`. `anim` ids the
     // animation producing the frame and `xms` is the crossfade duration — when
     // `anim` differs from the previous frame, dissolve this one in over the
-    // last shown across `xms` ms (see shared/fade.hpp). The pointer is into the
+    // last shown across `xms` ms (see common/fade.hpp). The pointer is into the
     // Receiver's buffer and is valid only for the duration of the call.
     virtual void onPixels(uint8_t pin, uint16_t count, uint16_t anim,
                           uint16_t xms, const uint8_t* rgb) = 0;

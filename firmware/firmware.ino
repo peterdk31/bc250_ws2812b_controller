@@ -9,7 +9,7 @@
 // firmware stores them in flash and replays them. So an effect tweak no longer
 // means a reflash; it's picked up on the next daemon start and shown one power
 // cycle later. The only device-specific parts left are LittleFS save/load, the
-// WS2812 output, the UART, and millis() — everything else is shared/recording.hpp.
+// WS2812 output, the UART, and millis() — everything else is common/recording.hpp.
 #include "src/protocol.hpp"
 #include "src/receiver.hpp"
 #include "src/recording.hpp"
@@ -42,7 +42,7 @@
 #define HUNT_AFTER_MS 500
 #define HUNT_MIN_BYTES 64
 
-// the recording files live here; one per slot (see shared/protocol.hpp)
+// the recording files live here; one per slot (see common/protocol.hpp)
 #define REC_PATH_POWER_ON "/boot.rec"
 #define REC_PATH_SHUTDOWN "/shutdown.rec"
 
@@ -90,7 +90,7 @@ bool blanked = false;
 // show() below carrying an id, so the boot→live and live→shutdown handoffs are
 // just ordinary id changes; there's no "am I replaying?" state to track. Live
 // ids ride the wire; replay frames get a reserved per-slot id (proto::ANIM_*),
-// which the firmware knows from the slot it's playing (see shared/fade.hpp).
+// which the firmware knows from the slot it's playing (see common/fade.hpp).
 fade::Fader fader;
 uint8_t lastShown[MAX_LEDS * 3]; // last frame written to the strip
 uint8_t frameBuf[MAX_LEDS * 3];  // scratch: the incoming frame, blended in place
@@ -157,7 +157,7 @@ void blankStrip()
 // differs from what's on screen we dissolve the new frame in over the last
 // (as long as the geometry matches), then remember it. That single rule covers
 // live switches, the boot→live handoff and the live→shutdown handoff, so no
-// source needs to special-case transitions (see shared/fade.hpp).
+// source needs to special-case transitions (see common/fade.hpp).
 void show(uint16_t animId, uint16_t count, uint16_t xms, const uint8_t* px)
 {
     if (!strip || (size_t)count * 3 > sizeof frameBuf)
@@ -184,7 +184,7 @@ void show(uint16_t animId, uint16_t count, uint16_t xms, const uint8_t* px)
 }
 
 // device side of the recording store: LittleFS read/write around the shared
-// header codec (shared/recording.hpp). The format and field layout live there.
+// header codec (common/recording.hpp). The format and field layout live there.
 bool loadRecording(uint8_t slot, rec::Recording& out)
 {
     File f = LittleFS.open(recPath(slot), "r");

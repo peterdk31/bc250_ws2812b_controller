@@ -19,7 +19,7 @@
 //
 // Build: plain g++, no dependencies. Needs a truecolor-capable terminal.
 //
-// Wire frame (shared/protocol.hpp): AA 55 pin lo hi anim(2) xms(2) <R G B>*n
+// Wire frame (common/protocol.hpp): AA 55 pin lo hi anim(2) xms(2) <R G B>*n
 // checksum. anim/xms drive the crossfade this viewer mirrors (see Viewer).
 
 #include <stdio.h>
@@ -67,14 +67,14 @@ static double nowSeconds()
 
 // Renders decoded pixel frames as a row of truecolor blocks. As a
 // proto::FrameHandler it shares the daemon's/ESP32's wire parser
-// (shared/receiver.hpp), so checksum validation and AA-55 framing live in one
+// (common/receiver.hpp), so checksum validation and AA-55 framing live in one
 // place; this just paints whatever valid pixel frame the Receiver hands it.
 // Command frames fall through to the default no-op — the viewer ignores them,
 // just as they aren't mirrored onto the socket in the first place.
 //
 // It is a faithful software ESP32 for transitions too: it keeps the last frame
 // it showed and, when a frame's anim id changes, dissolves the new one in over
-// it with the same shared fader the firmware uses (shared/fade.hpp), so the
+// it with the same shared fader the firmware uses (common/fade.hpp), so the
 // preview shows the exact crossfades the strip will.
 struct Viewer : proto::FrameHandler
 {

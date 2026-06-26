@@ -29,7 +29,7 @@ static double now_seconds()
 
 // wrap already-corrected recording pixels into a wire frame (--preview): the
 // bytes are post-LUT, so unlike Strip they must not be re-corrected. Checksum
-// is XOR of the header and pixel bytes, matching shared/protocol.hpp. A
+// is XOR of the header and pixel bytes, matching common/protocol.hpp. A
 // recording is one continuous animation (its own intro/loop is baked in), so
 // every frame carries the same anim id (0) and no crossfade (xms 0) — the
 // viewer plays it straight through with no dissolves.
@@ -247,7 +247,7 @@ int main(int argc, char** argv)
 
     // crossfading now lives on the receiver (and the viewer): every frame
     // carries the rendering effect's id and a global crossfade duration, and
-    // they dissolve whenever the id changes (see shared/fade.hpp). The daemon
+    // they dissolve whenever the id changes (see common/fade.hpp). The daemon
     // just stamps those — it composites nothing itself. The same duration
     // drives the live→shutdown dissolve (sent with CMD_SHUTDOWN).
     const uint16_t crossfadeMs = (uint16_t)cfg.getInt("crossfade_ms", 600);

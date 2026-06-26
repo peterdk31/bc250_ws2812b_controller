@@ -13,7 +13,7 @@
 
 // The host-side LED canvas. Effects render into it via setPixel(); it owns
 // the color LUT (brightness/gamma/white-balance/dither) and assembles the
-// wire frame (header + mapped pixels + checksum, see shared/protocol.hpp).
+// wire frame (header + mapped pixels + checksum, see common/protocol.hpp).
 //
 // It owns no output. endFrame() stamps the checksum and hands back the
 // finished wire bytes; the daemon passes those to whatever Sinks it built

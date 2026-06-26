@@ -78,7 +78,7 @@ your user is in the port's group (usually `dialout` or `uucp`).
 available standalone as `make serial-perms`); membership takes effect
 on your next login.
 
-Alternatively, open `esp32_receiver/esp32_receiver.ino` in the Arduino
+Alternatively, open `firmware/firmware.ino` in the Arduino
 IDE with the ESP32 core and the `Freenove_WS2812_Lib_for_ESP32`
 library installed, and flash from there.
 
@@ -97,8 +97,8 @@ frame-by-frame. This is why iterating on the boot/shutdown effects no longer
 needs a reflash.
 
 Both slots are configured from the `esp32` block in `config.json` — set each
-to any **standalone** effect (the host-data effects in `host/effects/` need
-live sensor data, so they're not meaningful here) with its own settings. A
+to any **standalone** effect (the data-driven effects need live sensor data,
+so they're not meaningful here) with its own settings. A
 slot can also be a **`sequence`** of effects played back to back into one
 recording — typically a one-shot intro leading into a looping idle:
 
@@ -515,15 +515,20 @@ power-on/shutdown effect.
 
 ### Adding an effect
 
-Drop a new file in one of two folders — both are compiled into the daemon
-automatically:
+Drop a new file in `daemon/effects/` — it's compiled into the daemon and
+registers itself automatically. All effects are daemon-only: the framework
+renders against the host `Strip` and the receiver just replays what the
+daemon streams.
 
-- **`shared/effects/`** — pure animation, no host data. Also linked
-  into the firmware, so it can be a receiver power-on/shutdown effect.
-  Render against `Strip&` (it's the canvas in `host/strip.hpp` on the host,
-  the receiver's driver on the ESP32).
-- **`host/effects/`** — needs live host data (sensors, Steam, …). Daemon
-  only; can't run on the receiver.
+Two flavours live side by side in that folder:
+
+- **pure animation** (no host data) — e.g. `comet`, `aurora`, `breathe`.
+  These can also be a receiver power-on/shutdown slot: the daemon renders
+  them through its own `Strip`, captures the frames and streams the
+  resulting **recording** to the receiver (it doesn't run the effect code
+  on the device).
+- **data-driven** (sensors, Steam, …) — e.g. `cpu_temp`, `load`. These need
+  live host data, so they aren't meaningful as a power-on/shutdown slot.
 
 ```cpp
 #include "effect.hpp"
@@ -539,5 +544,3 @@ public:
 
 REGISTER_EFFECT("my_effect", MyEffect)
 ```
-
-Always render against `Strip&` so the effect compiles for the firmware too.

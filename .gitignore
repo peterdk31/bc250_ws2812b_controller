@@ -5,10 +5,10 @@
 *.d
 
 # Arduino build output (arduino-cli --export-binaries / local build dirs)
-esp32_receiver/build/
+firmware/build/
 
-# shared host/firmware sources mirrored into the sketch by `make receiver`
-esp32_receiver/src/
+# common daemon/firmware sources mirrored into the sketch by `make receiver`
+firmware/src/
 
 # Editor / IDE
 .idea/

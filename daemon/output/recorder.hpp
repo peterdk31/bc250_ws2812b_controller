@@ -21,7 +21,7 @@
 // code at all.
 //
 // The Recording type, its byte layout and the replay math live in
-// shared/recording.hpp (shared with the firmware so they can't drift); this
+// common/recording.hpp (shared with the firmware so they can't drift); this
 // file is only the host-side capture and upload.
 namespace rec
 {
@@ -137,7 +137,7 @@ inline bool record(const Config& cfg, Strip canvas, const std::string& slot,
 }
 
 // Stream a Recording to every sink as CMD_REC_BEGIN / N×CMD_REC_FRAME /
-// CMD_REC_END (shared/protocol.hpp). Only the serial transport acts on
+// CMD_REC_END (common/protocol.hpp). Only the serial transport acts on
 // commands; the viewer and any other sink no-op (see host/sink.hpp).
 inline void upload(std::vector<std::unique_ptr<Sink>>& sinks, uint8_t slotId,
                    const Recording& r)
