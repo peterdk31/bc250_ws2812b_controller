@@ -193,7 +193,15 @@ SHARED = $(wildcard common/*.hpp)
 # else — geometry, animations — arrives at runtime as recordings).
 # compiler.cpp.extra_flags rather than build.extra_flags: the latter would
 # replace the esp32 platform's own extra flags.
-BUILD_PROPS = compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS)
+BUILD_PROPS = --build-property "compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS)"
+
+# force the partition table directly, not just via the PartitionScheme menu:
+# depending on the arduino-cli/core version, setting another menu option
+# (CDCOnBoot) can leave build.partitions unpopulated, so the build tries to copy
+# the literal "tools/partitions/{build.partitions}.csv" and fails. Setting it as
+# a build property is unambiguous and can't be dropped. Native-USB chips only
+# (the ones that get CDCOnBoot); a plain ESP32 with a bare FQBN is unaffected.
+PART_PROPS = $(if $(filter $(FQBN_BOARD),$(NATIVE_USB_BOARDS)),--build-property build.partitions=default)
 
 receiver-shared:
 	rm -rf $(RECEIVER_SRC)
@@ -205,7 +213,7 @@ receiver-shared:
 # first boot. `receiver` depends on `led` so the CONFIG_GET reads above resolve
 # against the freshly built daemon.
 receiver: led receiver-toolchain receiver-shared
-	arduino-cli compile --fqbn $(FQBN_FULL) --build-property "$(BUILD_PROPS)" firmware
+	arduino-cli compile --fqbn $(FQBN_FULL) $(BUILD_PROPS) $(PART_PROPS) firmware
 
 # the daemon holds the serial port open, so free it around the upload and only
 # restart the service if it was running. The port isn't opened exclusively
@@ -232,7 +240,7 @@ flash: led receiver-toolchain receiver-shared
 		sleep 1; \
 	fi; \
 	arduino-cli compile --upload -p $(PORT) --fqbn $(FQBN_FULL) \
-		--build-property "$(BUILD_PROPS)" firmware; \
+		$(BUILD_PROPS) $(PART_PROPS) firmware; \
 	rc=$$?; \
 	[ $$active = 1 ] && systemctl start led-controller; \
 	exit $$rc
