@@ -1,0 +1,15 @@
+# Partition table for the receiver, shipped in the sketch folder so arduino-esp32
+# copies it directly instead of looking up tools/partitions/{build.partitions}.csv
+# — which arduino-esp32 3.3.x leaves unexpanded (a literal "{build.partitions}")
+# once any FQBN menu option like CDCOnBoot is set, breaking the build. A sketch
+# partitions.csv sidesteps that lookup entirely.
+#
+# Standard "default" 4 MB layout. The firmware stores its power-on/shutdown
+# recordings on LittleFS, which mounts the partition labelled "spiffs" below.
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xe000,   0x2000,
+app0,       app,  ota_0,    0x10000,  0x140000,
+app1,       app,  ota_1,    0x150000, 0x140000,
+spiffs,     data, spiffs,   0x290000, 0x160000,
+coredump,   data, coredump, 0x3F0000, 0x10000,
