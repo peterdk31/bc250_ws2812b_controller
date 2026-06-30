@@ -18,6 +18,15 @@
 #define CHANNEL 0
 #define MAX_LEDS 2048
 
+// TEMP diagnostic: uncomment to bypass the whole host/recording path and drive
+// the strip directly from setup(). Proves the C3 + Freenove lib + our
+// initStrip()/show() actually light the strip on this pin, independent of the
+// daemon link. Set the pin/count to your wiring. Remove (or recomment) and
+// reflash once confirmed. See the LED_SELFTEST block in setup().
+// #define LED_SELFTEST
+#define LED_SELFTEST_PIN 4
+#define LED_SELFTEST_COUNT 30
+
 // boot-time baud; `make flash` overrides this with serial.baud from the host
 // config. The receiver re-hunts (below) when traffic doesn't decode and
 // remembers the rate that worked, so this only sets how fast the first lock
@@ -377,6 +386,22 @@ proto::Receiver receiver(handler, MAX_LEDS);
 
 void setup()
 {
+#ifdef LED_SELFTEST
+    // hardware proof: cycle the strip red -> green -> blue forever on the
+    // wired pin, with nothing else running. If this lights up, the C3 runs our
+    // strip code fine and the dark strip is a daemon-link/config problem, not
+    // the chip. If even this stays dark, it's wiring/pin/lib, not the host.
+    initStrip(LED_SELFTEST_COUNT, LED_SELFTEST_PIN);
+    const uint8_t colors[3][3] = {{40, 0, 0}, {0, 40, 0}, {0, 0, 40}};
+    for (uint8_t c = 0;; c = (c + 1) % 3)
+    {
+        for (uint16_t i = 0; i < LED_SELFTEST_COUNT; i++)
+            strip->setLedColorData(i, colors[c][0], colors[c][1], colors[c][2]);
+        strip->show();
+        delay(700);
+    }
+#endif
+
     prefs.begin("ledrx", false);
     savedBaud = prefs.getUInt("baud", 0);
     savedFlashed = prefs.getUInt("flashed", 0);
