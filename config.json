@@ -25,6 +25,7 @@
         "nct6686"
     ],
     "esp32": {
+        "fqbn": "esp32:esp32:esp32c3",
         "host_timeout_ms": 5000,
         "power_on": {
             "sequence": [

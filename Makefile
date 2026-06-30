@@ -27,7 +27,21 @@ CONFIG_GET = ./led --config-get $(CONFIG)
 PORT ?= $(or $(shell $(CONFIG_GET) sinks.serial.port 2>/dev/null),/dev/ttyUSB0)
 BAUD ?= $(or $(shell $(CONFIG_GET) sinks.serial.baud 2>/dev/null),921600)
 TIMEOUT_MS ?= $(or $(shell $(CONFIG_GET) esp32.host_timeout_ms 2>/dev/null),5000)
-FQBN ?= esp32:esp32:esp32
+# board identifier passed to arduino-cli, resolved in three steps so `make
+# flash` targets whatever's actually connected:
+#   1. DETECTED_FQBN — ask arduino-cli what's on PORT. Boards with a native USB
+#      identity (ESP32-C3/S3, etc.) fingerprint themselves, so they're picked
+#      automatically with no config at all.
+#   2. esp32.fqbn from config — for boards behind a generic USB-UART bridge
+#      (most plain ESP32s on CH340/CP2102) arduino-cli can't read an identity,
+#      so name the board in config alongside its port/baud.
+#   3. esp32:esp32:esp32 — the original Xtensa ESP32 as the final default.
+# Why it matters: an ESP32-C3 is RISC-V, not Xtensa; flashing it with the
+# plain-esp32 FQBN builds a binary for the wrong architecture. A command-line
+# override always wins, e.g. `make flash FQBN=esp32:esp32:esp32s3`.
+DETECTED_FQBN = $(shell arduino-cli board list 2>/dev/null | \
+	awk -v p='$(PORT)' '$$1==p{for(i=1;i<=NF;i++) if($$i ~ /^esp32:/){print $$i; exit}}')
+FQBN ?= $(or $(DETECTED_FQBN),$(shell $(CONFIG_GET) esp32.fqbn 2>/dev/null),esp32:esp32:esp32)
 ESP32_URL = https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
 HEADERS = daemon/output/strip.hpp daemon/config_loader.hpp vendor/json.hpp \
