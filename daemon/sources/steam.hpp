@@ -217,8 +217,56 @@ inline unsigned long long netRxBytes()
 // for the new part. The percent is held in cached across brief
 // inactivity, so an effect switching away and back resumes where it was
 // instead of snapping to 0.
+// preview/dev override (no real download needed): set STEAM_FAKE_PERCENT to
+// a number for a static active bar, or to "ramp" to simulate a download that
+// climbs ~3%/s and celebrates on completion. The percent is quantized to 1 s
+// steps so the bumps land like the real 1 Hz manifest scan, which is what the
+// steam_download effect's surge reacts to. Inert when the env var is unset.
+inline const Downloads* fakeDownloads()
+{
+    const char* fake = getenv("STEAM_FAKE_PERCENT");
+    if (!fake || !*fake)
+        return nullptr;
+
+    static Downloads sim;
+    static double start = -1e9;
+
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double now = ts.tv_sec + ts.tv_nsec / 1e9;
+
+    if (start < 0)
+        start = now;
+
+    if (strncmp(fake, "ramp", 4) == 0)
+    {
+        long rate = atoi(fake + 4);       // "ramp6" -> 6 %/s; "ramp" -> default
+        if (rate <= 0) rate = 3;
+
+        long fill = (100 + rate - 1) / rate; // seconds to reach 100%
+        long cycle = fill + 4;               // + a brief finish/celebration
+        long s = (long)(now - start) % cycle;
+        long pct = s * rate;                 // already in 1 Hz steps
+
+        sim.finished = pct >= 100;
+        sim.active = true;
+        sim.percent = (float)(pct >= 100 ? 100 : pct);
+    }
+    else
+    {
+        sim.active = true;
+        sim.finished = false;
+        sim.percent = (float)atof(fake);
+    }
+
+    return &sim;
+}
+
 inline const Downloads& downloads()
 {
+    if (const Downloads* sim = fakeDownloads())
+        return *sim;
+
     static Downloads cached;
     static double lastScan = -1e9;
     static double lastNetMoved = -1e9;

@@ -86,7 +86,18 @@
         {
             "if": "steam_dl",
             "effect": "steam_download",
-            "hold": 0
+            "hold": 0,
+            "settings": {
+                "palette": "d4009c,ff5a1e,ffd23c",
+                "head_color": "fff2cc",
+                "track_color": "0e1c3c",
+                "speed": 1.0,
+                "ripple_depth": 0.35,
+                "ripple_speed": 1.4,
+                "surge_boost": 0.45,
+                "surge_ripple": 0.9,
+                "head_glow": 0.7
+            }
         },
         {
             "if": "gpu_load>20 | cpu_load>20",
