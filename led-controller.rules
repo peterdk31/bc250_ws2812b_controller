@@ -1,0 +1,17 @@
+# Stable name for the LED receiver's serial port.
+#
+# /dev/ttyACM0 vs ttyACM1 (and ttyUSB*) is assigned by enumeration order, so
+# plugging in another USB device can renumber it and break both the daemon
+# (which opens sinks.serial.port) and `make flash`. This rule pins a fixed
+# /dev/led-controller -> the receiver's real tty, matched by USB vendor id, so
+# the name never changes no matter what else is connected.
+#
+# 303a = Espressif native USB (ESP32-C3/S2/S3/C6/H2 — e.g. a C3 on /dev/ttyACM*)
+# 10c4 = Silicon Labs CP2102, 1a86 = WCH CH340: the USB-UART bridges on most
+#        plain-ESP32 boards (/dev/ttyUSB*). These vendor ids are shared by other
+#        serial adapters, so if you have more than one such device plugged in,
+#        narrow the match (add ATTRS{serial}=="...", see `udevadm info -a
+#        -n /dev/ttyACM0`) or drop the bridge lines and keep only 303a.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", SYMLINK+="led-controller"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", SYMLINK+="led-controller"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", SYMLINK+="led-controller"

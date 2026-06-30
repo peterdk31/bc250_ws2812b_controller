@@ -99,7 +99,19 @@ install: led
 	install -Dm644 led-controller.service /etc/systemd/system/led-controller.service
 	test -f /etc/led-controller/config.json || install -Dm644 config.json /etc/led-controller/config.json
 	systemctl daemon-reload
+	-@$(MAKE) --no-print-directory udev-rule
 	-@$(MAKE) --no-print-directory serial-perms
+
+# install the udev rule that pins /dev/led-controller to the receiver's serial
+# port (see led-controller.rules), so the daemon's configured port and `make
+# flash` never depend on the volatile /dev/ttyACM* numbering. Runs from
+# `install`; reloading + triggering applies it to an already-connected board
+# without a replug. Best-effort: a box without udev (or without the device yet)
+# just won't get the symlink until the rule fires on the next plug/boot.
+udev-rule:
+	install -Dm644 led-controller.rules /etc/udev/rules.d/99-led-controller.rules
+	-udevadm control --reload-rules
+	-udevadm trigger --subsystem-match=tty --action=add
 
 # force-overwrite the deployed config with the repo's and apply it.
 # `install` leaves an existing /etc config untouched (so a fresh deploy
@@ -113,12 +125,14 @@ uninstall:
 	-systemctl disable --now led-controller
 	rm -f /etc/systemd/system/led-controller.service
 	rm -f $(PREFIX)/bin/led
+	rm -f /etc/udev/rules.d/99-led-controller.rules
 	rm -rf /etc/led-controller
 	systemctl daemon-reload
+	-udevadm control --reload-rules
 
 clean:
 	rm -f led virtual-strip
-	rm -rf $(RECEIVER_SRC) $(RECEIVER_BUILD)
+	rm -rf $(RECEIVER_SRC) firmware/build
 
 # add the user to the serial port's group (uucp on Arch-likes, dialout
 # on Debian/Fedora) so running `led` and arduino-cli uploads work
@@ -165,31 +179,25 @@ receiver-toolchain:
 # headers in there (flat, which is why includes are path-less); it's
 # regenerated each build and gitignored.
 RECEIVER_SRC = firmware/src
-# explicit build-output dir so `flash` uploads exactly what `receiver` compiled.
-# Without it, upload re-derives the build path from $HOME's arduino cache, which
-# differs between your user and root — so `sudo make flash` looks in the wrong
-# place and fails with "cannot stat partitions.csv". Pinning both sides to this
-# dir makes the compile→upload handoff independent of who runs it. Gitignored.
-RECEIVER_BUILD = firmware/build
 SHARED = $(wildcard common/*.hpp)
+
+# baked into the sketch so receiver and daemon agree on the link (everything
+# else — geometry, animations — arrives at runtime as recordings).
+# compiler.cpp.extra_flags rather than build.extra_flags: the latter would
+# replace the esp32 platform's own extra flags.
+BUILD_PROPS = compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS)
 
 receiver-shared:
 	rm -rf $(RECEIVER_SRC)
 	mkdir -p $(RECEIVER_SRC)
 	cp $(SHARED) $(RECEIVER_SRC)/
 
-# compiler.cpp.extra_flags rather than build.extra_flags: the latter would
-# replace the esp32 platform's own extra flags. Only BAUD/TIMEOUT are baked in
-# now; everything else (geometry, the power-on/shutdown animations) arrives at
-# runtime as recordings. The recordings live on LittleFS in the default
-# partition scheme's filesystem region, formatted on first boot. `receiver`
-# depends on `led` so the CONFIG_GET reads above resolve against the freshly
-# built daemon.
+# compile-only check (flash compiles+uploads in one step). Recordings live on
+# LittleFS in the default partition scheme's filesystem region, formatted on
+# first boot. `receiver` depends on `led` so the CONFIG_GET reads above resolve
+# against the freshly built daemon.
 receiver: led receiver-toolchain receiver-shared
-	arduino-cli compile --fqbn $(FQBN_FULL) \
-		--build-property "compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS)" \
-		--output-dir $(RECEIVER_BUILD) \
-		firmware
+	arduino-cli compile --fqbn $(FQBN_FULL) --build-property "$(BUILD_PROPS)" firmware
 
 # the daemon holds the serial port open, so free it around the upload and only
 # restart the service if it was running. The port isn't opened exclusively
@@ -199,7 +207,13 @@ receiver: led receiver-toolchain receiver-shared
 # normal case; fuser -k then clears a daemon started by hand (./led ...) or any
 # other writer the unit-stop wouldn't catch. fuser is best-effort (skipped if
 # absent), and only ever targets PORT, so it can't kill anything unrelated.
-flash: receiver
+#
+# compile --upload in one invocation (not a separate compile then `upload
+# --input-dir`): uploading from a prebuilt dir doesn't carry the board's build
+# properties, so the partition path stays the literal "{build.partitions}.csv"
+# and the upload can't find it. One invocation keeps full build context and is
+# also independent of $HOME's arduino cache, so it works the same under sudo.
+flash: led receiver-toolchain receiver-shared
 	-@$(MAKE) --no-print-directory serial-perms
 	@active=0; systemctl is-active --quiet led-controller && active=1; \
 	[ $$active = 1 ] && systemctl stop led-controller; \
@@ -209,9 +223,10 @@ flash: receiver
 		fuser -k $(PORT) || true; \
 		sleep 1; \
 	fi; \
-	arduino-cli upload -p $(PORT) --fqbn $(FQBN_FULL) --input-dir $(RECEIVER_BUILD) firmware; \
+	arduino-cli compile --upload -p $(PORT) --fqbn $(FQBN_FULL) \
+		--build-property "$(BUILD_PROPS)" firmware; \
 	rc=$$?; \
 	[ $$active = 1 ] && systemctl start led-controller; \
 	exit $$rc
 
-.PHONY: all install uninstall clean serial-perms receiver-setup receiver-toolchain receiver-shared receiver flash
+.PHONY: all install install-config uninstall clean udev-rule serial-perms receiver-setup receiver-toolchain receiver-shared receiver flash
