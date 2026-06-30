@@ -195,14 +195,6 @@ SHARED = $(wildcard common/*.hpp)
 # replace the esp32 platform's own extra flags.
 BUILD_PROPS = --build-property "compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS)"
 
-# force the partition table directly, not just via the PartitionScheme menu:
-# depending on the arduino-cli/core version, setting another menu option
-# (CDCOnBoot) can leave build.partitions unpopulated, so the build tries to copy
-# the literal "tools/partitions/{build.partitions}.csv" and fails. Setting it as
-# a build property is unambiguous and can't be dropped. Native-USB chips only
-# (the ones that get CDCOnBoot); a plain ESP32 with a bare FQBN is unaffected.
-PART_PROPS = $(if $(filter $(FQBN_BOARD),$(NATIVE_USB_BOARDS)),--build-property build.partitions=default)
-
 receiver-shared:
 	rm -rf $(RECEIVER_SRC)
 	mkdir -p $(RECEIVER_SRC)
@@ -213,7 +205,7 @@ receiver-shared:
 # first boot. `receiver` depends on `led` so the CONFIG_GET reads above resolve
 # against the freshly built daemon.
 receiver: led receiver-toolchain receiver-shared
-	arduino-cli compile --fqbn $(FQBN_FULL) $(BUILD_PROPS) $(PART_PROPS) firmware
+	arduino-cli compile --fqbn $(FQBN_FULL) $(BUILD_PROPS) firmware
 
 # the daemon holds the serial port open, so free it around the upload and only
 # restart the service if it was running. The port isn't opened exclusively
@@ -224,12 +216,13 @@ receiver: led receiver-toolchain receiver-shared
 # other writer the unit-stop wouldn't catch. fuser is best-effort (skipped if
 # absent), and only ever targets PORT, so it can't kill anything unrelated.
 #
-# compile --upload in one invocation (not a separate compile then `upload
-# --input-dir`): uploading from a prebuilt dir doesn't carry the board's build
-# properties, so the partition path stays the literal "{build.partitions}.csv"
-# and the upload can't find it. One invocation keeps full build context and is
-# also independent of $HOME's arduino cache, so it works the same under sudo.
-flash: led receiver-toolchain receiver-shared
+# compile (via the `receiver` prereq) then a SEPARATE upload — not `compile
+# --upload`. With compile --upload on esp32 3.3.x the upload step left the chip
+# arg as a literal "--chip {build.mcu}" and esptool rejected it; a standalone
+# `arduino-cli upload` re-resolves the board's properties fully and expands it.
+# Compile happens first (daemon still up, it doesn't need the port), then we free
+# the port and upload from the cache `receiver` just built.
+flash: receiver
 	-@$(MAKE) --no-print-directory serial-perms
 	@active=0; systemctl is-active --quiet led-controller && active=1; \
 	[ $$active = 1 ] && systemctl stop led-controller; \
@@ -239,8 +232,7 @@ flash: led receiver-toolchain receiver-shared
 		fuser -k $(PORT) || true; \
 		sleep 1; \
 	fi; \
-	arduino-cli compile --upload -p $(PORT) --fqbn $(FQBN_FULL) \
-		$(BUILD_PROPS) $(PART_PROPS) firmware; \
+	arduino-cli upload -p $(PORT) --fqbn $(FQBN_FULL) firmware; \
 	rc=$$?; \
 	[ $$active = 1 ] && systemctl start led-controller; \
 	exit $$rc
