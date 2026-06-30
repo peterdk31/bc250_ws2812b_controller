@@ -163,12 +163,24 @@ receiver: led receiver-toolchain receiver-shared
 		--build-property "compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS)" \
 		firmware
 
-# the daemon holds the serial port open, so stop it around the upload
-# and only restart it if it was running
+# the daemon holds the serial port open, so free it around the upload and only
+# restart the service if it was running. The port isn't opened exclusively
+# (daemon/output/serial_sink.hpp), so a daemon still writing LED frames during
+# the upload collides with esptool and shows up as "Invalid head of packet:
+# possible serial noise or corruption". Stopping the systemd unit covers the
+# normal case; fuser -k then clears a daemon started by hand (./led ...) or any
+# other writer the unit-stop wouldn't catch. fuser is best-effort (skipped if
+# absent), and only ever targets PORT, so it can't kill anything unrelated.
 flash: receiver
 	-@$(MAKE) --no-print-directory serial-perms
 	@active=0; systemctl is-active --quiet led-controller && active=1; \
 	[ $$active = 1 ] && systemctl stop led-controller; \
+	if command -v fuser >/dev/null 2>&1 && fuser $(PORT) >/dev/null 2>&1; then \
+		echo "$(PORT) still held after stopping the service; freeing it:"; \
+		fuser -v $(PORT) || true; \
+		fuser -k $(PORT) || true; \
+		sleep 1; \
+	fi; \
 	arduino-cli upload -p $(PORT) --fqbn $(FQBN) firmware; \
 	rc=$$?; \
 	[ $$active = 1 ] && systemctl start led-controller; \
