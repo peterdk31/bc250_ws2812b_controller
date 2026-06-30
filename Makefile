@@ -59,9 +59,17 @@ FQBN ?= $(or $(DETECTED_FQBN),$(shell $(CONFIG_GET) esp32.fqbn 2>/dev/null),esp3
 # it's left untouched. Same firmware, correct transport per chip. Skipped if a
 # CDCOnBoot option is already present in the FQBN. (Done with make functions,
 # not a shell case: the ')' in case patterns confuses $(shell)'s paren matching.)
+#
+# PartitionScheme=default is pinned alongside CDCOnBoot: once any menu option is
+# set in the FQBN, arduino-cli stops auto-filling the *default* PartitionScheme
+# menu, so build.partitions is never defined and the build dies with a literal
+# "tools/partitions/{build.partitions}.csv: no such file". Pinning it keeps
+# build.partitions resolved. (A bare FQBN with no menu option is unaffected, so
+# the plain ESP32 needs nothing here.)
 NATIVE_USB_BOARDS = esp32c3 esp32s2 esp32s3 esp32c6 esp32h2
 FQBN_BOARD = $(word 3,$(subst :, ,$(FQBN)))
-CDC_SUFFIX = $(if $(findstring CDCOnBoot=,$(FQBN)),,$(if $(filter $(FQBN_BOARD),$(NATIVE_USB_BOARDS)),:CDCOnBoot=cdc))
+comma := ,
+CDC_SUFFIX = $(if $(findstring CDCOnBoot=,$(FQBN)),,$(if $(filter $(FQBN_BOARD),$(NATIVE_USB_BOARDS)),:CDCOnBoot=cdc$(comma)PartitionScheme=default))
 FQBN_FULL = $(FQBN)$(CDC_SUFFIX)
 ESP32_URL = https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
