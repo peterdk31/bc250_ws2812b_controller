@@ -27,24 +27,23 @@ CONFIG_GET = ./led --config-get $(CONFIG)
 BAUD ?= $(or $(shell $(CONFIG_GET) sinks.serial.baud 2>/dev/null),921600)
 TIMEOUT_MS ?= $(or $(shell $(CONFIG_GET) esp32.host_timeout_ms 2>/dev/null),5000)
 
-# auto-detect the connected board so `make flash` targets whatever's plugged in
-# without setting anything. BOARD_ROW is the first serial line arduino-cli
-# reports; DETECTED_PORT/FQBN are its port and (if the board fingerprinted) its
-# FQBN. A native-USB board (ESP32-C3/S3) reports both — so a C3 on /dev/ttyACM*
-# is found even though the old default port was /dev/ttyUSB0. A bridge board
-# (plain ESP32 on CH340/CP2102) reports its port but no identity, so its FQBN
-# falls back to config/default. filter esp32:% grabs both the FQBN and Core
-# columns; firstword keeps the FQBN (it comes first in the row).
-BOARD_ROW = $(shell arduino-cli board list 2>/dev/null | awk '/^\/dev\/tty/{print; exit}')
-DETECTED_PORT = $(firstword $(BOARD_ROW))
-DETECTED_FQBN = $(firstword $(filter esp32:%,$(BOARD_ROW)))
+# PORT: config (or a command-line override) is authoritative; detection only
+# fills a gap. Resolution order: command-line override > configured
+# sinks.serial.port > first board arduino-cli lists > default. Config wins over
+# detection on purpose — a port pinned in config (e.g. a C3 on /dev/ttyACM1)
+# must not be overridden just because arduino-cli happens to list another device
+# (e.g. /dev/ttyACM0) first. Detection is the fallback for a fresh setup with no
+# configured port.
+DETECTED_PORT = $(shell arduino-cli board list 2>/dev/null | awk '/^\/dev\/tty/{print $$1; exit}')
+PORT ?= $(or $(shell $(CONFIG_GET) sinks.serial.port 2>/dev/null),$(DETECTED_PORT),/dev/ttyUSB0)
 
-# PORT/FQBN resolution, most specific first: a detected board, then config, then
-# the plain-ESP32 default. A command-line override always wins, e.g.
-# `make flash PORT=/dev/ttyACM0 FQBN=esp32:esp32:esp32s3`. The FQBN matters
-# because an ESP32-C3 is RISC-V, not Xtensa — flashing it with the plain-esp32
-# FQBN builds a binary for the wrong architecture.
-PORT ?= $(or $(DETECTED_PORT),$(shell $(CONFIG_GET) sinks.serial.port 2>/dev/null),/dev/ttyUSB0)
+# FQBN: fingerprint the board actually on PORT (native-USB boards like the C3/S3
+# report one; bridge boards don't), else the configured esp32.fqbn, else the
+# plain-ESP32 default. A command-line override always wins, e.g.
+# `make flash FQBN=esp32:esp32:esp32s3`. The FQBN matters because an ESP32-C3 is
+# RISC-V, not Xtensa — the plain-esp32 FQBN builds a binary for the wrong arch.
+DETECTED_FQBN = $(shell arduino-cli board list 2>/dev/null | \
+	awk -v p='$(PORT)' '$$1==p{for(i=1;i<=NF;i++) if($$i ~ /^esp32:/){print $$i; exit}}')
 FQBN ?= $(or $(DETECTED_FQBN),$(shell $(CONFIG_GET) esp32.fqbn 2>/dev/null),esp32:esp32:esp32)
 
 # native-USB chips (C3/S2/S3/C6/H2) expose their own USB as a CDC serial port;
