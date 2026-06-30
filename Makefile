@@ -53,24 +53,18 @@ FQBN ?= $(or $(DETECTED_FQBN),$(shell $(CONFIG_GET) esp32.fqbn 2>/dev/null),esp3
 
 # native-USB chips (C3/S2/S3/C6/H2) expose their own USB as a CDC serial port;
 # a board reached over that USB (it enumerates as /dev/ttyACM*) is only readable
-# by the sketch if Serial is mapped to the USB CDC, so do that automatically for
-# those chips. The original ESP32 has no native USB and no such menu option —
-# its USB is an external UART bridge wired to UART0, which Serial already is, so
-# it's left untouched. Same firmware, correct transport per chip. Skipped if a
-# CDCOnBoot option is already present in the FQBN. (Done with make functions,
-# not a shell case: the ')' in case patterns confuses $(shell)'s paren matching.)
-#
-# PartitionScheme=default is pinned alongside CDCOnBoot: once any menu option is
-# set in the FQBN, arduino-cli stops auto-filling the *default* PartitionScheme
-# menu, so build.partitions is never defined and the build dies with a literal
-# "tools/partitions/{build.partitions}.csv: no such file". Pinning it keeps
-# build.partitions resolved. (A bare FQBN with no menu option is unaffected, so
-# the plain ESP32 needs nothing here.)
+# by the sketch if Serial is mapped to the USB CDC. The obvious way is the
+# CDCOnBoot=cdc FQBN menu option — but on esp32 3.3.x, ANY menu option in the
+# FQBN makes the toolchain stop expanding board properties, so the build/upload
+# end up with literal "{build.partitions}.csv" / "--chip {build.mcu}" and fail.
+# So we keep the FQBN bare (which resolves cleanly) and instead define the CDC
+# macro directly in the compile flags — same effect, no menu option. The
+# original ESP32 has no native USB (UART bridge wired to UART0, which Serial
+# already is), so it gets no flag. Partitions are handled by the sketch-local
+# firmware/partitions.csv, also avoiding a PartitionScheme menu option.
 NATIVE_USB_BOARDS = esp32c3 esp32s2 esp32s3 esp32c6 esp32h2
 FQBN_BOARD = $(word 3,$(subst :, ,$(FQBN)))
-comma := ,
-CDC_SUFFIX = $(if $(findstring CDCOnBoot=,$(FQBN)),,$(if $(filter $(FQBN_BOARD),$(NATIVE_USB_BOARDS)),:CDCOnBoot=cdc$(comma)PartitionScheme=default))
-FQBN_FULL = $(FQBN)$(CDC_SUFFIX)
+CDC_FLAG = $(if $(filter $(FQBN_BOARD),$(NATIVE_USB_BOARDS)),-DARDUINO_USB_CDC_ON_BOOT=1)
 ESP32_URL = https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
 HEADERS = daemon/output/strip.hpp daemon/config_loader.hpp vendor/json.hpp \
@@ -193,7 +187,7 @@ SHARED = $(wildcard common/*.hpp)
 # else — geometry, animations — arrives at runtime as recordings).
 # compiler.cpp.extra_flags rather than build.extra_flags: the latter would
 # replace the esp32 platform's own extra flags.
-BUILD_PROPS = --build-property "compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS)"
+BUILD_PROPS = --build-property "compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS) $(CDC_FLAG)"
 
 receiver-shared:
 	rm -rf $(RECEIVER_SRC)
@@ -205,7 +199,7 @@ receiver-shared:
 # first boot. `receiver` depends on `led` so the CONFIG_GET reads above resolve
 # against the freshly built daemon.
 receiver: led receiver-toolchain receiver-shared
-	arduino-cli compile --fqbn $(FQBN_FULL) $(BUILD_PROPS) firmware
+	arduino-cli compile --fqbn $(FQBN) $(BUILD_PROPS) firmware
 
 # the daemon holds the serial port open, so free it around the upload and only
 # restart the service if it was running. The port isn't opened exclusively
@@ -232,7 +226,7 @@ flash: receiver
 		fuser -k $(PORT) || true; \
 		sleep 1; \
 	fi; \
-	arduino-cli upload -p $(PORT) --fqbn $(FQBN_FULL) firmware; \
+	arduino-cli upload -p $(PORT) --fqbn $(FQBN) firmware; \
 	rc=$$?; \
 	[ $$active = 1 ] && systemctl start led-controller; \
 	exit $$rc
