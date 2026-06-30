@@ -42,8 +42,13 @@ PORT ?= $(or $(shell $(CONFIG_GET) sinks.serial.port 2>/dev/null),$(DETECTED_POR
 # plain-ESP32 default. A command-line override always wins, e.g.
 # `make flash FQBN=esp32:esp32:esp32s3`. The FQBN matters because an ESP32-C3 is
 # RISC-V, not Xtensa — the plain-esp32 FQBN builds a binary for the wrong arch.
+# PORT may be a stable /dev/serial/by-id/... symlink (recommended, so it can't
+# renumber when other USB devices are plugged in), but `arduino-cli board list`
+# reports the raw /dev/ttyACM*. Resolve the symlink so the match below works
+# either way. readlink -f returns the path unchanged when it isn't a symlink.
+PORT_REAL = $(shell readlink -f $(PORT) 2>/dev/null)
 DETECTED_FQBN = $(shell arduino-cli board list 2>/dev/null | \
-	awk -v p='$(PORT)' '$$1==p{for(i=1;i<=NF;i++) if($$i ~ /^esp32:/){print $$i; exit}}')
+	awk -v p='$(PORT)' -v r='$(PORT_REAL)' '$$1==p || ($$1==r && r!=""){for(i=1;i<=NF;i++) if($$i ~ /^esp32:/){print $$i; exit}}')
 FQBN ?= $(or $(DETECTED_FQBN),$(shell $(CONFIG_GET) esp32.fqbn 2>/dev/null),esp32:esp32:esp32)
 
 # native-USB chips (C3/S2/S3/C6/H2) expose their own USB as a CDC serial port;
