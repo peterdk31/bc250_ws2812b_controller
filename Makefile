@@ -24,24 +24,41 @@ PREFIX = /usr/local
 # falls back to the default below (same as before)
 CONFIG ?= $(firstword $(wildcard /etc/led-controller/config.json config.json))
 CONFIG_GET = ./led --config-get $(CONFIG)
-PORT ?= $(or $(shell $(CONFIG_GET) sinks.serial.port 2>/dev/null),/dev/ttyUSB0)
 BAUD ?= $(or $(shell $(CONFIG_GET) sinks.serial.baud 2>/dev/null),921600)
 TIMEOUT_MS ?= $(or $(shell $(CONFIG_GET) esp32.host_timeout_ms 2>/dev/null),5000)
-# board identifier passed to arduino-cli, resolved in three steps so `make
-# flash` targets whatever's actually connected:
-#   1. DETECTED_FQBN — ask arduino-cli what's on PORT. Boards with a native USB
-#      identity (ESP32-C3/S3, etc.) fingerprint themselves, so they're picked
-#      automatically with no config at all.
-#   2. esp32.fqbn from config — for boards behind a generic USB-UART bridge
-#      (most plain ESP32s on CH340/CP2102) arduino-cli can't read an identity,
-#      so name the board in config alongside its port/baud.
-#   3. esp32:esp32:esp32 — the original Xtensa ESP32 as the final default.
-# Why it matters: an ESP32-C3 is RISC-V, not Xtensa; flashing it with the
-# plain-esp32 FQBN builds a binary for the wrong architecture. A command-line
-# override always wins, e.g. `make flash FQBN=esp32:esp32:esp32s3`.
-DETECTED_FQBN = $(shell arduino-cli board list 2>/dev/null | \
-	awk -v p='$(PORT)' '$$1==p{for(i=1;i<=NF;i++) if($$i ~ /^esp32:/){print $$i; exit}}')
+
+# auto-detect the connected board so `make flash` targets whatever's plugged in
+# without setting anything. BOARD_ROW is the first serial line arduino-cli
+# reports; DETECTED_PORT/FQBN are its port and (if the board fingerprinted) its
+# FQBN. A native-USB board (ESP32-C3/S3) reports both — so a C3 on /dev/ttyACM*
+# is found even though the old default port was /dev/ttyUSB0. A bridge board
+# (plain ESP32 on CH340/CP2102) reports its port but no identity, so its FQBN
+# falls back to config/default. filter esp32:% grabs both the FQBN and Core
+# columns; firstword keeps the FQBN (it comes first in the row).
+BOARD_ROW = $(shell arduino-cli board list 2>/dev/null | awk '/^\/dev\/tty/{print; exit}')
+DETECTED_PORT = $(firstword $(BOARD_ROW))
+DETECTED_FQBN = $(firstword $(filter esp32:%,$(BOARD_ROW)))
+
+# PORT/FQBN resolution, most specific first: a detected board, then config, then
+# the plain-ESP32 default. A command-line override always wins, e.g.
+# `make flash PORT=/dev/ttyACM0 FQBN=esp32:esp32:esp32s3`. The FQBN matters
+# because an ESP32-C3 is RISC-V, not Xtensa — flashing it with the plain-esp32
+# FQBN builds a binary for the wrong architecture.
+PORT ?= $(or $(DETECTED_PORT),$(shell $(CONFIG_GET) sinks.serial.port 2>/dev/null),/dev/ttyUSB0)
 FQBN ?= $(or $(DETECTED_FQBN),$(shell $(CONFIG_GET) esp32.fqbn 2>/dev/null),esp32:esp32:esp32)
+
+# native-USB chips (C3/S2/S3/C6/H2) expose their own USB as a CDC serial port;
+# a board reached over that USB (it enumerates as /dev/ttyACM*) is only readable
+# by the sketch if Serial is mapped to the USB CDC, so do that automatically for
+# those chips. The original ESP32 has no native USB and no such menu option —
+# its USB is an external UART bridge wired to UART0, which Serial already is, so
+# it's left untouched. Same firmware, correct transport per chip. Skipped if a
+# CDCOnBoot option is already present in the FQBN. (Done with make functions,
+# not a shell case: the ')' in case patterns confuses $(shell)'s paren matching.)
+NATIVE_USB_BOARDS = esp32c3 esp32s2 esp32s3 esp32c6 esp32h2
+FQBN_BOARD = $(word 3,$(subst :, ,$(FQBN)))
+CDC_SUFFIX = $(if $(findstring CDCOnBoot=,$(FQBN)),,$(if $(filter $(FQBN_BOARD),$(NATIVE_USB_BOARDS)),:CDCOnBoot=cdc))
+FQBN_FULL = $(FQBN)$(CDC_SUFFIX)
 ESP32_URL = https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
 HEADERS = daemon/output/strip.hpp daemon/config_loader.hpp vendor/json.hpp \
@@ -159,7 +176,7 @@ receiver-shared:
 # depends on `led` so the CONFIG_GET reads above resolve against the freshly
 # built daemon.
 receiver: led receiver-toolchain receiver-shared
-	arduino-cli compile --fqbn $(FQBN) \
+	arduino-cli compile --fqbn $(FQBN_FULL) \
 		--build-property "compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS)" \
 		firmware
 
@@ -181,7 +198,7 @@ flash: receiver
 		fuser -k $(PORT) || true; \
 		sleep 1; \
 	fi; \
-	arduino-cli upload -p $(PORT) --fqbn $(FQBN) firmware; \
+	arduino-cli upload -p $(PORT) --fqbn $(FQBN_FULL) firmware; \
 	rc=$$?; \
 	[ $$active = 1 ] && systemctl start led-controller; \
 	exit $$rc
