@@ -113,7 +113,7 @@ uninstall:
 
 clean:
 	rm -f led virtual-strip
-	rm -rf $(RECEIVER_SRC)
+	rm -rf $(RECEIVER_SRC) $(RECEIVER_BUILD)
 
 # add the user to the serial port's group (uucp on Arch-likes, dialout
 # on Debian/Fedora) so running `led` and arduino-cli uploads work
@@ -160,6 +160,12 @@ receiver-toolchain:
 # headers in there (flat, which is why includes are path-less); it's
 # regenerated each build and gitignored.
 RECEIVER_SRC = firmware/src
+# explicit build-output dir so `flash` uploads exactly what `receiver` compiled.
+# Without it, upload re-derives the build path from $HOME's arduino cache, which
+# differs between your user and root — so `sudo make flash` looks in the wrong
+# place and fails with "cannot stat partitions.csv". Pinning both sides to this
+# dir makes the compile→upload handoff independent of who runs it. Gitignored.
+RECEIVER_BUILD = firmware/build
 SHARED = $(wildcard common/*.hpp)
 
 receiver-shared:
@@ -177,6 +183,7 @@ receiver-shared:
 receiver: led receiver-toolchain receiver-shared
 	arduino-cli compile --fqbn $(FQBN_FULL) \
 		--build-property "compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS)" \
+		--output-dir $(RECEIVER_BUILD) \
 		firmware
 
 # the daemon holds the serial port open, so free it around the upload and only
@@ -197,7 +204,7 @@ flash: receiver
 		fuser -k $(PORT) || true; \
 		sleep 1; \
 	fi; \
-	arduino-cli upload -p $(PORT) --fqbn $(FQBN_FULL) firmware; \
+	arduino-cli upload -p $(PORT) --fqbn $(FQBN_FULL) --input-dir $(RECEIVER_BUILD) firmware; \
 	rc=$$?; \
 	[ $$active = 1 ] && systemctl start led-controller; \
 	exit $$rc
