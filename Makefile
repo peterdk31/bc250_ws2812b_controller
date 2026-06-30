@@ -181,6 +181,10 @@ receiver-toolchain:
 # headers in there (flat, which is why includes are path-less); it's
 # regenerated each build and gitignored.
 RECEIVER_SRC = firmware/src
+# compile output: arduino-cli writes the binaries here (incl. the all-in-one
+# firmware.ino.merged.bin we flash). Gitignored.
+RECEIVER_BUILD = firmware/build
+MERGED_BIN = $(RECEIVER_BUILD)/firmware.ino.merged.bin
 SHARED = $(wildcard common/*.hpp)
 
 # baked into the sketch so receiver and daemon agree on the link (everything
@@ -188,6 +192,14 @@ SHARED = $(wildcard common/*.hpp)
 # compiler.cpp.extra_flags rather than build.extra_flags: the latter would
 # replace the esp32 platform's own extra flags.
 BUILD_PROPS = --build-property "compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS) $(CDC_FLAG)"
+
+# esptool for flashing directly, bypassing `arduino-cli upload` (which on this
+# arduino-cli/core leaves the chip arg as a literal "--chip {build.mcu}"). Prefer
+# the esptool the esp32 core ships — guaranteed to match the chip — found under
+# the *invoking* user's arduino data dir even under sudo (cores live there, not
+# root's). Fall back to a PATH esptool. Override with ESPTOOL=/path if needed.
+ARDUINO_DATA = $(shell getent passwd $${SUDO_USER:-$$(id -un)} 2>/dev/null | cut -d: -f6)/.arduino15
+ESPTOOL ?= $(or $(firstword $(wildcard $(ARDUINO_DATA)/packages/esp32/tools/esptool_py/*/esptool)),$(shell command -v esptool.py 2>/dev/null),$(shell command -v esptool 2>/dev/null))
 
 receiver-shared:
 	rm -rf $(RECEIVER_SRC)
@@ -199,26 +211,27 @@ receiver-shared:
 # first boot. `receiver` depends on `led` so the CONFIG_GET reads above resolve
 # against the freshly built daemon.
 receiver: led receiver-toolchain receiver-shared
-	arduino-cli compile --fqbn $(FQBN) $(BUILD_PROPS) firmware
+	arduino-cli compile --fqbn $(FQBN) $(BUILD_PROPS) --output-dir $(RECEIVER_BUILD) firmware
 
-# the daemon holds the serial port open, so free it around the upload and only
-# restart the service if it was running. The port isn't opened exclusively
-# (daemon/output/serial_sink.hpp), so a daemon still writing LED frames during
-# the upload collides with esptool and shows up as "Invalid head of packet:
-# possible serial noise or corruption". Stopping the systemd unit covers the
-# normal case; fuser -k then clears a daemon started by hand (./led ...) or any
-# other writer the unit-stop wouldn't catch. fuser is best-effort (skipped if
-# absent), and only ever targets PORT, so it can't kill anything unrelated.
+# compile (via the `receiver` prereq) produces the binaries; we then flash the
+# all-in-one merged image with esptool DIRECTLY rather than `arduino-cli upload`
+# — on this arduino-cli/core the upload recipe leaves the chip arg as a literal
+# "--chip {build.mcu}" and esptool rejects it. esptool --chip auto detects the
+# board over USB, so we never depend on that property. Flashing the merged.bin
+# at 0x0 writes bootloader+partitions+app at their right offsets in one shot.
 #
-# compile (via the `receiver` prereq) then a SEPARATE upload — not `compile
-# --upload`. With compile --upload on esp32 3.3.x the upload step left the chip
-# arg as a literal "--chip {build.mcu}" and esptool rejected it; a standalone
-# `arduino-cli upload` re-resolves the board's properties fully and expands it.
-# Compile happens first (daemon still up, it doesn't need the port), then we free
-# the port and upload from the cache `receiver` just built.
+# The daemon holds the serial port open, so free it around the flash and restart
+# only if it was running. The port isn't opened exclusively
+# (daemon/output/serial_sink.hpp), so a daemon still writing LED frames collides
+# with esptool ("Invalid head of packet"). Stopping the unit covers the normal
+# case; fuser -k clears a hand-started daemon. fuser is best-effort and only ever
+# targets PORT. Compile runs first (daemon still up — it doesn't need the port).
 flash: receiver
 	-@$(MAKE) --no-print-directory serial-perms
-	@active=0; systemctl is-active --quiet led-controller && active=1; \
+	@tool="$(ESPTOOL)"; \
+	[ -n "$$tool" ] || { echo "esptool not found; set ESPTOOL=/path/to/esptool or 'pip install esptool'"; exit 1; }; \
+	[ -f "$(MERGED_BIN)" ] || { echo "merged image missing: $(MERGED_BIN) (did the compile run?)"; exit 1; }; \
+	active=0; systemctl is-active --quiet led-controller && active=1; \
 	[ $$active = 1 ] && systemctl stop led-controller; \
 	if command -v fuser >/dev/null 2>&1 && fuser $(PORT) >/dev/null 2>&1; then \
 		echo "$(PORT) still held after stopping the service; freeing it:"; \
@@ -226,7 +239,8 @@ flash: receiver
 		fuser -k $(PORT) || true; \
 		sleep 1; \
 	fi; \
-	arduino-cli upload -p $(PORT) --fqbn $(FQBN) firmware; \
+	echo "flashing $(MERGED_BIN) via $$tool"; \
+	"$$tool" --chip auto --port $(PORT) --baud $(BAUD) write_flash 0x0 "$(MERGED_BIN)"; \
 	rc=$$?; \
 	[ $$active = 1 ] && systemctl start led-controller; \
 	exit $$rc
