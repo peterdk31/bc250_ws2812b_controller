@@ -23,20 +23,55 @@ sensors → rules → effect → frames ──serial 921600──→ RMT ──�
   (default 13), plus 5 V and GND. Power the strip from a supply that
   can handle it, not the dev board's regulator; share grounds.
 
-## Quick start
+## Getting started
 
-Prerequisites: `g++` and `make` for the daemon; `docker` or `podman` plus a
-small host `esptool` for the receiver (the ~2 GB ESP-IDF toolchain is *not*
-installed — the firmware builds in a throwaway container; see [Flashing the
-receiver](#flashing-the-receiver)). On an immutable distro like Bazzite the base
-image has no compiler — layer it (`rpm-ostree install gcc-c++ make`) or build in
-a distrobox; podman is already present there.
+### Prerequisites
+
+**Daemon** (the host side): `g++` and `make`.
+
+**Firmware** (the ESP32 receiver): the ESP-IDF toolchain. Building it needs a
+cross-compiler *somewhere* — pick **one** of two paths:
+
+- **Path A — throwaway container build (recommended).** Install a container
+  runtime and the firmware builds inside Espressif's official ESP-IDF image in a
+  `--rm` container; the ~2 GB toolchain is never installed on the host, and the
+  cached image is disposable (`make receiver-clean`). `make` auto-detects
+  `docker` or `podman`. You also need a tiny host `esptool` for the actual write
+  (a few MB, not the toolchain).
+
+- **Path B — native ESP-IDF.** Install ESP-IDF (v5.1+) once and point `make` at
+  it with `IDF_PATH=...`. No container needed, but the ~2 GB toolchain stays
+  installed. This ships its own `esptool`, so nothing else is required.
+
+Install the prerequisites for your distro and chosen path:
+
+```sh
+# CachyOS / Arch (mutable) — daemon + Path A (podman is rootless, no daemon/group setup)
+sudo pacman -S base-devel podman
+pipx install esptool                 # or: pip install --user esptool
+
+# CachyOS / Arch — Path B instead of a container
+sudo pacman -S base-devel
+git clone -b v5.3.1 --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf
+~/esp/esp-idf/install.sh esp32c3     # then build/flash with IDF_PATH=~/esp/esp-idf
+
+# Bazzite / immutable — podman is preinstalled (Path A); the daemon's g++/make
+# aren't in the base image, so build the daemon in a distrobox (or copy the
+# prebuilt `led` binary over).
+```
+
+### Build, flash, install
 
 ```sh
 sudo make install    # build daemon + systemd unit + default config
-sudo make flash      # build (in a container) + flash the ESP32 receiver
+sudo make flash      # build the firmware (Path A container, or Path B if IDF_PATH set) + flash
 sudo systemctl enable --now led-controller
 ```
+
+Path B is selected automatically whenever `IDF_PATH` points at an ESP-IDF
+install: `sudo make flash IDF_PATH=~/esp/esp-idf`. With no `IDF_PATH` and a
+container runtime present, Path A is used. If neither is available, `make`
+stops and tells you what to install.
 
 Then adjust `/etc/led-controller/config.json` for your hardware — at
 least `strip.leds`, `strip.pin` and `sinks.serial.port` — and
@@ -53,32 +88,21 @@ The sections below cover each step in detail.
 ## Flashing the receiver
 
 The receiver firmware is a native [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/get-started/)
-project under `firmware/` — no arduino-cli, no `.ino`. To avoid a permanent
-~2 GB toolchain install, `make` builds it **inside Espressif's official ESP-IDF
-container image**, in a throwaway (`--rm`) container. The only thing that
-lingers is the cached image, which `make receiver-clean` deletes when you're
-done. So the only host prerequisites are:
-
-- **A container runtime** — `docker` or `podman` (podman ships on Bazzite).
-  `make` auto-detects whichever is installed.
-- **`esptool`** for the actual flash — tiny and pure-Python, unlike the
-  toolchain: `pipx install esptool` (or `pip install --user esptool`). Not
-  needed just to build.
+project under `firmware/` — no arduino-cli, no `.ino`. It builds either in a
+throwaway container (Path A) or against a native ESP-IDF (Path B) — see
+[Getting started](#getting-started) for the one-time setup of each.
 
 ```sh
-sudo make flash                      # build (containerized) + flash
+sudo make flash                      # build + flash
 sudo make flash PORT=/dev/ttyACM0    # explicit port; TARGET=esp32 for other chips
 make receiver                        # build only, no flash
 make receiver-clean                  # reclaim space: build dirs + the ESP-IDF image
 ```
 
-The first build pulls the image (~2 GB, one time) and the `led_strip` +
-`littlefs` components from the ESP Component Registry. Each per-target build
+On Path A the first build pulls the image (~2 GB, one time) and the `led_strip` +
+`littlefs` components from the ESP Component Registry; `make receiver-clean`
+drops both the build dirs and the cached image afterwards. Each per-target build
 lives in its own `firmware/build-<target>/` so switching chips never clashes.
-
-Already have ESP-IDF installed natively and prefer to use it? Set
-`IDF_PATH=/path/to/esp-idf` (v5.1+) and the build skips the container and sources
-its `export.sh` directly.
 
 The port, baud rate, host timeout and target chip default to the matching keys
 from `/etc/led-controller/config.json` (falling back to the repo's
