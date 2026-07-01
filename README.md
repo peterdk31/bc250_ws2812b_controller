@@ -29,49 +29,50 @@ sensors → rules → effect → frames ──serial 921600──→ RMT ──�
 
 **Daemon** (the host side): `g++` and `make`.
 
-**Firmware** (the ESP32 receiver): the ESP-IDF toolchain. Building it needs a
-cross-compiler *somewhere* — pick **one** of two paths:
-
-- **Path A — throwaway container build (recommended).** Install a container
-  runtime and the firmware builds inside Espressif's official ESP-IDF image in a
-  `--rm` container; the ~2 GB toolchain is never installed on the host, and the
-  cached image is disposable (`make receiver-clean`). `make` auto-detects
-  `docker` or `podman`. You also need a tiny host `esptool` for the actual write
-  (a few MB, not the toolchain).
-
-- **Path B — native ESP-IDF.** Install ESP-IDF (v5.1+) once and point `make` at
-  it with `IDF_PATH=...`. No container needed, but the ~2 GB toolchain stays
-  installed. This ships its own `esptool`, so nothing else is required.
-
-Install the prerequisites for your distro and chosen path:
+**Firmware** (the ESP32 receiver): by default you **don't build it** — `make
+flash` downloads a prebuilt image from the project's GitHub Releases (built by
+CI) and writes it. The receiver is generic and auto-hunts the baud rate, so one
+prebuilt image fits every config; you flash it once and never again for config
+or effect changes. That means the only firmware prerequisite is a host
+`esptool` (tiny, pure-Python — *not* the toolchain) plus `curl`/`wget`:
 
 ```sh
-# CachyOS / Arch (mutable) — daemon + Path A (podman is rootless, no daemon/group setup)
-sudo pacman -S base-devel podman
-pipx install esptool                 # or: pip install --user esptool
-
-# CachyOS / Arch — Path B instead of a container
-sudo pacman -S base-devel
-git clone -b v5.3.1 --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf
-~/esp/esp-idf/install.sh esp32c3     # then build/flash with IDF_PATH=~/esp/esp-idf
-
-# Bazzite / immutable — podman is preinstalled (Path A); the daemon's g++/make
-# aren't in the base image, so build the daemon in a distrobox (or copy the
-# prebuilt `led` binary over).
+# CachyOS / Arch (mutable)
+sudo pacman -S base-devel          # daemon's g++/make (curl is already present)
+pipx install esptool               # or: pip install --user esptool
 ```
+
+On Bazzite (immutable) `esptool` and `curl` install the same way; the daemon's
+`g++`/`make` aren't in the base image, so build the daemon in a distrobox (or
+copy the prebuilt `led` binary over).
+
+**Building the firmware from source** is only needed if you modify it (or want a
+non-default baud baked in). Then you need a cross-compiler — pick one:
+
+- **Container (recommended)** — install `docker` or `podman` (`sudo pacman -S
+  podman`; podman is preinstalled on Bazzite). `make receiver` / `make
+  flash-source` build inside Espressif's official ESP-IDF image in a throwaway
+  container; the ~2 GB toolchain is never installed on the host and the cached
+  image is disposable (`make receiver-clean`).
+- **Native ESP-IDF** — install ESP-IDF (v5.1+) once and set `IDF_PATH=...`; no
+  container, but the toolchain stays installed:
+  ```sh
+  git clone -b v5.3.1 --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf
+  ~/esp/esp-idf/install.sh esp32c3
+  ```
 
 ### Build, flash, install
 
 ```sh
 sudo make install    # build daemon + systemd unit + default config
-sudo make flash      # build the firmware (Path A container, or Path B if IDF_PATH set) + flash
+sudo make flash      # download the prebuilt receiver image + flash it
 sudo systemctl enable --now led-controller
 ```
 
-Path B is selected automatically whenever `IDF_PATH` points at an ESP-IDF
-install: `sudo make flash IDF_PATH=~/esp/esp-idf`. With no `IDF_PATH` and a
-container runtime present, Path A is used. If neither is available, `make`
-stops and tells you what to install.
+To build and flash from source instead of downloading, use `make flash-source`
+(container by default, or native ESP-IDF if `IDF_PATH` is set). Prebuilt images
+are published when a `v*` tag is pushed; until the first release exists, use
+`make flash-source`.
 
 Then adjust `/etc/led-controller/config.json` for your hardware — at
 least `strip.leds`, `strip.pin` and `sinks.serial.port` — and
@@ -88,31 +89,42 @@ The sections below cover each step in detail.
 ## Flashing the receiver
 
 The receiver firmware is a native [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/get-started/)
-project under `firmware/` — no arduino-cli, no `.ino`. It builds either in a
-throwaway container (Path A) or against a native ESP-IDF (Path B) — see
-[Getting started](#getting-started) for the one-time setup of each.
+project under `firmware/` — no arduino-cli, no `.ino`. You normally don't build
+it: `make flash` downloads a prebuilt merged image (built by CI, see
+`.github/workflows/firmware.yml`) and writes it with esptool.
 
 ```sh
-sudo make flash                      # build + flash
+sudo make flash                      # download prebuilt image + flash
 sudo make flash PORT=/dev/ttyACM0    # explicit port; TARGET=esp32 for other chips
-make receiver                        # build only, no flash
-make receiver-clean                  # reclaim space: build dirs + the ESP-IDF image
+sudo make flash FW_RELEASE=v1.2.0    # pin a specific release (default: latest)
+
+sudo make flash-source               # build from source (container/native) + flash
+make receiver                        # build from source only, no flash
+make receiver-clean                  # reclaim space: build dirs, downloads, ESP-IDF image
 ```
 
-On Path A the first build pulls the image (~2 GB, one time) and the `led_strip` +
-`littlefs` components from the ESP Component Registry; `make receiver-clean`
-drops both the build dirs and the cached image afterwards. Each per-target build
-lives in its own `firmware/build-<target>/` so switching chips never clashes.
+`make flash` needs only `esptool` + `curl`/`wget` — no toolchain. The merged
+image is flashed at `0x0` (it bakes in the per-chip bootloader offset, e.g.
+`0x1000` on the ESP32 vs `0x0` on the C3), and doesn't touch the NVS or LittleFS
+partitions, so a reflash keeps a board's saved state.
 
-The port, baud rate, host timeout and target chip default to the matching keys
-from `/etc/led-controller/config.json` (falling back to the repo's
-`config.json`), so flashing targets the same adapter the daemon uses and bakes
-the baud/timeout into the firmware. `esp32.target` picks the chip to build for
+`make flash-source` / `make receiver` build in a throwaway container by default,
+or against a native ESP-IDF when `IDF_PATH` is set (see
+[Getting started](#getting-started)). The first container build pulls the image
+(~2 GB, one time) plus the `led_strip` + `littlefs` components; each per-target
+build lives in its own `firmware/build-<target>/`, and `make receiver-clean`
+drops the lot.
+
+The port, baud rate and target chip default to the matching keys from
+`/etc/led-controller/config.json` (falling back to the repo's `config.json`), so
+flashing targets the same adapter the daemon uses. `esp32.target` picks the chip
 (`esp32c3` by default — an ESP32-C3 is RISC-V, so it can't run a plain-ESP32
-Xtensa binary); esptool auto-detects the connected chip when it writes. Nothing
-else is baked in — strip geometry and the power-on/shutdown animations arrive at
-runtime as frames the daemon streams, so a flash is only needed for a firmware
-change, never for a config or effect change.
+Xtensa binary); esptool auto-detects the connected chip when it writes. The
+prebuilt image uses the firmware's default baud (the receiver auto-hunts to
+whatever the daemon sends); a source build bakes in your config's baud/timeout.
+Nothing else is baked in — strip geometry and the power-on/shutdown animations
+arrive at runtime as frames the daemon streams, so a flash is only needed for a
+firmware change, never for a config or effect change.
 
 `flash` stops the led-controller service around the write (the daemon
 holds the port open) and restarts it afterwards if it was running.
@@ -309,7 +321,9 @@ into one per-channel lookup table, so they cost nothing per frame. See
                                     // "Previewing without hardware"); it
         }                           // attaches automatically.
     },                              // baud: receiver locks on by itself;
-                                    // `make flash` bakes it as the boot default
+                                    // the prebuilt image boots at the default
+                                    // and auto-hunts; `make flash-source` can
+                                    // bake this value as the boot default
     "strip": {
         "leds": 58,
         "pin": 13,              // ESP32 GPIO driving the strip
@@ -327,9 +341,10 @@ into one per-channel lookup table, so they cost nothing per frame. See
     },
     "sensors": [ ... ],         // temp sensor candidates, see below
     "esp32": {                  // the receiver. See "Flashing the receiver"
-        "host_timeout_ms": 5000, // blanks the strip after this long without
-                                // a frame; baked by `make flash`, not read
-                                // by the daemon
+        "host_timeout_ms": 5000, // blanks the strip after this long without a
+                                // frame; the prebuilt image uses the 5000
+                                // default, `make flash-source` bakes this value.
+                                // Not read by the daemon
         "power_on": { ... },    // effects the receiver runs on its own,
         "shutdown": { ... }     // pushed over serial. Standalone effects only
     },
@@ -404,7 +419,8 @@ Suggested order when dialing it in:
    red is dropping out, so try `"2.0 2.2 2.2"`. Raising a channel's
    gamma darkens its midtones; lowering it lifts them.
 4. Re-check the bright end (step 2 is unaffected by gamma at full
-   white) and `make flash` so the power-on animation matches.
+   white) and restart the daemon so it re-records and re-uploads the
+   power-on animation with the new balance (no reflash needed).
 
 ### Sensors
 

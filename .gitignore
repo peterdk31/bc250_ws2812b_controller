@@ -5,13 +5,15 @@
 *.d
 
 # ESP-IDF firmware build output (idf.py writes a per-target build dir), pulled
-# managed components, and the generated sdkconfig (sdkconfig.defaults is tracked)
+# managed components, the generated sdkconfig (sdkconfig.defaults is tracked),
+# and prebuilt images downloaded by `make flash`
 firmware/build/
 firmware/build-*/
 firmware/managed_components/
 firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/dependencies.lock
+firmware/dist/
 
 # leftover from the old arduino-cli flow (common headers were mirrored here)
 firmware/src/

@@ -139,7 +139,7 @@ uninstall:
 
 clean:
 	rm -f led virtual-strip
-	rm -rf firmware/build firmware/build-* firmware/managed_components \
+	rm -rf firmware/build firmware/build-* firmware/dist firmware/managed_components \
 	       firmware/sdkconfig firmware/sdkconfig.old firmware/dependencies.lock \
 	       firmware/src
 
@@ -187,6 +187,20 @@ RECEIVER_BUILD = firmware/build-$(TARGET)
 # host esptool for flashing (tiny, pure-Python; NOT the 2 GB toolchain). Prefer
 # esptool.py / esptool on PATH; the recipe falls back to `python3 -m esptool`.
 ESPTOOL ?= $(firstword $(shell command -v esptool.py 2>/dev/null) $(shell command -v esptool 2>/dev/null))
+# shell snippet (used by both flash targets) that resolves a host esptool into
+# $$tool, or errors with an install hint.
+ESPTOOL_RESOLVE = tool="$(ESPTOOL)"; \
+	[ -n "$$tool" ] || { python3 -c 'import esptool' >/dev/null 2>&1 && tool="python3 -m esptool"; }; \
+	[ -n "$$tool" ] || { echo "esptool not found on host (it's tiny — 'pipx install esptool' or 'pip install --user esptool')"; exit 1; }
+
+# prebuilt firmware images published to GitHub Releases by .github/workflows/
+# firmware.yml. `make flash` downloads the merged image for TARGET and writes it,
+# so the common case needs no ESP-IDF and no container — just esptool. Pin a
+# specific release with FW_RELEASE=v1.2.3 (default: latest).
+FW_REPO ?= peterdk31/bc250_ws2812b_controller
+FW_RELEASE ?= latest
+FW_BIN = firmware-$(TARGET).bin
+FW_URL = https://github.com/$(FW_REPO)/releases/$(if $(filter latest,$(FW_RELEASE)),latest/download,download/$(FW_RELEASE))/$(FW_BIN)
 
 # the idf.py build command, run either natively or in the container. The wire
 # protocol / frame parser / recording / crossfade headers compile straight from
@@ -212,31 +226,53 @@ receiver: led receiver-toolchain
 			bash -c 'ROOT=/project; git config --global --add safe.directory "*" >/dev/null 2>&1; $(IDF_BUILD_CMD)'; \
 	fi
 
-# the build (via the `receiver` prereq) produces the binaries; we flash them with
-# a tiny host esptool using the build's flash_args manifest, so bootloader,
-# partition table and app land at their right offsets. `write_flash @flash_args`
-# is exactly what idf.py runs under the hood — we just wrap it so we can free the
-# port first and keep flashing off the (disposable) container.
+# default flash: download the prebuilt merged image for TARGET and write it at
+# 0x0. Needs no ESP-IDF/container — just esptool and curl/wget. The image is
+# generic (built with default HOST_BAUD; the receiver auto-hunts the baud), so
+# it fits any config. Build-from-source instead with `make flash-source`.
 #
 # The daemon holds the serial port open, so free it around the flash and restart
-# only if it was running. The port isn't opened exclusively
-# (daemon/output/serial_sink.hpp), so a daemon still writing LED frames collides
-# with esptool ("Invalid head of packet"). Stopping the unit covers the normal
-# case; fuser -k clears a hand-started daemon. fuser is best-effort and only ever
-# targets PORT. The build runs first (daemon still up — it doesn't need the port).
-flash: receiver
+# only if it was running (the port isn't opened exclusively — a daemon still
+# streaming frames collides with esptool, "Invalid head of packet"). Stopping
+# the unit covers the normal case; fuser -k clears a hand-started daemon.
+flash:
 	-@$(MAKE) --no-print-directory serial-perms
-	@[ -f "$(RECEIVER_BUILD)/flash_args" ] || { echo "flash_args missing in $(RECEIVER_BUILD) (did the build run?)"; exit 1; }; \
-	tool="$(ESPTOOL)"; \
-	[ -n "$$tool" ] || { python3 -c 'import esptool' >/dev/null 2>&1 && tool="python3 -m esptool"; }; \
-	[ -n "$$tool" ] || { echo "esptool not found on host (it's tiny — 'pipx install esptool' or 'pip install --user esptool')"; exit 1; }; \
+	@$(ESPTOOL_RESOLVE); \
+	mkdir -p firmware/dist; img="firmware/dist/$(FW_BIN)"; \
+	echo "fetching $(FW_URL)"; \
+	if command -v curl >/dev/null 2>&1; then fetch="curl -fSL -o $$img $(FW_URL)"; \
+	elif command -v wget >/dev/null 2>&1; then fetch="wget -qO $$img $(FW_URL)"; \
+	else echo "need curl or wget to download the prebuilt image"; exit 1; fi; \
+	if ! $$fetch; then \
+		if [ -f "$$img" ]; then echo "download failed; using cached $$img"; \
+		else echo "no prebuilt image for $(TARGET) — has a 'v*' release been published? otherwise build locally: make flash-source"; rm -f "$$img"; exit 1; fi; \
+	fi; \
 	active=0; systemctl is-active --quiet led-controller && active=1; \
 	[ $$active = 1 ] && systemctl stop led-controller; \
 	if command -v fuser >/dev/null 2>&1 && fuser $(PORT) >/dev/null 2>&1; then \
 		echo "$(PORT) still held after stopping the service; freeing it:"; \
-		fuser -v $(PORT) || true; \
-		fuser -k $(PORT) || true; \
-		sleep 1; \
+		fuser -v $(PORT) || true; fuser -k $(PORT) || true; sleep 1; \
+	fi; \
+	echo "flashing $(TARGET) via $$tool on $(PORT)"; \
+	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash 0x0 "$$img"; \
+	rc=$$?; \
+	[ $$active = 1 ] && systemctl start led-controller; \
+	exit $$rc
+
+# build the firmware from source (container or native, see `receiver`) and flash
+# it, instead of downloading a prebuilt image. Use this when you've changed the
+# firmware or want a non-default HOST_BAUD/HOST_TIMEOUT_MS baked in. Flashes with
+# the build's flash_args manifest (bootloader/partition-table/app at their right
+# offsets) — exactly what idf.py runs under the hood, wrapped to free the port.
+flash-source: receiver
+	-@$(MAKE) --no-print-directory serial-perms
+	@[ -f "$(RECEIVER_BUILD)/flash_args" ] || { echo "flash_args missing in $(RECEIVER_BUILD) (did the build run?)"; exit 1; }; \
+	$(ESPTOOL_RESOLVE); \
+	active=0; systemctl is-active --quiet led-controller && active=1; \
+	[ $$active = 1 ] && systemctl stop led-controller; \
+	if command -v fuser >/dev/null 2>&1 && fuser $(PORT) >/dev/null 2>&1; then \
+		echo "$(PORT) still held after stopping the service; freeing it:"; \
+		fuser -v $(PORT) || true; fuser -k $(PORT) || true; sleep 1; \
 	fi; \
 	echo "flashing $(TARGET) via $$tool on $(PORT)"; \
 	( cd "$(RECEIVER_BUILD)" && $$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash @flash_args ); \
@@ -244,10 +280,10 @@ flash: receiver
 	[ $$active = 1 ] && systemctl start led-controller; \
 	exit $$rc
 
-# reclaim the space: firmware build dirs + the cached ESP-IDF container image
-# (the ~2 GB download). Run this once you're done flashing.
+# reclaim the space: build dirs, downloaded prebuilt images, and the cached
+# ESP-IDF container image (the ~2 GB download). Run this once you're done.
 receiver-clean:
-	rm -rf firmware/build firmware/build-* $(IDF_GENERATED)
+	rm -rf firmware/build firmware/build-* firmware/dist $(IDF_GENERATED)
 	-@[ -n "$(CONTAINER)" ] && $(CONTAINER) rmi $(IDF_IMAGE) 2>/dev/null || true
 
-.PHONY: all install install-config uninstall clean udev-rule serial-perms receiver-toolchain receiver receiver-clean flash
+.PHONY: all install install-config uninstall clean udev-rule serial-perms receiver-toolchain receiver receiver-clean flash flash-source

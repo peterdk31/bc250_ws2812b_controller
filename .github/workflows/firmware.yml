@@ -1,0 +1,81 @@
+# Build the receiver firmware for every target in Espressif's official ESP-IDF
+# container, so it's continuously verified (a broken component/API bump fails
+# here instead of surprising someone at flash time). On a version tag (v*) the
+# merged images are published to a GitHub Release, which `make flash` downloads —
+# so end users need neither ESP-IDF nor a container, just esptool.
+name: firmware
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'firmware/**'
+      - 'common/**'
+      - '.github/workflows/firmware.yml'
+  pull_request:
+    paths:
+      - 'firmware/**'
+      - 'common/**'
+      - '.github/workflows/firmware.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.3.1
+    strategy:
+      matrix:
+        target: [esp32, esp32c3]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build with the firmware's default HOST_BAUD/HOST_TIMEOUT_MS baked in
+      # (not the ones from a local config): a prebuilt image is generic, and the
+      # receiver auto-hunts the baud anyway, so one default build fits everyone.
+      # sdkconfig goes inside the per-target build dir (see the Makefile note).
+      - name: Build ${{ matrix.target }}
+        shell: bash
+        run: |
+          git config --global --add safe.directory '*'
+          . "$IDF_PATH/export.sh"
+          idf.py -C firmware -B "firmware/build-${{ matrix.target }}" \
+            -DIDF_TARGET=${{ matrix.target }} \
+            -DSDKCONFIG="$PWD/firmware/build-${{ matrix.target }}/sdkconfig" \
+            build
+
+      # Merge bootloader + partition table + app into one image flashable at
+      # 0x0 (merge_bin bakes in the per-chip offsets — e.g. the ESP32 bootloader
+      # at 0x1000 vs 0x0 on the C3), so the published artifact is a single file.
+      - name: Merge image
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          cd "firmware/build-${{ matrix.target }}"
+          esptool.py --chip ${{ matrix.target }} merge_bin \
+            -o "$GITHUB_WORKSPACE/firmware-${{ matrix.target }}.bin" @flash_args
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.target }}
+          path: firmware-${{ matrix.target }}.bin
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish to release ${{ github.ref_name }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.bin \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes \
+          || gh release upload "$GITHUB_REF_NAME" dist/*.bin --repo "$GITHUB_REPOSITORY" --clobber
