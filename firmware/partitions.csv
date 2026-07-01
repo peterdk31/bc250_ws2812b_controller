@@ -1,15 +1,14 @@
-# Partition table for the receiver, shipped in the sketch folder so arduino-esp32
-# copies it directly instead of looking up tools/partitions/{build.partitions}.csv
-# — which arduino-esp32 3.3.x leaves unexpanded (a literal "{build.partitions}")
-# once any FQBN menu option like CDCOnBoot is set, breaking the build. A sketch
-# partitions.csv sidesteps that lookup entirely.
+# Partition table for the receiver — a custom ESP-IDF table (selected via
+# CONFIG_PARTITION_TABLE_CUSTOM in sdkconfig.defaults). A custom table is
+# required because no built-in preset carves out a filesystem partition, and the
+# firmware stores its power-on/shutdown recordings on LittleFS (mounted on the
+# "storage" partition below — see main.cpp, esp_vfs_littlefs_register, which
+# matches the partition by label, any subtype).
 #
-# Standard "default" 4 MB layout. The firmware stores its power-on/shutdown
-# recordings on LittleFS, which mounts the partition labelled "spiffs" below.
+# Minimal 4 MB layout: a single factory app (no OTA — we always flash over
+# USB/serial) and a 2 MB storage partition. nvs holds the receiver's saved baud
+# and strip geometry.
 # Name,     Type, SubType,  Offset,   Size,     Flags
-nvs,        data, nvs,      0x9000,   0x5000,
-otadata,    data, ota,      0xe000,   0x2000,
-app0,       app,  ota_0,    0x10000,  0x140000,
-app1,       app,  ota_1,    0x150000, 0x140000,
-spiffs,     data, spiffs,   0x290000, 0x160000,
-coredump,   data, coredump, 0x3F0000, 0x10000,
+nvs,        data, nvs,      0x9000,   0x7000,
+factory,    app,  factory,  0x10000,  0x1F0000,
+storage,    data, spiffs,   0x200000, 0x200000,

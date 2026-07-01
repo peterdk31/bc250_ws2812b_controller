@@ -1,7 +1,7 @@
 CXX = g++
 # source is grouped by where it runs: common/ compiles into both the daemon
 # and the firmware (the daemon<->receiver link layer only), daemon/ is the
-# host daemon, firmware/ is the ESP32 sketch, vendor/ is third-party.
+# host daemon, firmware/ is the ESP32 receiver (ESP-IDF), vendor/ is third-party.
 # includes stay path-less, so each source dir goes on the include path here
 # and the receiver build (which copies the common files flat) needs no -I
 CXXFLAGS = -O2 -std=c++17 -Wall -Wextra \
@@ -9,19 +9,20 @@ CXXFLAGS = -O2 -std=c++17 -Wall -Wextra \
            -Idaemon/sources -Idaemon/color -Idaemon/effects -Ivendor
 PREFIX = /usr/local
 
-# ESP32 receiver flashing via arduino-cli. PORT, BAUD and TIMEOUT_MS default
-# to the matching keys from the installed config (or the repo one); override
-# on the command line, e.g. `make flash PORT=/dev/ttyACM0`. BAUD and TIMEOUT_MS
-# are baked into the sketch so receiver and daemon agree. The receiver renders
-# no effects, so it needs no strip/effect config baked in — geometry and the
-# power-on/shutdown animations arrive as recordings the daemon streams at
-# runtime (see common/protocol.hpp).
+# ESP32 receiver firmware — a native ESP-IDF project (firmware/), built with
+# idf.py and flashed with esptool. No arduino-cli, no .ino. PORT, BAUD, TIMEOUT_MS
+# and TARGET default to the matching keys from the installed config (or the repo
+# one); override on the command line, e.g. `make flash PORT=/dev/ttyACM0`. BAUD
+# and TIMEOUT_MS are baked into the firmware so receiver and daemon agree. The
+# receiver renders no effects, so it needs no strip/effect config baked in —
+# geometry and the power-on/shutdown animations arrive as recordings the daemon
+# streams at runtime (see common/protocol.hpp).
 #
 # the values are read through the daemon's own JSON parser (`led
 # --config-get <dotted.path>`) rather than scraped, so they can't drift
 # from how the daemon reads the same file. `receiver` depends on `led`
 # so it exists by the time these expand; if it somehow doesn't, each
-# falls back to the default below (same as before)
+# falls back to the default below.
 CONFIG ?= $(firstword $(wildcard /etc/led-controller/config.json config.json))
 CONFIG_GET = ./led --config-get $(CONFIG)
 BAUD ?= $(or $(shell $(CONFIG_GET) sinks.serial.baud 2>/dev/null),921600)
@@ -29,49 +30,47 @@ TIMEOUT_MS ?= $(or $(shell $(CONFIG_GET) esp32.host_timeout_ms 2>/dev/null),5000
 
 # PORT: config (or a command-line override) is authoritative; detection only
 # fills a gap. Resolution order: command-line override > configured
-# sinks.serial.port > first board arduino-cli lists > default. Config wins over
+# sinks.serial.port > first likely device node > default. Config wins over
 # detection on purpose — a port pinned in config (e.g. a C3 on /dev/ttyACM1)
-# must not be overridden just because arduino-cli happens to list another device
-# (e.g. /dev/ttyACM0) first. Detection is the fallback for a fresh setup with no
-# configured port.
-DETECTED_PORT = $(shell arduino-cli board list 2>/dev/null | awk '/^\/dev\/tty/{print $$1; exit}')
+# must not be overridden just because another device enumerated first. The udev
+# rule pins /dev/led-controller, so it's preferred by the glob when present.
+DETECTED_PORT = $(firstword $(wildcard /dev/led-controller /dev/ttyACM* /dev/ttyUSB*))
 PORT ?= $(or $(shell $(CONFIG_GET) sinks.serial.port 2>/dev/null),$(DETECTED_PORT),/dev/ttyUSB0)
 
-# FQBN: fingerprint the board actually on PORT (native-USB boards like the C3/S3
-# report one; bridge boards don't), else the configured esp32.fqbn, else the
-# plain-ESP32 default. A command-line override always wins, e.g.
-# `make flash FQBN=esp32:esp32:esp32s3`. The FQBN matters because an ESP32-C3 is
-# RISC-V, not Xtensa — the plain-esp32 FQBN builds a binary for the wrong arch.
-# PORT may be a stable /dev/serial/by-id/... symlink (recommended, so it can't
-# renumber when other USB devices are plugged in), but `arduino-cli board list`
-# reports the raw /dev/ttyACM*. Resolve the symlink so the match below works
-# either way. readlink -f returns the path unchanged when it isn't a symlink.
-PORT_REAL = $(shell readlink -f $(PORT) 2>/dev/null)
-# filter-out esp32_family: native-USB Espressif chips (C3/S3/…) all share one USB
-# identity, so `arduino-cli board list` reports the generic "esp32:esp32:esp32_family"
-# board for them. That board has NO concrete build.mcu/build.partitions (you pick
-# the chip via a menu), so building with it leaves literal "{build.mcu}" /
-# "{build.partitions}" and fails. It's useless for us — drop it so FQBN falls back
-# to the configured esp32.fqbn (the real chip, e.g. esp32c3).
-DETECTED_FQBN = $(filter-out esp32:esp32:esp32_family,$(shell arduino-cli board list 2>/dev/null | \
-	awk -v p='$(PORT)' -v r='$(PORT_REAL)' '$$1==p || ($$1==r && r!=""){for(i=1;i<=NF;i++) if($$i ~ /^esp32:/){print $$i; exit}}'))
-FQBN ?= $(or $(DETECTED_FQBN),$(shell $(CONFIG_GET) esp32.fqbn 2>/dev/null),esp32:esp32:esp32)
+# TARGET: which ESP chip to build for. An ESP32-C3 is RISC-V, not Xtensa, so the
+# firmware must be built for the right arch. From esp32.target in config, else
+# the C3 (the board this project ships with). A command-line override always
+# wins, e.g. `make flash TARGET=esp32`. esptool auto-detects the connected chip
+# when flashing, but the *build* needs the target named explicitly.
+VALID_TARGETS = esp32 esp32c3 esp32s2 esp32s3 esp32c6 esp32h2
+TARGET ?= $(or $(filter $(VALID_TARGETS),$(shell $(CONFIG_GET) esp32.target 2>/dev/null)),esp32c3)
 
-# native-USB chips (C3/S2/S3/C6/H2) expose their own USB as a CDC serial port;
-# a board reached over that USB (it enumerates as /dev/ttyACM*) is only readable
-# by the sketch if Serial is mapped to the USB CDC. The obvious way is the
-# CDCOnBoot=cdc FQBN menu option — but on esp32 3.3.x, ANY menu option in the
-# FQBN makes the toolchain stop expanding board properties, so the build/upload
-# end up with literal "{build.partitions}.csv" / "--chip {build.mcu}" and fail.
-# So we keep the FQBN bare (which resolves cleanly) and instead define the CDC
-# macro directly in the compile flags — same effect, no menu option. The
-# original ESP32 has no native USB (UART bridge wired to UART0, which Serial
-# already is), so it gets no flag. Partitions are handled by the sketch-local
-# firmware/partitions.csv, also avoiding a PartitionScheme menu option.
-NATIVE_USB_BOARDS = esp32c3 esp32s2 esp32s3 esp32c6 esp32h2
-FQBN_BOARD = $(word 3,$(subst :, ,$(FQBN)))
-CDC_FLAG = $(if $(filter $(FQBN_BOARD),$(NATIVE_USB_BOARDS)),-DARDUINO_USB_CDC_ON_BOOT=1)
-ESP32_URL = https://espressif.github.io/arduino-esp32/package_esp32_index.json
+# ESP-IDF build strategy. The firmware needs the ~2 GB ESP-IDF toolchain, which
+# we DON'T want permanently installed on the host. So by default the build runs
+# inside Espressif's official container image in a throwaway (--rm) container:
+# nothing is installed on the host, and the only cached artifact is the image
+# itself, which `make receiver-clean` deletes when you're done flashing. The
+# heavy part is disposable; flashing uses a tiny host esptool (a few MB).
+#
+# Power users who already have ESP-IDF installed can skip the container entirely:
+# set IDF_PATH=/path/to/esp-idf and the build sources its export.sh directly.
+IDF_IMAGE ?= espressif/idf:v5.3.1
+# container runtime: podman (preinstalled on Bazzite) or docker, whichever is
+# found. Override with CONTAINER=docker.
+CONTAINER ?= $(firstword $(foreach c,podman docker,$(if $(shell command -v $(c) 2>/dev/null),$(c))))
+# a native ESP-IDF install (IDF_PATH set and holding export.sh) is used when
+# present; otherwise the build goes through the container.
+IDF_PATH ?=
+IDF_NATIVE = $(and $(IDF_PATH),$(wildcard $(IDF_PATH)/export.sh))
+# docker runs the container as root by default, which would leave root-owned
+# build files in the repo; pass --user (the real invoking user, even under sudo)
+# so they come out user-owned, with HOME pointed somewhere writable for that uid.
+# Rootless podman already maps the container root to the host user, so it must
+# NOT get --user (the host uid is out of its namespace range).
+DOCKER_USER = $(if $(filter docker,$(CONTAINER)),--user $${SUDO_UID:-$$(id -u)}:$${SUDO_GID:-$$(id -g)} -e HOME=/tmp)
+# idf.py leaves managed_components/ and dependencies.lock in the project dir
+# (sdkconfig is relocated into the per-target build dir, below).
+IDF_GENERATED = firmware/managed_components firmware/dependencies.lock
 
 HEADERS = daemon/output/strip.hpp daemon/config_loader.hpp vendor/json.hpp \
           daemon/effects/effect.hpp daemon/rules/condition.hpp daemon/color/color.hpp \
@@ -140,10 +139,12 @@ uninstall:
 
 clean:
 	rm -f led virtual-strip
-	rm -rf $(RECEIVER_SRC) firmware/build
+	rm -rf firmware/build firmware/build-* firmware/managed_components \
+	       firmware/sdkconfig firmware/sdkconfig.old firmware/dependencies.lock \
+	       firmware/src
 
 # add the user to the serial port's group (uucp on Arch-likes, dialout
-# on Debian/Fedora) so running `led` and arduino-cli uploads work
+# on Debian/Fedora) so running `led` and esptool flashing work
 # unprivileged; detects the group from the device itself when present.
 # Works with or without sudo; membership applies on next login. Runs
 # automatically (non-fatally) from `install` and `flash`
@@ -165,78 +166,70 @@ serial-perms:
 		     "(or run 'newgrp $$group') for it to take effect"; \
 	fi
 
-# install the ESP32 core and the strip library; runs automatically on
-# the first `make receiver`/`make flash`
-receiver-setup:
-	arduino-cli core update-index --additional-urls $(ESP32_URL)
-	arduino-cli core install esp32:esp32 --additional-urls $(ESP32_URL)
-	arduino-cli lib install "Freenove WS2812 Lib for ESP32"
-
+# fail fast if there's no way to build: either a native ESP-IDF (IDF_PATH) or a
+# container runtime for the throwaway image. Better a clear message here than a
+# confusing error mid-build.
 receiver-toolchain:
-	@command -v arduino-cli >/dev/null 2>&1 || \
-		{ echo "arduino-cli not found, install it first:" \
-		       "https://arduino.github.io/arduino-cli/"; exit 1; }
-	@arduino-cli core list 2>/dev/null | grep -q '^esp32:esp32' && \
-	 arduino-cli lib list 2>/dev/null | grep -q 'Freenove WS2812' || \
-		$(MAKE) receiver-setup
+	@if [ -n "$(IDF_NATIVE)" ] || [ -n "$(CONTAINER)" ]; then :; else \
+		echo "Can't build the firmware: no container runtime and no ESP-IDF."; \
+		echo "Easiest: install podman (preinstalled on Bazzite) or docker — the"; \
+		echo "firmware then builds in a throwaway $(IDF_IMAGE) container, with"; \
+		echo "nothing left installed on the host afterwards (drop the cached image"; \
+		echo "with 'make receiver-clean')."; \
+		echo "Or, for a native build, set IDF_PATH=/path/to/esp-idf (v5.1+)."; \
+		exit 1; \
+	fi
 
-# the receiver shares only the wire protocol, the streaming frame parser and
-# the recording format/replay logic with the daemon — i.e. all of common/, no
-# effect code, no color LUT (it replays already-corrected recordings the daemon
-# streams). arduino-cli compiles a sketch's src/ subdir, so mirror the common
-# headers in there (flat, which is why includes are path-less); it's
-# regenerated each build and gitignored.
-RECEIVER_SRC = firmware/src
-# compile output: arduino-cli writes the binaries here (incl. the all-in-one
-# firmware.ino.merged.bin we flash). Gitignored.
-RECEIVER_BUILD = firmware/build
-MERGED_BIN = $(RECEIVER_BUILD)/firmware.ino.merged.bin
-SHARED = $(wildcard common/*.hpp)
+# per-target build dir so switching TARGET never trips CMake's "target already
+# set" guard — each chip gets its own configured tree. idf.py writes the app,
+# bootloader, partition table and a flash_args manifest here. Gitignored.
+RECEIVER_BUILD = firmware/build-$(TARGET)
+# host esptool for flashing (tiny, pure-Python; NOT the 2 GB toolchain). Prefer
+# esptool.py / esptool on PATH; the recipe falls back to `python3 -m esptool`.
+ESPTOOL ?= $(firstword $(shell command -v esptool.py 2>/dev/null) $(shell command -v esptool 2>/dev/null))
 
-# baked into the sketch so receiver and daemon agree on the link (everything
-# else — geometry, animations — arrives at runtime as recordings).
-# compiler.cpp.extra_flags rather than build.extra_flags: the latter would
-# replace the esp32 platform's own extra flags.
-BUILD_PROPS = --build-property "compiler.cpp.extra_flags=-DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS) $(CDC_FLAG)"
+# the idf.py build command, run either natively or in the container. The wire
+# protocol / frame parser / recording / crossfade headers compile straight from
+# common/ (on the include path — see firmware/main/CMakeLists.txt), so there's
+# nothing to copy. HOST_BAUD/HOST_TIMEOUT_MS are baked in as CMake cache defines;
+# -DIDF_TARGET pins the arch. -DSDKCONFIG puts the generated sdkconfig INSIDE the
+# per-target build dir (ESP-IDF otherwise writes one shared sdkconfig in the
+# project dir, which would clash when switching between esp32 and esp32c3). $$ROOT
+# is the absolute repo root in whichever context runs (host or container mount).
+# `receiver` depends on `led` so the CONFIG_GET reads above resolve against the
+# freshly built daemon.
+IDF_BUILD_CMD = idf.py -C firmware -B $(RECEIVER_BUILD) -DIDF_TARGET=$(TARGET) \
+                -DSDKCONFIG=$$ROOT/$(RECEIVER_BUILD)/sdkconfig \
+                -DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS) build
 
-# esptool for flashing directly, bypassing `arduino-cli upload` (which on this
-# arduino-cli/core leaves the chip arg as a literal "--chip {build.mcu}"). Prefer
-# the esptool the esp32 core ships — guaranteed to match the chip — found under
-# the *invoking* user's arduino data dir even under sudo (cores live there, not
-# root's). Fall back to a PATH esptool. Override with ESPTOOL=/path if needed.
-ARDUINO_DATA = $(shell getent passwd $${SUDO_USER:-$$(id -un)} 2>/dev/null | cut -d: -f6)/.arduino15
-ESPTOOL ?= $(or $(firstword $(wildcard $(ARDUINO_DATA)/packages/esp32/tools/esptool_py/*/esptool)),$(shell command -v esptool.py 2>/dev/null),$(shell command -v esptool 2>/dev/null))
+receiver: led receiver-toolchain
+	@if [ -n "$(IDF_NATIVE)" ]; then \
+		echo "building firmware ($(TARGET)) with native ESP-IDF at $(IDF_PATH)"; \
+		bash -c 'ROOT="$(CURDIR)"; . "$(IDF_PATH)/export.sh" >/dev/null && $(IDF_BUILD_CMD)'; \
+	else \
+		echo "building firmware ($(TARGET)) in a throwaway $(CONTAINER) container ($(IDF_IMAGE))"; \
+		$(CONTAINER) run --rm $(DOCKER_USER) -v "$(CURDIR)":/project -w /project $(IDF_IMAGE) \
+			bash -c 'ROOT=/project; git config --global --add safe.directory "*" >/dev/null 2>&1; $(IDF_BUILD_CMD)'; \
+	fi
 
-receiver-shared:
-	rm -rf $(RECEIVER_SRC)
-	mkdir -p $(RECEIVER_SRC)
-	cp $(SHARED) $(RECEIVER_SRC)/
-
-# compile-only check (flash compiles+uploads in one step). Recordings live on
-# LittleFS in the default partition scheme's filesystem region, formatted on
-# first boot. `receiver` depends on `led` so the CONFIG_GET reads above resolve
-# against the freshly built daemon.
-receiver: led receiver-toolchain receiver-shared
-	arduino-cli compile --fqbn $(FQBN) $(BUILD_PROPS) --output-dir $(RECEIVER_BUILD) firmware
-
-# compile (via the `receiver` prereq) produces the binaries; we then flash the
-# all-in-one merged image with esptool DIRECTLY rather than `arduino-cli upload`
-# — on this arduino-cli/core the upload recipe leaves the chip arg as a literal
-# "--chip {build.mcu}" and esptool rejects it. esptool --chip auto detects the
-# board over USB, so we never depend on that property. Flashing the merged.bin
-# at 0x0 writes bootloader+partitions+app at their right offsets in one shot.
+# the build (via the `receiver` prereq) produces the binaries; we flash them with
+# a tiny host esptool using the build's flash_args manifest, so bootloader,
+# partition table and app land at their right offsets. `write_flash @flash_args`
+# is exactly what idf.py runs under the hood — we just wrap it so we can free the
+# port first and keep flashing off the (disposable) container.
 #
 # The daemon holds the serial port open, so free it around the flash and restart
 # only if it was running. The port isn't opened exclusively
 # (daemon/output/serial_sink.hpp), so a daemon still writing LED frames collides
 # with esptool ("Invalid head of packet"). Stopping the unit covers the normal
 # case; fuser -k clears a hand-started daemon. fuser is best-effort and only ever
-# targets PORT. Compile runs first (daemon still up — it doesn't need the port).
+# targets PORT. The build runs first (daemon still up — it doesn't need the port).
 flash: receiver
 	-@$(MAKE) --no-print-directory serial-perms
-	@tool="$(ESPTOOL)"; \
-	[ -n "$$tool" ] || { echo "esptool not found; set ESPTOOL=/path/to/esptool or 'pip install esptool'"; exit 1; }; \
-	[ -f "$(MERGED_BIN)" ] || { echo "merged image missing: $(MERGED_BIN) (did the compile run?)"; exit 1; }; \
+	@[ -f "$(RECEIVER_BUILD)/flash_args" ] || { echo "flash_args missing in $(RECEIVER_BUILD) (did the build run?)"; exit 1; }; \
+	tool="$(ESPTOOL)"; \
+	[ -n "$$tool" ] || { python3 -c 'import esptool' >/dev/null 2>&1 && tool="python3 -m esptool"; }; \
+	[ -n "$$tool" ] || { echo "esptool not found on host (it's tiny — 'pipx install esptool' or 'pip install --user esptool')"; exit 1; }; \
 	active=0; systemctl is-active --quiet led-controller && active=1; \
 	[ $$active = 1 ] && systemctl stop led-controller; \
 	if command -v fuser >/dev/null 2>&1 && fuser $(PORT) >/dev/null 2>&1; then \
@@ -245,10 +238,16 @@ flash: receiver
 		fuser -k $(PORT) || true; \
 		sleep 1; \
 	fi; \
-	echo "flashing $(MERGED_BIN) via $$tool"; \
-	"$$tool" --chip auto --port $(PORT) --baud $(BAUD) write_flash 0x0 "$(MERGED_BIN)"; \
+	echo "flashing $(TARGET) via $$tool on $(PORT)"; \
+	( cd "$(RECEIVER_BUILD)" && $$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash @flash_args ); \
 	rc=$$?; \
 	[ $$active = 1 ] && systemctl start led-controller; \
 	exit $$rc
 
-.PHONY: all install install-config uninstall clean udev-rule serial-perms receiver-setup receiver-toolchain receiver-shared receiver flash
+# reclaim the space: firmware build dirs + the cached ESP-IDF container image
+# (the ~2 GB download). Run this once you're done flashing.
+receiver-clean:
+	rm -rf firmware/build firmware/build-* $(IDF_GENERATED)
+	-@[ -n "$(CONTAINER)" ] && $(CONTAINER) rmi $(IDF_IMAGE) 2>/dev/null || true
+
+.PHONY: all install install-config uninstall clean udev-rule serial-perms receiver-toolchain receiver receiver-clean flash

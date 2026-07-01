@@ -1,43 +1,87 @@
-#include <Freenove_WS2812_Lib_for_ESP32.h>
-#include <Preferences.h>
-#include <LittleFS.h>
+// ESP-IDF receiver firmware (native — no Arduino, no arduino-cli). Replays
+// pixel frames streamed from the host daemon over the serial link.
+//
+// The receiver renders no effects: the daemon records the power-on/shutdown
+// animations to already-corrected pixel frames and streams them here
+// (CMD_REC_*); this firmware stores them on LittleFS and replays them. So an
+// effect tweak no longer means a reflash — it's picked up on the next daemon
+// start and shown one power cycle later. The only device-specific parts are the
+// four ports below (WS2812 output, NVS, LittleFS, the serial link) and millis();
+// everything else — the wire protocol, framing, recording format and replay,
+// and crossfading — is the shared common/ code the daemon also compiles.
+//
+// Ports from the old Arduino sketch:
+//   Freenove_WS2812_Lib_for_ESP32  ->  espressif/led_strip (RMT)
+//   Preferences                    ->  nvs_flash / nvs
+//   LittleFS                       ->  joltwallet/littlefs (esp_vfs_littlefs)
+//   Serial (UART0 / USB CDC)       ->  driver/uart (ESP32) | usb_serial_jtag (C3)
+//   millis()                       ->  esp_timer_get_time()/1000
+//   setup()/loop()                 ->  app_main() { setup(); for(;;) loop(); }
 
-// shared with the host (copied into src/ by `make receiver`): the wire
-// protocol, the streaming frame parser, and the recording format + replay
-// logic. The receiver renders no effects — the daemon records the power-on/
-// shutdown animations to frames and streams them here (CMD_REC_*); this
-// firmware stores them in flash and replays them. So an effect tweak no longer
-// means a reflash; it's picked up on the next daemon start and shown one power
-// cycle later. The only device-specific parts left are LittleFS save/load, the
-// WS2812 output, the UART, and millis() — everything else is common/recording.hpp.
-#include "src/protocol.hpp"
-#include "src/receiver.hpp"
-#include "src/recording.hpp"
-#include "src/fade.hpp"
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 
-#define CHANNEL 0
+#include "sdkconfig.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "esp_timer.h"
+#include "esp_littlefs.h"
+#include "led_strip.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+
+// Serial link: the plain ESP32 reaches the host over UART0 (wired to the USB
+// bridge); native-USB chips (C3/C6/H2/S3) expose USB Serial/JTAG instead. The
+// two use different drivers, selected here and wrapped by namespace `link`.
+#if CONFIG_IDF_TARGET_ESP32
+#define LINK_UART 1
+#include "driver/uart.h"
+#else
+#define LINK_USB_SERIAL_JTAG 1
+#include "driver/usb_serial_jtag.h"
+#endif
+
+// shared with the host (compiled straight from ../../common, on the include
+// path): the wire protocol, the streaming frame parser, and the recording
+// format + replay logic.
+#include "protocol.hpp"
+#include "receiver.hpp"
+#include "recording.hpp"
+#include "fade.hpp"
+
 #define MAX_LEDS 2048
 
+// LittleFS mount point and the recording files (one per slot; see
+// common/protocol.hpp).
+#define LFS_BASE "/lfs"
+#define REC_PATH_POWER_ON LFS_BASE "/boot.rec"
+#define REC_PATH_SHUTDOWN LFS_BASE "/shutdown.rec"
+
 // TEMP diagnostic: uncomment to bypass the whole host/recording path and drive
-// the strip directly from setup(). Proves the C3 + Freenove lib + our
-// initStrip()/show() actually light the strip on this pin, independent of the
-// daemon link. Set the pin/count to your wiring. Remove (or recomment) and
-// reflash once confirmed. See the LED_SELFTEST block in setup().
+// the strip directly from setup(). Proves the board + led_strip + our
+// initStrip()/refresh actually light the strip on this pin, independent of the
+// daemon link. Set the pin/count to your wiring. Recomment and reflash once
+// confirmed. See the LED_SELFTEST block in setup().
 // #define LED_SELFTEST
 #define LED_SELFTEST_PIN 4
 #define LED_SELFTEST_COUNT 30
 
-// boot-time baud; `make flash` overrides this with serial.baud from the host
+// boot-time baud; the Makefile overrides this with serial.baud from the host
 // config. The receiver re-hunts (below) when traffic doesn't decode and
 // remembers the rate that worked, so this only sets how fast the first lock
-// happens
+// happens. (Over USB Serial/JTAG the line rate is meaningless — the hunt is a
+// no-op there, which is fine.)
 #ifndef HOST_BAUD
 #define HOST_BAUD 921600
 #endif
 
 // blank the strip when the host stops sending (crash, unplug); the last frame
-// would otherwise stay lit forever. `make flash` overrides this with
-// serial.host_timeout_ms from the host config
+// would otherwise stay lit forever. The Makefile overrides this with
+// serial.host_timeout_ms from the host config.
 #ifndef HOST_TIMEOUT_MS
 #define HOST_TIMEOUT_MS 5000
 #endif
@@ -47,24 +91,124 @@
 // host's baudToSpeed() supports) until frames decode. Even the slowest replay
 // shows a frame well inside 500 ms, so that's enough per candidate to
 // recognize a lock. A silent line never hunts, so a host that merely stopped
-// finds the receiver where it left it
+// finds the receiver where it left it.
 #define HUNT_AFTER_MS 500
 #define HUNT_MIN_BYTES 64
 
-// the recording files live here; one per slot (see common/protocol.hpp)
-#define REC_PATH_POWER_ON "/boot.rec"
-#define REC_PATH_SHUTDOWN "/shutdown.rec"
-
 // upper bound on one recording (frameCount*count*3) so a corrupt header can't
-// trigger a huge allocation; far above any real animation (~tens of KB)
+// trigger a huge allocation; far above any real animation (~tens of KB).
 #define REC_MAX_BYTES (512u * 1024u)
+
+// millis() shim: 32-bit millisecond counter (wraps like Arduino's; every use
+// below is unsigned `now - then` difference math, which is wrap-safe).
+static inline uint32_t millis()
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
 
 const uint32_t BAUDS[] = {
     9600, 19200, 38400, 57600, 115200, 230400, 460800, 500000,
     921600, 1000000, 1500000, 2000000};
 const size_t NUM_BAUDS = sizeof BAUDS / sizeof BAUDS[0];
 
-Freenove_ESP32_WS2812 *strip = nullptr;
+// --- serial link ------------------------------------------------------------
+// begin(baud): bring the link up. read(): pull up to maxlen bytes, blocking at
+// most `wait` ticks (0 = don't block). setBaud(): change the line rate (UART
+// only; a no-op over USB). flushInput(): drop buffered bytes after a rate change.
+namespace link
+{
+#if LINK_UART
+static const uart_port_t PORT = UART_NUM_0;
+
+void begin(uint32_t baud)
+{
+    uart_config_t cfg = {};
+    cfg.baud_rate = (int)baud;
+    cfg.data_bits = UART_DATA_8_BITS;
+    cfg.parity = UART_PARITY_DISABLE;
+    cfg.stop_bits = UART_STOP_BITS_1;
+    cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+    cfg.source_clk = UART_SCLK_DEFAULT;
+
+    // a generous RX ring so a recording upload (many frames back-to-back)
+    // can't outrun us while we copy each into RAM (mirrors the old
+    // Serial.setRxBufferSize(1024)). We never transmit, so no TX buffer.
+    uart_driver_install(PORT, 2048, 0, 0, nullptr, 0);
+    uart_param_config(PORT, &cfg);
+    // UART0's default pins are already wired to the USB-serial bridge; keep them.
+}
+
+int read(uint8_t* buf, size_t maxlen, TickType_t wait)
+{
+    int n = uart_read_bytes(PORT, buf, maxlen, wait);
+    return n < 0 ? 0 : n;
+}
+
+void setBaud(uint32_t baud) { uart_set_baudrate(PORT, baud); }
+void flushInput() { uart_flush_input(PORT); }
+
+#else // USB Serial/JTAG (C3/C6/H2/S3 native USB)
+
+void begin(uint32_t /*baud*/)
+{
+    usb_serial_jtag_driver_config_t cfg = {};
+    cfg.tx_buffer_size = 256;  // we never really transmit, but 0 is rejected
+    cfg.rx_buffer_size = 1024; // matches the old Serial.setRxBufferSize(1024)
+    usb_serial_jtag_driver_install(&cfg);
+}
+
+int read(uint8_t* buf, size_t maxlen, TickType_t wait)
+{
+    int n = usb_serial_jtag_read_bytes(buf, maxlen, wait);
+    return n < 0 ? 0 : n;
+}
+
+void setBaud(uint32_t /*baud*/) {} // USB CDC: line rate is set by the host
+void flushInput()
+{
+    uint8_t sink[64];
+    while (usb_serial_jtag_read_bytes(sink, sizeof sink, 0) > 0)
+    {
+    }
+}
+#endif
+} // namespace link
+
+// --- NVS (the old Preferences store) ----------------------------------------
+static nvs_handle_t g_nvs = 0;
+
+static uint32_t prefGetU32(const char* key, uint32_t def)
+{
+    uint32_t v;
+    return nvs_get_u32(g_nvs, key, &v) == ESP_OK ? v : def;
+}
+static uint16_t prefGetU16(const char* key, uint16_t def)
+{
+    uint16_t v;
+    return nvs_get_u16(g_nvs, key, &v) == ESP_OK ? v : def;
+}
+static uint8_t prefGetU8(const char* key, uint8_t def)
+{
+    uint8_t v;
+    return nvs_get_u8(g_nvs, key, &v) == ESP_OK ? v : def;
+}
+static void prefSetU32(const char* key, uint32_t v)
+{
+    nvs_set_u32(g_nvs, key, v);
+    nvs_commit(g_nvs);
+}
+static void prefSetU16(const char* key, uint16_t v)
+{
+    nvs_set_u16(g_nvs, key, v);
+    nvs_commit(g_nvs);
+}
+static void prefSetU8(const char* key, uint8_t v)
+{
+    nvs_set_u8(g_nvs, key, v);
+    nvs_commit(g_nvs);
+}
+
+led_strip_handle_t strip = nullptr;
 
 uint16_t currentCount = 0;
 uint8_t currentPin = 13;
@@ -83,7 +227,7 @@ rec::Player player;
 
 // incoming recording being streamed from the host, accumulated in RAM by the
 // shared receiver and committed to flash on END (one write — so flash stalls
-// can't drop UART bytes mid-stream). recSlot is the slot its END must name.
+// can't drop bytes mid-stream). recSlot is the slot its END must name.
 rec::RecordingReceiver recRx;
 uint8_t recSlot = 0;
 
@@ -96,7 +240,7 @@ bool blanked = false;
 // the daemon: we keep the last frame shown and, when the incoming animation's
 // id changes, dissolve the new one in over it with the shared fader. Every
 // frame — live (onPixels) or replayed (boot/shutdown recordings) — goes through
-// show() below carrying an id, so the boot→live and live→shutdown handoffs are
+// show() below carrying an id, so the boot->live and live->shutdown handoffs are
 // just ordinary id changes; there's no "am I replaying?" state to track. Live
 // ids ride the wire; replay frames get a reserved per-slot id (proto::ANIM_*),
 // which the firmware knows from the slot it's playing (see common/fade.hpp).
@@ -109,7 +253,6 @@ uint16_t replayXms = 0;          // crossfade ms for a shutdown replay (from CMD
 
 // the last rate that produced valid frames, persisted in NVS so a host baud
 // change without a reflash costs one hunt per change, not one per power cycle
-Preferences prefs;
 uint32_t currentBaud = HOST_BAUD;
 uint32_t savedBaud = 0;
 uint32_t savedFlashed = 0;
@@ -129,12 +272,34 @@ void initStrip(uint16_t count, uint8_t pin)
 {
     if (strip)
     {
-        delete strip;
+        led_strip_del(strip);
         strip = nullptr;
     }
 
-    strip = new Freenove_ESP32_WS2812(count, pin, CHANNEL, TYPE_GRB);
-    strip->begin();
+    led_strip_config_t sc = {};
+    sc.strip_gpio_num = pin;
+    sc.max_leds = count;
+    sc.led_model = LED_MODEL_WS2812;
+    // GRB on the wire: led_strip_set_pixel() takes logical (r,g,b) and reorders
+    // per this format, so we pass the host's already-corrected R,G,B bytes
+    // as-is — same result the old TYPE_GRB Freenove path produced. (led_strip
+    // 2.x field; 3.x renamed this to color_component_format.)
+    sc.led_pixel_format = LED_PIXEL_FORMAT_GRB;
+    sc.flags.invert_out = false;
+
+    led_strip_rmt_config_t rc = {};
+    rc.clk_src = RMT_CLK_SRC_DEFAULT;
+    rc.resolution_hz = 10 * 1000 * 1000; // 10 MHz — standard WS2812 timing
+    rc.mem_block_symbols = 64;
+    rc.flags.with_dma = false;
+
+    // on failure leave strip null; show()/blankStrip() guard on it, so a bad
+    // pin/count can't brick the receiver (it just stays dark until a good frame)
+    if (led_strip_new_rmt_device(&sc, &rc, &strip) != ESP_OK)
+    {
+        strip = nullptr;
+        return;
+    }
 
     currentCount = count;
     currentPin = pin;
@@ -145,10 +310,7 @@ void blankStrip()
     if (!strip)
         return;
 
-    for (uint16_t i = 0; i < currentCount; i++)
-        strip->setLedColorData(i, 0, 0, 0);
-
-    strip->show();
+    led_strip_clear(strip); // zero every pixel and latch it out
 
     // the strip is black now: record that as the last shown, under a sentinel
     // id, so the next frame (a returning host, or a replay) dissolves up from
@@ -165,7 +327,7 @@ void blankStrip()
 // replayed recordings alike — calls this with the animation's id; when the id
 // differs from what's on screen we dissolve the new frame in over the last
 // (as long as the geometry matches), then remember it. That single rule covers
-// live switches, the boot→live handoff and the live→shutdown handoff, so no
+// live switches, the boot->live handoff and the live->shutdown handoff, so no
 // source needs to special-case transitions (see common/fade.hpp).
 void show(uint16_t animId, uint16_t count, uint16_t xms, const uint8_t* px)
 {
@@ -184,9 +346,9 @@ void show(uint16_t animId, uint16_t count, uint16_t xms, const uint8_t* px)
     fader.apply(frameBuf, count, now);
 
     for (uint16_t i = 0; i < count; i++)
-        strip->setLedColorData(i, frameBuf[i * 3], frameBuf[i * 3 + 1],
-                               frameBuf[i * 3 + 2]);
-    strip->show();
+        led_strip_set_pixel(strip, i, frameBuf[i * 3], frameBuf[i * 3 + 1],
+                            frameBuf[i * 3 + 2]);
+    led_strip_refresh(strip);
 
     memcpy(lastShown, frameBuf, (size_t)count * 3);
     lastShownCount = count;
@@ -196,14 +358,14 @@ void show(uint16_t animId, uint16_t count, uint16_t xms, const uint8_t* px)
 // header codec (common/recording.hpp). The format and field layout live there.
 bool loadRecording(uint8_t slot, rec::Recording& out)
 {
-    File f = LittleFS.open(recPath(slot), "r");
+    FILE* f = fopen(recPath(slot), "rb");
     if (!f)
         return false;
 
     uint8_t hdr[rec::Recording::kHeaderLen];
-    if (f.read(hdr, sizeof hdr) != sizeof hdr || !out.decodeHeader(hdr))
+    if (fread(hdr, 1, sizeof hdr, f) != sizeof hdr || !out.decodeHeader(hdr))
     {
-        f.close();
+        fclose(f);
         return false;
     }
 
@@ -211,13 +373,13 @@ bool loadRecording(uint8_t slot, rec::Recording& out)
     if (out.count == 0 || out.count > MAX_LEDS || out.frameCount == 0 ||
         bytes > REC_MAX_BYTES)
     {
-        f.close();
+        fclose(f);
         return false;
     }
 
     out.data.resize(bytes);
-    bool ok = f.read(out.data.data(), bytes) == bytes;
-    f.close();
+    bool ok = fread(out.data.data(), 1, bytes, f) == bytes;
+    fclose(f);
 
     if (!ok)
     {
@@ -230,31 +392,31 @@ bool loadRecording(uint8_t slot, rec::Recording& out)
 
 void saveRecording(uint8_t slot, const rec::Recording& r)
 {
-    File f = LittleFS.open(recPath(slot), "w");
+    FILE* f = fopen(recPath(slot), "wb");
     if (!f)
         return;
 
     uint8_t hdr[rec::Recording::kHeaderLen];
     r.encodeHeader(hdr);
-    f.write(hdr, sizeof hdr);
+    fwrite(hdr, 1, sizeof hdr, f);
 
     if (!r.data.empty())
-        f.write(r.data.data(), r.data.size());
+        fwrite(r.data.data(), 1, r.data.size(), f);
 
-    f.close();
+    fclose(f);
 }
 
 // the hash stored in a slot's file, or 0 if missing/invalid; lets begin()
 // decide whether an upload is unchanged without reading the whole file
 uint32_t storedHash(uint8_t slot)
 {
-    File f = LittleFS.open(recPath(slot), "r");
+    FILE* f = fopen(recPath(slot), "rb");
     if (!f)
         return 0;
 
     uint8_t hdr[rec::Recording::kHeaderLen];
-    bool ok = f.read(hdr, sizeof hdr) == sizeof hdr;
-    f.close();
+    bool ok = fread(hdr, 1, sizeof hdr, f) == sizeof hdr;
+    fclose(f);
 
     return ok ? rec::Recording::headerHash(hdr) : 0;
 }
@@ -319,7 +481,7 @@ void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
 }
 
 // the host endpoint: a proto::FrameHandler that drives the real strip. The
-// shared parser (src/receiver.hpp) does all the AA-55 framing and checksum
+// shared parser (common/receiver.hpp) does all the AA-55 framing and checksum
 // work and calls these when a clean frame lands, so this side only says what a
 // frame *means* on the hardware. The same handler interface the on-screen
 // viewer implements (host/virtual_strip.cpp).
@@ -358,8 +520,8 @@ struct StripHandler : proto::FrameHandler
         // or reflash
         if (currentBaud != savedBaud || savedFlashed != HOST_BAUD)
         {
-            prefs.putUInt("baud", currentBaud);
-            prefs.putUInt("flashed", HOST_BAUD);
+            prefSetU32("baud", currentBaud);
+            prefSetU32("flashed", HOST_BAUD);
             savedBaud = currentBaud;
             savedFlashed = HOST_BAUD;
         }
@@ -368,8 +530,8 @@ struct StripHandler : proto::FrameHandler
         // strip up before the host arrives next time
         if (currentCount != savedCount || currentPin != savedPin)
         {
-            prefs.putUShort("count", currentCount);
-            prefs.putUChar("pin", currentPin);
+            prefSetU16("count", currentCount);
+            prefSetU8("pin", currentPin);
             savedCount = currentCount;
             savedPin = currentPin;
         }
@@ -388,25 +550,36 @@ void setup()
 {
 #ifdef LED_SELFTEST
     // hardware proof: cycle the strip red -> green -> blue forever on the
-    // wired pin, with nothing else running. If this lights up, the C3 runs our
-    // strip code fine and the dark strip is a daemon-link/config problem, not
+    // wired pin, with nothing else running. If this lights up, the board runs
+    // our strip code fine and a dark strip is a daemon-link/config problem, not
     // the chip. If even this stays dark, it's wiring/pin/lib, not the host.
     initStrip(LED_SELFTEST_COUNT, LED_SELFTEST_PIN);
     const uint8_t colors[3][3] = {{40, 0, 0}, {0, 40, 0}, {0, 0, 40}};
     for (uint8_t c = 0;; c = (c + 1) % 3)
     {
-        for (uint16_t i = 0; i < LED_SELFTEST_COUNT; i++)
-            strip->setLedColorData(i, colors[c][0], colors[c][1], colors[c][2]);
-        strip->show();
-        delay(700);
+        for (uint16_t i = 0; strip && i < LED_SELFTEST_COUNT; i++)
+            led_strip_set_pixel(strip, i, colors[c][0], colors[c][1],
+                                colors[c][2]);
+        if (strip)
+            led_strip_refresh(strip);
+        vTaskDelay(pdMS_TO_TICKS(700));
     }
 #endif
 
-    prefs.begin("ledrx", false);
-    savedBaud = prefs.getUInt("baud", 0);
-    savedFlashed = prefs.getUInt("flashed", 0);
-    savedCount = prefs.getUShort("count", 0);
-    savedPin = prefs.getUChar("pin", 13);
+    // NVS (the Preferences store). Re-init after erasing if the partition is
+    // from an old layout or full.
+    esp_err_t nerr = nvs_flash_init();
+    if (nerr == ESP_ERR_NVS_NO_FREE_PAGES || nerr == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
+    nvs_open("ledrx", NVS_READWRITE, &g_nvs);
+
+    savedBaud = prefGetU32("baud", 0);
+    savedFlashed = prefGetU32("flashed", 0);
+    savedCount = prefGetU16("count", 0);
+    savedPin = prefGetU8("pin", 13);
 
     // trust the remembered rate only if the firmware default is the same one
     // it was saved under — a reflash with a new HOST_BAUD means the host
@@ -414,10 +587,7 @@ void setup()
     if (savedBaud != 0 && savedFlashed == HOST_BAUD)
         currentBaud = savedBaud;
 
-    // a bigger RX buffer so a recording upload (many frames back-to-back)
-    // can't outrun us while we copy each frame into RAM
-    Serial.setRxBufferSize(1024);
-    Serial.begin(currentBaud);
+    link::begin(currentBaud);
 
     // align the hunt cycle with the boot baud when it's in the list
     for (size_t i = 0; i < NUM_BAUDS; i++)
@@ -426,7 +596,13 @@ void setup()
 
     recRx.maxBytes = REC_MAX_BYTES;
 
-    LittleFS.begin(true); // format on first boot if there's no filesystem yet
+    // LittleFS on the "storage" partition; format on first boot if unformatted
+    esp_vfs_littlefs_conf_t lc = {};
+    lc.base_path = LFS_BASE;
+    lc.partition_label = "storage";
+    lc.format_if_mount_failed = true;
+    lc.dont_mount = false;
+    esp_vfs_littlefs_register(&lc);
 
     // start replaying the stored power-on recording immediately; the first host
     // frame drops it and takes over (see onPixels). With no recording yet,
@@ -440,20 +616,22 @@ void setup()
 
 void loop()
 {
-    // drain whatever the UART has and push it through the shared parser
-    // (src/receiver.hpp); it carries state across these chunks, recognizes
+    // drain whatever the link has and push it through the shared parser
+    // (common/receiver.hpp); it carries state across these chunks, recognizes
     // complete frames and calls the StripHandler, which lights the strip
-    // (onPixels) or acts on a command (onCommand).
-    while (Serial.available())
+    // (onPixels) or acts on a command (onCommand). The first read blocks a
+    // couple of ms so an idle loop yields to the RTOS instead of spinning;
+    // once bytes arrive we drain the burst with non-blocking reads.
+    uint8_t chunk[256];
+    TickType_t wait = pdMS_TO_TICKS(2);
+    int n;
+    do
     {
-        uint8_t chunk[256];
-        int avail = Serial.available();
-        int want = avail < (int)sizeof chunk ? avail : (int)sizeof chunk;
-        int n = Serial.readBytes(chunk, want);
-
+        n = link::read(chunk, sizeof chunk, wait);
         if (n > 0)
             receiver.feed(chunk, (size_t)n);
-    }
+        wait = 0;
+    } while (n == (int)sizeof chunk);
 
     unsigned long now = millis();
 
@@ -480,10 +658,8 @@ void loop()
     {
         baudIdx = (baudIdx + 1) % NUM_BAUDS;
         currentBaud = BAUDS[baudIdx];
-        Serial.updateBaudRate(currentBaud);
-
-        while (Serial.available())
-            Serial.read();
+        link::setBaud(currentBaud);
+        link::flushInput();
 
         // drop any half-frame caught at the old rate and zero the byte counter,
         // so the next hunt is timed from a clean scan
@@ -513,4 +689,11 @@ void loop()
         if (player.done() && shuttingDown)
             blankStrip();
     }
+}
+
+extern "C" void app_main(void)
+{
+    setup();
+    for (;;)
+        loop();
 }

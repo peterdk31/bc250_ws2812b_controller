@@ -1,0 +1,24 @@
+# Non-default config baked into every build (idf.py merges this into the
+# generated sdkconfig). Kept in git; the generated sdkconfig is not.
+
+# Custom partition table — the recordings live on the LittleFS "storage"
+# partition (see partitions.csv and main.cpp's esp_vfs_littlefs_register).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# 4 MB flash, matching the partition layout.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# The host link owns the serial channel end to end (UART0 on the plain ESP32,
+# USB Serial/JTAG on the C3). Disable the ESP-IDF console so log output can
+# never inject stray bytes into the binary frame stream the daemon sends —
+# and, on the C3, so the console doesn't fight our driver for the USB peripheral.
+CONFIG_ESP_CONSOLE_NONE=y
+
+# 1 kHz tick: recording replay paces frames as fast as ~16 ms, and the link
+# read uses a couple-of-millisecond timeout to stay responsive without spinning.
+CONFIG_FREERTOS_HZ=1000
+
+# The receiver is small; optimize for size (it fits the factory app partition
+# many times over, but there's no reason to carry the bulk).
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y

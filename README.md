@@ -25,15 +25,16 @@ sensors → rules → effect → frames ──serial 921600──→ RMT ──�
 
 ## Quick start
 
-Prerequisites: `g++` and `make` for the daemon,
-[arduino-cli](https://arduino.github.io/arduino-cli/) for flashing the
-receiver. On an immutable distro like Bazzite the base image has no
-compiler — layer it (`rpm-ostree install gcc-c++ make`) or build in a
-distrobox.
+Prerequisites: `g++` and `make` for the daemon; `docker` or `podman` plus a
+small host `esptool` for the receiver (the ~2 GB ESP-IDF toolchain is *not*
+installed — the firmware builds in a throwaway container; see [Flashing the
+receiver](#flashing-the-receiver)). On an immutable distro like Bazzite the base
+image has no compiler — layer it (`rpm-ostree install gcc-c++ make`) or build in
+a distrobox; podman is already present there.
 
 ```sh
 sudo make install    # build daemon + systemd unit + default config
-sudo make flash      # compile + upload the ESP32 receiver
+sudo make flash      # build (in a container) + flash the ESP32 receiver
 sudo systemctl enable --now led-controller
 ```
 
@@ -51,36 +52,51 @@ The sections below cover each step in detail.
 
 ## Flashing the receiver
 
-With [arduino-cli](https://arduino.github.io/arduino-cli/) installed:
+The receiver firmware is a native [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/get-started/)
+project under `firmware/` — no arduino-cli, no `.ino`. To avoid a permanent
+~2 GB toolchain install, `make` builds it **inside Espressif's official ESP-IDF
+container image**, in a throwaway (`--rm`) container. The only thing that
+lingers is the cached image, which `make receiver-clean` deletes when you're
+done. So the only host prerequisites are:
+
+- **A container runtime** — `docker` or `podman` (podman ships on Bazzite).
+  `make` auto-detects whichever is installed.
+- **`esptool`** for the actual flash — tiny and pure-Python, unlike the
+  toolchain: `pipx install esptool` (or `pip install --user esptool`). Not
+  needed just to build.
 
 ```sh
-sudo make flash                     # compile + upload
-sudo make flash PORT=/dev/ttyACM0   # explicit port; FQBN=... for other boards
+sudo make flash                      # build (containerized) + flash
+sudo make flash PORT=/dev/ttyACM0    # explicit port; TARGET=esp32 for other chips
+make receiver                        # build only, no flash
+make receiver-clean                  # reclaim space: build dirs + the ESP-IDF image
 ```
 
-The port, baud rate and host timeout default to the matching keys from
-`/etc/led-controller/config.json` (falling back to the repo's
-`config.json`), so flashing targets the same adapter the daemon uses and
-bakes the baud/timeout into the sketch. Nothing else is baked in — strip
-geometry and the power-on/shutdown animations arrive at runtime as frames
-the daemon streams, so a flash is only needed for a firmware change, never
-for a config or effect change. On first run, `flash` installs the ESP32 core and
-the strip library automatically (also available separately as
-`make receiver-setup`); `make receiver` compiles without uploading.
+The first build pulls the image (~2 GB, one time) and the `led_strip` +
+`littlefs` components from the ESP Component Registry. Each per-target build
+lives in its own `firmware/build-<target>/` so switching chips never clashes.
 
-`flash` stops the led-controller service around the upload (the daemon
+Already have ESP-IDF installed natively and prefer to use it? Set
+`IDF_PATH=/path/to/esp-idf` (v5.1+) and the build skips the container and sources
+its `export.sh` directly.
+
+The port, baud rate, host timeout and target chip default to the matching keys
+from `/etc/led-controller/config.json` (falling back to the repo's
+`config.json`), so flashing targets the same adapter the daemon uses and bakes
+the baud/timeout into the firmware. `esp32.target` picks the chip to build for
+(`esp32c3` by default — an ESP32-C3 is RISC-V, so it can't run a plain-ESP32
+Xtensa binary); esptool auto-detects the connected chip when it writes. Nothing
+else is baked in — strip geometry and the power-on/shutdown animations arrive at
+runtime as frames the daemon streams, so a flash is only needed for a firmware
+change, never for a config or effect change.
+
+`flash` stops the led-controller service around the write (the daemon
 holds the port open) and restarts it afterwards if it was running.
-`sudo` is needed for that and, typically, for port access. arduino-cli
-keeps installed cores per user, so stick to one user for flashing — on
-a dev machine without the service, everything works unprivileged once
-your user is in the port's group (usually `dialout` or `uucp`).
-`make install` and `make flash` add you to it automatically (also
-available standalone as `make serial-perms`); membership takes effect
-on your next login.
-
-Alternatively, open `firmware/firmware.ino` in the Arduino
-IDE with the ESP32 core and the `Freenove_WS2812_Lib_for_ESP32`
-library installed, and flash from there.
+`sudo` is needed for that and, typically, for port access. On a dev machine
+without the service, everything works unprivileged once your user is in the
+port's group (usually `dialout` or `uucp`). `make install` and `make flash`
+add you to it automatically (also available standalone as `make serial-perms`);
+membership takes effect on your next login.
 
 The receiver is generic: pin and LED count come from the host in every
 frame, and it renders no effects of its own — so it never needs reflashing

@@ -4,10 +4,16 @@
 *.o
 *.d
 
-# Arduino build output (arduino-cli --export-binaries / local build dirs)
+# ESP-IDF firmware build output (idf.py writes a per-target build dir), pulled
+# managed components, and the generated sdkconfig (sdkconfig.defaults is tracked)
 firmware/build/
+firmware/build-*/
+firmware/managed_components/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/dependencies.lock
 
-# common daemon/firmware sources mirrored into the sketch by `make receiver`
+# leftover from the old arduino-cli flow (common headers were mirrored here)
 firmware/src/
 
 # Editor / IDE
