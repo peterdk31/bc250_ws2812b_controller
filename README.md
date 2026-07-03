@@ -226,7 +226,7 @@ users' Steam libraries needs the daemon running as root (the systemd unit does).
 | `drift` | soft palette glows wandering over a dark base | `palette` (2858ff,30d0b0), `blobs` (3), `speed` (1.4) |
 | `ember` | slow warm aurora-style flow through an ember palette | `palette` (2a0a00,ff7d1e), `speed` (1.4) |
 | `lava` | lava lamp: soft blobs drift, meet and merge into hotter spots | `palette` (ff0050,ff5a00,ffd000,00e5ff,7a00ff,ff00d0), `blobs` (4), `speed` (5.0) |
-| `load` | CPU/GPU bars from center over a palette wash | `palette` (00e0c0,2060ff,a040ff), `smoothing_seconds` (0.7) |
+| `load` | CPU/GPU bars from center over a palette wash, each with a heartbeat that quickens under load | `palette` (00e0c0,2060ff,a040ff), `smoothing_seconds` (0.7), `pulse` (0.5) |
 | `plasma` | drifting sines + noise walking a palette | `palette` (0040ff,00d0a0,c040ff,0040ff), `speed` (1.4) |
 | `pulse` | soft palette rings expanding from the center | `palette` (5028ff,30d0ff), `period_seconds` (4) |
 | `rainbow` | scrolling hue cycle with shimmer | `cycles_per_second` (0.9) |
