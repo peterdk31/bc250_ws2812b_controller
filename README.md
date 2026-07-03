@@ -23,15 +23,22 @@ sensors → rules → effect → frames ──serial──→ RMT ──→ WS28
 
 ## Getting started
 
-You need `g++` and `make` for the daemon, and `esptool` + `curl` to flash the
-receiver. You do **not** need an ESP32 toolchain — `make flash` downloads a
-prebuilt firmware image.
+Two things are needed on the host:
+
+- **`g++` and `make`** to build the daemon. On CachyOS (or any Arch) they come
+  in the `base-devel` package group.
+- **`esptool`** to flash the receiver (plus `curl`, which is preinstalled).
+  You do **not** need an ESP32 toolchain — `make flash` downloads a prebuilt
+  firmware image.
 
 ```sh
-# Arch / CachyOS
-sudo pacman -S base-devel
-pipx install esptool          # or: pip install --user esptool
+sudo pacman -S --needed base-devel    # compiler + make
+pipx install esptool                  # ESP32 flasher (or: pip install --user esptool)
 ```
+
+On Bazzite (immutable base image) `esptool` installs the same way, but
+`g++`/`make` aren't in the base image — build the daemon inside a distrobox,
+or copy a prebuilt `led` binary over.
 
 Then build, flash, and start:
 
@@ -56,6 +63,9 @@ To try an effect directly (stop the service first, it holds the port):
 led /etc/led-controller/config.json rainbow
 ```
 
+This runs unprivileged once the serial-group membership added by `make install`
+is active — that takes effect on your next login; before then, prefix `sudo`.
+
 ## How it works
 
 The daemon renders every frame and sends it over serial; the receiver only
@@ -67,7 +77,8 @@ after it exits on shutdown — the receiver plays a **boot** and **shutdown**
 animation from flash. The daemon renders those too (through the same color
 pipeline), records them, and uploads them once at startup; the receiver stores
 them and replays them. So editing the boot/shutdown effects also needs no
-reflash — just a daemon restart.
+reflash — just a daemon restart. A fresh, never-recorded board stays blank
+until the daemon has run once and uploaded the recordings.
 
 The serial baud auto-negotiates: if bytes arrive but no frame decodes, the
 receiver cycles through the supported rates until frames validate, then
@@ -89,7 +100,8 @@ sudo make flash FW_RELEASE=v1.0.0   # pin a release instead of latest
 The image is written at `0x0` and doesn't touch the NVS or LittleFS partitions,
 so a reflash keeps a board's saved state.
 
-**Building from source** is only needed to modify the firmware. It builds inside
+**Building from source** is only needed to modify the firmware, or to bake a
+non-default `sinks.serial.baud` / `esp32.host_timeout_ms` into it. It builds inside
 Espressif's ESP-IDF container (needs `docker` or `podman` — nothing is installed
 on the host, and `make receiver-clean` drops the cached image), or against a
 native ESP-IDF if you set `IDF_PATH=...`:
@@ -107,7 +119,8 @@ make receiver                       # build only, no flash
 {
     "sinks": {
         "serial": { "port": "/dev/ttyUSB0", "baud": 921600 }
-    },                          // omit serial (or LED_PORT=none) to run headless
+    },                          // port "none" or "" (or LED_PORT=none) runs headless;
+                                // omitting the key defaults to /dev/ttyUSB0
     "strip": {
         "leds": 58,
         "pin": 13,              // ESP32 GPIO driving the strip
@@ -120,7 +133,9 @@ make receiver                       # build only, no flash
     "sensors": [ ... ],         // hwmon candidates, see Sensors
     "esp32": {
         "target": "esp32c3",    // chip to build/flash for (esp32, esp32c3, ...)
-        "host_timeout_ms": 5000, // blank the strip after this long with no frame
+        "host_timeout_ms": 5000, // receiver blanks after this long with no frame —
+                                 // baked into the firmware by `make flash-source`
+                                 // only; the prebuilt image always uses 5000
         "power_on": { ... },    // boot/shutdown animations the receiver replays
         "shutdown": { ... }     // (standalone effects only)
     },
@@ -170,7 +185,7 @@ without `if` always matches (put a catch-all last). No match → strip dark.
 }
 ```
 
-Switches crossfade over the top-level `transition_seconds` (default 0.6; 0 =
+Switches crossfade over the top-level `crossfade_ms` (default 600; 0 =
 instant). `hold` debounces a flapping rule.
 
 ### Conditions
@@ -201,24 +216,27 @@ users' Steam libraries needs the daemon running as root (the systemd unit does).
 |---|---|---|
 | `alarm` | urgent heartbeat throbbing from the center | `color` (ff0000), `pulses_per_second` (2) |
 | `aurora` | slow drifting color curtains walking a palette | `palette` (10ff80,10a0ff,8040ff), `speed` (1.0) |
-| `boot` | CRT-style ignition, then a living glow that holds until the host takes over | `intro_seconds` (3), `color` (0028ff) |
-| `breathe` | one color on a slow breath with a drifting bright band | `color` (ff7818), `period_seconds` (5) |
-| `comet` | Larson scanner with a fading tail, optional mirror | `color` (ff0000), `sweeps_per_second` (0.5), `tail_pixels` (8) |
+| `boot` | calm bloom from the center into a full wash, then exhales into a dim hold | `intro_seconds` (7), `color` (ffffff) |
+| `breathe` | palette wash on a slow breath with a drifting bright band | `palette` (0d4a44,30e090), `period_seconds` (3.5) |
+| `button_off` | experimental: the lit strip collapses into the power button | `duration_seconds` (1.4), `color` (ffffff), `reverse` (true) |
+| `button_on` | experimental: light spills out of the power button, then pulses | `spread_seconds` (2.5), `period_seconds` (4), `color` (ffffff) |
+| `comet` | Larson scanner with a fading tail, optional mirror | `palette` (8040ff,30c0ff), `sweeps_per_second` (0.7), `tail_pixels` (8) |
 | `cpu_temp` | temperature bar along a hue ramp | `temp_min` (40), `temp_max` (85), `hot_color` (ff0000) |
 | `cycle` | rotates through a list of other effects | `period_seconds` (30), `effects` (list) |
-| `drift` | soft glows wandering over a dark base | `color` (6078ff), `blobs` (3), `speed` (1.0) |
-| `ember` | slow warm aurora-style flow through an ember palette | `palette` (2a0a00,ff7d1e), `speed` (1.0) |
+| `drift` | soft palette glows wandering over a dark base | `palette` (2858ff,30d0b0), `blobs` (3), `speed` (1.4) |
+| `ember` | slow warm aurora-style flow through an ember palette | `palette` (2a0a00,ff7d1e), `speed` (1.4) |
+| `lava` | lava lamp: soft blobs drift, meet and merge into hotter spots | `palette` (ff0050,ff5a00,ffd000,00e5ff,7a00ff,ff00d0), `blobs` (4), `speed` (5.0) |
 | `load` | CPU/GPU bars from center over a palette wash | `palette` (00e0c0,2060ff,a040ff), `smoothing_seconds` (0.7) |
-| `plasma` | drifting sines + noise walking a palette | `palette` (0040ff,00d0a0,c040ff,0040ff), `speed` (1.0) |
-| `pulse` | soft rings expanding from the center | `color` (30c0ff), `period_seconds` (4) |
-| `rainbow` | scrolling hue cycle with shimmer | `cycles_per_second` (0.625) |
+| `plasma` | drifting sines + noise walking a palette | `palette` (0040ff,00d0a0,c040ff,0040ff), `speed` (1.4) |
+| `pulse` | soft palette rings expanding from the center | `palette` (5028ff,30d0ff), `period_seconds` (4) |
+| `rainbow` | scrolling hue cycle with shimmer | `cycles_per_second` (0.9) |
 | `shutdown` | CRT-style collapse to a point, then a slow phosphor fade | `duration_seconds` (5.0), `color` (0028ff) |
-| `steam_download` | live Steam download bar, green pulse at 100% | `color` (00a0ff), `done_color` (00ff40) |
-| `tide` | a palette gradient sliding and breathing | `palette` (102060,ff5028,ffb020,...), `speed` (1.0) |
+| `steam_download` | live Steam download bar, green pulse at 100% | `palette` (d4009c,ff5a1e,ffd23c), `done_color` (00ff66) |
+| `tide` | a palette gradient sliding and breathing | `palette` (102060,1890d0,30d0a0,8040ff,102060), `speed` (1.4) |
 
 Colors are `"RRGGBB"` or `"#RRGGBB"`; a `palette` is several separated by
 non-hex (`"2a0a00, ff7d1e"`), spaced evenly and blended in RGB. Every effect
-also takes `frame_ms` (delay between frames; default 33 ≈ 30 fps, some 16 ≈ 60).
+also takes `frame_ms` (delay between frames; default 16 ≈ 60 fps).
 Settings resolve per-rule first, then top-level config, then the defaults above.
 
 ### Boot & shutdown animations
@@ -234,7 +252,7 @@ idle:
             { "effect": "boot",    "record_seconds": 4,
               "settings": { "intro_seconds": 3, "color": "ff7818" } },
             { "effect": "breathe", "record_seconds": 5, "loop": true,
-              "settings": { "color": "ff7818", "period_seconds": 5 } }
+              "settings": { "palette": "2a0a00,ff7818", "period_seconds": 5 } }
         ]
     },
     "shutdown": { "effect": "shutdown", "settings": { "color": "0028ff" } }
@@ -243,7 +261,9 @@ idle:
 
 The last segment's `loop` decides the tail (loop from its first frame, else hold
 the last frame); earlier segments play once. For a seamless loop make the
-looping segment's `record_seconds` a whole multiple of its period. Finite
+looping segment's `record_seconds` a whole multiple of its period. The whole
+recording replays at one rate — the first segment's `frame_ms` — so a later
+segment's own `frame_ms` has no effect on replay. Finite
 effects (`shutdown`) record to completion; open-ended ones (`boot`) record for
 `record_seconds`. Unchanged recordings aren't rewritten to flash (a hash is
 compared), so wear is near zero. `cycle` can't be a slot (it needs the JSON
