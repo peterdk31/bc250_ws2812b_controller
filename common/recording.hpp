@@ -17,9 +17,11 @@
 namespace rec
 {
 
-// one captured animation as a flat pixel buffer: frame i is count*3 bytes at
-// frame(i). The bytes are already strip-corrected by the host, so the receiver
-// blits them as-is.
+// one captured animation as a flat pixel buffer: frame i is count*6 bytes at
+// frame(i) — per LED three little-endian 8.8 fixed-point channel values, the
+// same depth the live deep pixel frame carries (common/protocol.hpp). The
+// values are already strip-corrected by the host; the receiver replays them
+// through the same dithered refresh as live frames.
 struct Recording
 {
     uint16_t frameMs = 16;
@@ -33,7 +35,7 @@ struct Recording
     static const uint16_t kBeginLen = 15; // CMD_REC_BEGIN payload size
     static const size_t kHeaderLen = 18;  // on-flash header size
 
-    size_t frameBytes() const { return (size_t)count * 3; }
+    size_t frameBytes() const { return (size_t)count * 6; }
 
     bool valid() const
     {
@@ -185,7 +187,7 @@ struct RecordingReceiver
         if (skip)
             return;
 
-        size_t bytes = (size_t)bi.frameCount * bi.count * 3;
+        size_t bytes = (size_t)bi.frameCount * bi.count * 6;
         if (!bi.count || !bi.frameCount || bytes > maxBytes)
             return; // bogus geometry/size; ignore the stream (storing stays false)
 
@@ -216,7 +218,9 @@ struct RecordingReceiver
 };
 
 // Replays a Recording one frame per frameMs. tick(now) returns the pixels to
-// show this instant, or nullptr if it isn't time yet (or playback is over). A
+// show this instant (frameBytes() of little-endian 8.8 data — the consumer
+// decodes, see Recording), or nullptr if it isn't time yet (or playback is
+// over). A
 // looping recording wraps; a finite one shows its last frame once and then
 // reports done() — the device holds that frame (and, for shutdown, blanks).
 struct Player

@@ -52,8 +52,26 @@
 #include "receiver.hpp"
 #include "recording.hpp"
 #include "fade.hpp"
+#include "dither.hpp"
 
 #define MAX_LEDS 2048
+
+// how often the strip is re-latched between host frames. Frames arrive as 8.8
+// fixed-point values (see common/protocol.hpp); every latch rounds them to
+// the strip's 8 bits with a fresh ordered threshold (common/dither.hpp), so a
+// sub-code value renders as a duty cycle between adjacent codes. At the
+// ~300-500 Hz this period yields (the serial read's ~2 ms block and the RMT
+// transfer time set the real cadence) the toggling sits far above flicker
+// fusion — the eye sees only the average, so dim gradients glide instead of
+// stepping. A long strip's RMT time (~30 µs/LED) throttles this naturally;
+// that's fine, the rate only needs to stay comfortably above ~200 Hz.
+#define DITHER_REFRESH_US 2000
+
+// a latch that comes this long after the previous one is too slow to dither
+// invisibly (the duty cycle would read as flicker, not an average) — a very
+// long strip's RMT transfer, or a starved loop. Such latches round to nearest
+// instead: banding comes back, flicker doesn't. Kicks in below ~200 Hz.
+#define SLOW_LATCH_US 5000
 
 // LittleFS mount point and the recording files (one per slot; see
 // common/protocol.hpp).
@@ -244,9 +262,20 @@ bool blanked = false;
 // just ordinary id changes; there's no "am I replaying?" state to track. Live
 // ids ride the wire; replay frames get a reserved per-slot id (proto::ANIM_*),
 // which the firmware knows from the slot it's playing (see common/fade.hpp).
+//
+// All frames here are 8.8 fixed point (count*3 uint16 channel values, see
+// common/protocol.hpp). show() only records the newest frame; refreshStrip()
+// re-latches the strip every DITHER_REFRESH_US, blending an active dissolve
+// and dithering the fraction away per latch — so both the dither *and* a
+// crossfade run at strip-refresh rate, not at the (much slower) frame rate.
 fade::Fader fader;
-uint8_t lastShown[MAX_LEDS * 3]; // last frame written to the strip
-uint8_t frameBuf[MAX_LEDS * 3];  // scratch: the incoming frame, blended in place
+uint16_t target[MAX_LEDS * 3];    // newest incoming frame (fade destination)
+uint16_t lastShown[MAX_LEDS * 3]; // last blended frame latched (fade source)
+uint16_t scratch[MAX_LEDS * 3];   // per-latch blend output / replay decode
+uint16_t targetCount = 0;        // LEDs in `target`
+bool haveFrame = false;          // refresh only once something arrived
+uint32_t ditherTick = 0;         // one step per latch (see common/dither.hpp)
+int64_t lastRefreshUs = 0;       // esp_timer time of the last latch
 uint16_t lastAnimId = proto::ANIM_NONE; // id of the frame on screen
 uint16_t lastShownCount = 0;     // its LED count: a dissolve needs matching geometry
 uint16_t replayXms = 0;          // crossfade ms for a shutdown replay (from CMD_SHUTDOWN)
@@ -311,47 +340,91 @@ void blankStrip()
         return;
 
     led_strip_clear(strip); // zero every pixel and latch it out
+    haveFrame = false;      // nothing to dither; the refresh loop idles dark
 
     // the strip is black now: record that as the last shown, under a sentinel
     // id, so the next frame (a returning host, or a replay) dissolves up from
     // black rather than snapping
-    if ((size_t)currentCount * 3 <= sizeof lastShown)
+    if (currentCount <= MAX_LEDS)
     {
-        memset(lastShown, 0, (size_t)currentCount * 3);
+        memset(lastShown, 0, (size_t)currentCount * 3 * sizeof(uint16_t));
         lastShownCount = currentCount;
     }
     lastAnimId = proto::ANIM_NONE;
 }
 
-// the one place a frame reaches the strip. Every source — live frames and
-// replayed recordings alike — calls this with the animation's id; when the id
-// differs from what's on screen we dissolve the new frame in over the last
-// (as long as the geometry matches), then remember it. That single rule covers
-// live switches, the boot->live handoff and the live->shutdown handoff, so no
-// source needs to special-case transitions (see common/fade.hpp).
-void show(uint16_t animId, uint16_t count, uint16_t xms, const uint8_t* px)
+// the one place pixels reach the hardware: blend any active dissolve over the
+// newest frame (both in 8.8), round each channel to the strip's 8 bits under
+// this latch's dither threshold, and latch. Runs every DITHER_REFRESH_US from
+// loop() — and once from show() so a fresh frame never waits on the timer.
+void refreshStrip()
 {
-    if (!strip || (size_t)count * 3 > sizeof frameBuf)
+    if (!strip || !haveFrame)
         return;
 
-    uint32_t now = millis();
+    uint16_t count = targetCount;
+
+    memcpy(scratch, target, (size_t)count * 3 * sizeof(uint16_t));
+    fader.apply(scratch, count, millis());
+
+    ditherTick++;
+
+    // latching too slowly to hide the dither? round this latch to nearest
+    // instead (see SLOW_LATCH_US)
+    bool slow = lastRefreshUs != 0 &&
+                esp_timer_get_time() - lastRefreshUs > SLOW_LATCH_US;
+
+    for (uint16_t i = 0; i < count; i++)
+    {
+        // one threshold for the pixel's three channels, so a dim colour
+        // rounds up together and stays on-hue (see common/dither.hpp)
+        uint8_t t = slow ? 128 : dither::threshold(ditherTick, i);
+        uint8_t c[3];
+
+        for (int k = 0; k < 3; k++)
+        {
+            // values are ≤ 0xFF00 (code*256), so +t can't exceed 0xFFFF;
+            // clamp anyway so an out-of-spec value can't wrap to near-black
+            uint32_t s = (uint32_t)scratch[i * 3 + k] + t;
+            c[k] = s >= 0xFF00 ? 255 : (uint8_t)(s >> 8);
+        }
+
+        led_strip_set_pixel(strip, i, c[0], c[1], c[2]);
+    }
+
+    led_strip_refresh(strip);
+
+    // remember the *blended* 8.8 frame (not the dithered 8-bit one) as what's
+    // on screen, so a dissolve that starts mid-dissolve seeds cleanly
+    memcpy(lastShown, scratch, (size_t)count * 3 * sizeof(uint16_t));
+    lastShownCount = count;
+    lastRefreshUs = esp_timer_get_time();
+}
+
+// the one place a frame reaches the display path. Every source — live frames
+// and replayed recordings alike — calls this with the animation's id; when the
+// id differs from what's on screen we start a dissolve from the last blended
+// frame (as long as the geometry matches), then let refreshStrip() render it.
+// That single rule covers live switches, the boot->live handoff and the
+// live->shutdown handoff, so no source needs to special-case transitions (see
+// common/fade.hpp). `px` is count*3 8.8 channel values.
+void show(uint16_t animId, uint16_t count, uint16_t xms, const uint16_t* px)
+{
+    if (!strip || count > MAX_LEDS)
+        return;
 
     // a new animation, and the held frame still lines up: start the dissolve
     if (animId != lastAnimId && count == lastShownCount)
-        fader.begin(lastShown, count, xms, now);
+        fader.begin(lastShown, count, xms, millis());
 
     lastAnimId = animId;
 
-    memcpy(frameBuf, px, (size_t)count * 3);
-    fader.apply(frameBuf, count, now);
+    if (px != target)
+        memcpy(target, px, (size_t)count * 3 * sizeof(uint16_t));
+    targetCount = count;
+    haveFrame = true;
 
-    for (uint16_t i = 0; i < count; i++)
-        led_strip_set_pixel(strip, i, frameBuf[i * 3], frameBuf[i * 3 + 1],
-                            frameBuf[i * 3 + 2]);
-    led_strip_refresh(strip);
-
-    memcpy(lastShown, frameBuf, (size_t)count * 3);
-    lastShownCount = count;
+    refreshStrip(); // latch now; the loop keeps re-latching for the dither
 }
 
 // device side of the recording store: LittleFS read/write around the shared
@@ -488,7 +561,7 @@ void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
 struct StripHandler : proto::FrameHandler
 {
     void onPixels(uint8_t pin, uint16_t count, uint16_t anim, uint16_t xms,
-                  const uint8_t* rgb) override
+                  const uint16_t* rgb) override
     {
         if (pin != currentPin || count != currentCount)
         {
@@ -673,15 +746,21 @@ void loop()
     {
         if (const uint8_t* px = player.tick(now))
         {
+            // recordings store the wire's little-endian 8.8 pixels; decode
+            // into the blend scratch (show() copies it on into `target`)
+            uint16_t n = active.count <= MAX_LEDS ? active.count : 0;
+            for (size_t i = 0; i < (size_t)n * 3; i++)
+                scratch[i] = (uint16_t)(px[i * 2] | (px[i * 2 + 1] << 8));
+
             // stamp the slot's reserved id so the handoff is an ordinary id
             // change: shutdown frames dissolve in over the last live frame
             // (replayXms); boot frames carry no fade of their own (xms 0) — the
             // first live frame dissolves over the boot recording's last frame,
             // using that live frame's own crossfade duration
             if (shuttingDown)
-                show(proto::ANIM_SHUTDOWN, active.count, replayXms, px);
+                show(proto::ANIM_SHUTDOWN, n, replayXms, scratch);
             else
-                show(proto::ANIM_BOOT, active.count, 0, px);
+                show(proto::ANIM_BOOT, n, 0, scratch);
         }
 
         // the shutdown recording ends on its own near-black frame; blank once
@@ -689,6 +768,13 @@ void loop()
         if (player.done() && shuttingDown)
             blankStrip();
     }
+
+    // between frames, keep re-latching the newest (blended) frame with a fresh
+    // dither threshold, so sub-code values render as high-rate duty cycles —
+    // and an active dissolve advances at this rate too, not at frame rate
+    if (haveFrame && strip &&
+        esp_timer_get_time() - lastRefreshUs >= DITHER_REFRESH_US)
+        refreshStrip();
 }
 
 extern "C" void app_main(void)

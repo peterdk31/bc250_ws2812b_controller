@@ -12,8 +12,11 @@
 #include "protocol.hpp"
 
 // The host-side LED canvas. Effects render into it via setPixel(); it owns
-// the color LUT (brightness/gamma/white-balance/dither) and assembles the
-// wire frame (header + mapped pixels + checksum, see common/protocol.hpp).
+// the color LUT (brightness/gamma/white-balance) and assembles the wire
+// frame (header + mapped 8.8 fixed-point pixels + checksum, see
+// common/protocol.hpp). The LUT's 8 fractional bits ship whole; the receiver
+// rounds them away with its own high-rate temporal dither (common/dither.hpp),
+// so dim gradients render smoothly instead of stepping.
 //
 // It owns no output. endFrame() stamps the checksum and hands back the
 // finished wire bytes; the daemon passes those to whatever Sinks it built
@@ -49,10 +52,6 @@ public:
 
         strip.setBrightness(brightness);
 
-        // dither: "spatial" (default; the diffuser blends adjacent LEDs)
-        // or "temporal" (for a bare strip). See color_lut.hpp.
-        strip.setDither(cfg.get("strip.dither", "spatial").c_str());
-
         // flip the logical-to-physical mapping when the strip is wired
         // so LED 0 is at the far end; effects stay direction-agnostic
         strip.setReversed(cfg.getBool("strip.reverse", false));
@@ -85,16 +84,13 @@ public:
     void setGamma(float g) { lut.setGamma(g); }
     void setGamma(float r, float g, float b) { lut.setGamma(r, g, b); }
     void setWhiteBalance(uint32_t rgb) { lut.setWhiteBalance(rgb); }
-    void setDither(const char* name) { lut.setDither(name); }
 
     void beginFrame()
     {
-        frame_++; // advances the per-frame dither (see ColorLut)
-
         if (leds <= 0) return;
 
         buf[0] = proto::SYNC0;
-        buf[1] = proto::SYNC1;
+        buf[1] = proto::SYNC1_16; // deep frame: 8.8 fixed-point channels
         buf[2] = (uint8_t)pin;
 
         buf[3] = (uint8_t)(leds & 0xFF);
@@ -133,11 +129,18 @@ public:
 
         if (reversed) i = leds - 1 - i;
 
-        int p = proto::PIX_HEADER + i * 3;
+        int p = proto::PIX_HEADER + i * 6;
 
-        buf[p++] = lut.map(0, r, frame_, i);
-        buf[p++] = lut.map(1, g, frame_, i);
-        buf[p]   = lut.map(2, b, frame_, i);
+        uint16_t cr = lut.map16(0, r);
+        uint16_t cg = lut.map16(1, g);
+        uint16_t cb = lut.map16(2, b);
+
+        buf[p++] = (uint8_t)(cr & 0xFF);
+        buf[p++] = (uint8_t)(cr >> 8);
+        buf[p++] = (uint8_t)(cg & 0xFF);
+        buf[p++] = (uint8_t)(cg >> 8);
+        buf[p++] = (uint8_t)(cb & 0xFF);
+        buf[p]   = (uint8_t)(cb >> 8);
     }
 
     // finalize the current frame and hand back the exact wire bytes (header
@@ -174,7 +177,7 @@ private:
             return;
         }
 
-        buf.resize(proto::PIX_HEADER + leds * 3 + 1); // header + pixels + checksum
+        buf.resize(proto::PIX_HEADER + leds * 6 + 1); // header + pixels + checksum
     }
 
     // RRGGBB hex, optionally '#'-prefixed, as 0xRRGGBB
@@ -205,7 +208,6 @@ private:
     int pin;
     bool reversed = false;
     ColorLut lut;
-    uint32_t frame_ = 0; // per-frame dither phase, bumped in beginFrame()
     uint16_t animId_ = 0;       // stamped per frame; change triggers a crossfade
     uint16_t transitionMs_ = 0; // crossfade duration carried on every frame
 };

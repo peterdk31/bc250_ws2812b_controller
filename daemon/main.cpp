@@ -28,19 +28,20 @@ static double now_seconds()
 }
 
 // wrap already-corrected recording pixels into a wire frame (--preview): the
-// bytes are post-LUT, so unlike Strip they must not be re-corrected. Checksum
-// is XOR of the header and pixel bytes, matching common/protocol.hpp. A
-// recording is one continuous animation (its own intro/loop is baked in), so
+// values are post-LUT 8.8 fixed point exactly as recorded, so unlike Strip
+// they must not be re-corrected — they go out as a deep frame verbatim.
+// Checksum is XOR of the header and pixel bytes, matching common/protocol.hpp.
+// A recording is one continuous animation (its own intro/loop is baked in), so
 // every frame carries the same anim id (0) and no crossfade (xms 0) — the
 // viewer plays it straight through with no dissolves.
 static std::vector<uint8_t> framePixels(uint8_t pin, uint16_t count,
                                         const uint8_t* px)
 {
     std::vector<uint8_t> f;
-    f.reserve(proto::PIX_HEADER + (size_t)count * 3 + 1);
+    f.reserve(proto::PIX_HEADER + (size_t)count * 6 + 1);
 
     f.push_back(proto::SYNC0);
-    f.push_back(proto::SYNC1);
+    f.push_back(proto::SYNC1_16);
     f.push_back(pin);
     f.push_back(count & 0xFF);
     f.push_back(count >> 8);
@@ -52,7 +53,7 @@ static std::vector<uint8_t> framePixels(uint8_t pin, uint16_t count,
     // the four zero header bytes XOR out, so the sum is pin/count/pixels
     uint8_t sum = pin ^ (uint8_t)(count & 0xFF) ^ (uint8_t)(count >> 8);
 
-    for (uint16_t i = 0; i < count * 3; i++)
+    for (size_t i = 0; i < (size_t)count * 6; i++)
     {
         f.push_back(px[i]);
         sum ^= px[i];

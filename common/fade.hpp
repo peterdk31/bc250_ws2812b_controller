@@ -16,6 +16,11 @@
 // and receiver.hpp keep the wire format in sync. It's a smootherstep
 // (motion::ease) over wall-clock ms, so the dissolve is the same length
 // regardless of frame rate. Pure and heap-free: usable as-is on the ESP32.
+//
+// Frames are count*3 channel values in the wire's 8.8 fixed point (see
+// common/protocol.hpp), so a dissolve keeps the sub-code precision the
+// receiver's dithering renders — and the firmware re-blends per strip
+// refresh, making the dissolve itself as smooth as the dither.
 namespace fade
 {
 
@@ -25,11 +30,12 @@ static const uint16_t kMaxLeds = 2048;
 class Fader
 {
 public:
-    // freeze `last` (count*3 bytes, the frame currently on screen) as the
+    // freeze `last` (count*3 8.8 values, the frame currently on screen) as the
     // outgoing frame and start a dissolve lasting durMs. A zero duration, no
     // outgoing frame, or an out-of-range count means "switch instantly" — the
     // fader stays inactive and apply() is a no-op.
-    void begin(const uint8_t* last, uint16_t count, uint16_t durMs, uint32_t now)
+    void begin(const uint16_t* last, uint16_t count, uint16_t durMs,
+               uint32_t now)
     {
         if (!last || durMs == 0 || count == 0 || count > kMaxLeds)
         {
@@ -40,15 +46,15 @@ public:
         count_ = count;
         durMs_ = durMs;
         startMs_ = now;
-        memcpy(from_, last, (size_t)count * 3);
+        memcpy(from_, last, (size_t)count * 3 * sizeof(uint16_t));
         active_ = true;
     }
 
-    // blend the incoming frame `px` (count*3 bytes) over the frozen one, in
-    // place, by the eased fraction of durMs elapsed. Disarms when the dissolve
-    // finishes — or if the geometry changed mid-fade — leaving `px` as the
-    // fully faded-in (i.e. untouched) frame.
-    void apply(uint8_t* px, uint16_t count, uint32_t now)
+    // blend the incoming frame `px` (count*3 8.8 values) over the frozen one,
+    // in place, by the eased fraction of durMs elapsed. Disarms when the
+    // dissolve finishes — or if the geometry changed mid-fade — leaving `px`
+    // as the fully faded-in (i.e. untouched) frame.
+    void apply(uint16_t* px, uint16_t count, uint32_t now)
     {
         if (!active_)
             return;
@@ -73,14 +79,14 @@ public:
         for (int i = 0; i < n; i++)
         {
             float v = (float)from_[i] + ((float)px[i] - (float)from_[i]) * a;
-            px[i] = (uint8_t)(v + 0.5f);
+            px[i] = (uint16_t)(v + 0.5f);
         }
     }
 
     bool active() const { return active_; }
 
 private:
-    uint8_t from_[(size_t)kMaxLeds * 3];
+    uint16_t from_[(size_t)kMaxLeds * 3];
     uint16_t count_ = 0;
     uint16_t durMs_ = 0;
     uint32_t startMs_ = 0;

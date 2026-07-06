@@ -10,8 +10,7 @@
         "reverse": false,
         "brightness": 1.0,
         "gamma": "1.9 1.8 1.7",
-        "white_balance": "b4ffff",
-        "dither": "spatial"
+        "white_balance": "b4ffff"
     },
     "transition_seconds": 0.6,
     "sensors": [

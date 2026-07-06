@@ -22,14 +22,18 @@ struct FrameHandler
 {
     virtual ~FrameHandler() = default;
 
-    // a validated pixel frame: `count` LEDs as RGB triples at
-    // rgb[0 .. count*3), for the strip on data pin `pin`. `anim` ids the
-    // animation producing the frame and `xms` is the crossfade duration — when
-    // `anim` differs from the previous frame, dissolve this one in over the
-    // last shown across `xms` ms (see common/fade.hpp). The pointer is into the
-    // Receiver's buffer and is valid only for the duration of the call.
+    // a validated pixel frame: `count` LEDs as RGB triples of 8.8 fixed-point
+    // channel values (strip code × 256, 0..0xFF00) at rgb[0 .. count*3), for
+    // the strip on data pin `pin`. The parser normalizes both wire depths to
+    // this — a deep frame decodes as sent, a plain 8-bit frame is widened by
+    // <<8 — so a handler has one code path and an older daemon still works.
+    // `anim` ids the animation producing the frame and `xms` is the crossfade
+    // duration — when `anim` differs from the previous frame, dissolve this
+    // one in over the last shown across `xms` ms (see common/fade.hpp). The
+    // pointer is into the Receiver's buffer and is valid only for the
+    // duration of the call.
     virtual void onPixels(uint8_t pin, uint16_t count, uint16_t anim,
-                          uint16_t xms, const uint8_t* rgb) = 0;
+                          uint16_t xms, const uint16_t* rgb) = 0;
 
     // a validated command frame (protocol.hpp). `payload` is NUL-terminated
     // (one spare byte past `len`) so string payloads need no copy. Default:
@@ -52,13 +56,17 @@ struct FrameHandler
 class Receiver
 {
 public:
-    // maxLeds bounds the work buffer (maxLeds*3 bytes): a pixel frame claiming
-    // more LEDs, or a command with a longer payload, is rejected as noise. The
-    // buffer carries one spare byte so onCommand's payload can be NUL-terminated.
+    // maxLeds bounds the work buffers (maxLeds*6 raw bytes — a deep frame's
+    // worst case — plus the decoded 8.8 pixels): a pixel frame claiming more
+    // LEDs, or a command with a longer payload, is rejected as noise. The raw
+    // buffer carries one spare byte so onCommand's payload can be
+    // NUL-terminated.
     explicit Receiver(FrameHandler& handler, uint16_t maxLeds = 2048)
         : handler_(handler),
-          cap_(static_cast<size_t>(maxLeds) * 3),
-          buf_(cap_ + 1)
+          maxLeds_(maxLeds),
+          cap_(static_cast<size_t>(maxLeds) * 6),
+          buf_(cap_ + 1),
+          px_(static_cast<size_t>(maxLeds) * 3)
     {
     }
 
@@ -113,8 +121,9 @@ private:
             // the second byte selects the frame type. Anything else (noise,
             // or a stray SYNC0) drops us back to scanning — the same resync
             // the byte-at-a-time firmware loop did.
-            if (b == SYNC1)
+            if (b == SYNC1 || b == SYNC1_16)
             {
+                deep_ = (b == SYNC1_16);
                 state_ = PIX_HDR;
                 have_ = 0;
             }
@@ -140,13 +149,13 @@ private:
                 xms_ = (uint16_t)(hdr_[5] | (hdr_[6] << 8));
 
                 // zero or too-many LEDs: a header-shaped run of noise. Rescan.
-                if (count_ == 0 || (size_t)count_ * 3 > cap_)
+                if (count_ == 0 || count_ > maxLeds_)
                 {
                     state_ = SCAN;
                     break;
                 }
 
-                need_ = (size_t)count_ * 3;
+                need_ = (size_t)count_ * (deep_ ? 6 : 3);
                 have_ = 0;
                 sum_ = hdr_[0] ^ hdr_[1] ^ hdr_[2] ^ hdr_[3] ^ hdr_[4]
                        ^ hdr_[5] ^ hdr_[6];
@@ -162,12 +171,26 @@ private:
             break;
 
         case PIX_SUM:
-            // XOR of pin, count and pixels; a mismatch means we latched onto
+            // XOR of header and pixel bytes; a mismatch means we latched onto
             // data that looked like a header — drop it and rescan
             if (b == sum_)
             {
                 bytesSinceValid_ = 0;
-                handler_.onPixels(pin_, count_, anim_, xms_, buf_.data());
+
+                // normalize to 8.8: a deep frame decodes its little-endian
+                // pairs, a plain 8-bit frame widens (v<<8 — the LUT's own
+                // scaling, so both depths mean the same light)
+                size_t n = (size_t)count_ * 3;
+
+                if (deep_)
+                    for (size_t i = 0; i < n; i++)
+                        px_[i] = (uint16_t)(buf_[i * 2]
+                                            | (buf_[i * 2 + 1] << 8));
+                else
+                    for (size_t i = 0; i < n; i++)
+                        px_[i] = (uint16_t)(buf_[i] << 8);
+
+                handler_.onPixels(pin_, count_, anim_, xms_, px_.data());
             }
             state_ = SCAN;
             break;
@@ -214,14 +237,17 @@ private:
     }
 
     FrameHandler& handler_;
-    const size_t cap_;        // max payload bytes (maxLeds*3)
+    const uint16_t maxLeds_;
+    const size_t cap_;         // max payload bytes (maxLeds*6, a deep frame)
     std::vector<uint8_t> buf_; // cap_ + 1, the extra byte for the NUL above
+    std::vector<uint16_t> px_; // maxLeds*3 decoded 8.8 pixels for onPixels
 
     State state_ = SCAN;
     uint8_t hdr_[7];          // pixel header (7) or cmd/len (3), filled in *_HDR
     size_t have_ = 0;         // bytes of the current field gathered so far
     size_t need_ = 0;         // bytes expected in the current data run
     uint8_t sum_ = 0;         // running checksum over header + data
+    bool deep_ = false;       // current pixel frame is 8.8 (SYNC1_16)
 
     uint8_t pin_ = 0;
     uint16_t count_ = 0;

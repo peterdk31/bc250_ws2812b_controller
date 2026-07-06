@@ -5,8 +5,18 @@
 // the host→receiver wire format, shared by the daemon (host/serial_sink.hpp)
 // and the ESP32 firmware so the two can never drift on the byte values.
 //
-// pixel frame:   SYNC0 SYNC1 pin lo hi anim_lo anim_hi xms_lo xms_hi <pixels...> checksum
+// pixel frame:   SYNC0 SYNC1    pin lo hi anim_lo anim_hi xms_lo xms_hi <R G B>*count checksum
+// deep frame:    SYNC0 SYNC1_16 pin lo hi anim_lo anim_hi xms_lo xms_hi <RR GG BB>*count checksum
 // command frame: SYNC0 CMD_SYNC cmd len_lo len_hi <payload[len]> checksum
+//
+// the deep pixel frame is what the daemon sends: each channel is a
+// little-endian 8.8 fixed-point value (the 8-bit strip code × 256, so
+// 0..0xFF00) straight out of the host's correction LUT. The extra 8
+// fractional bits are what the receiver's high-rate temporal dithering
+// averages out on the strip (see common/dither.hpp) — without them, gamma +
+// a low brightness collapse the levels and slow gradients step visibly.
+// The plain 8-bit frame remains decodable (the shared parser widens it to
+// 8.8) so an older daemon still drives a newer receiver.
 //
 // the pixel header carries, after pin and the 16-bit LED count, two more
 // 16-bit fields: `anim`, an id for the animation producing this frame (the
@@ -25,12 +35,14 @@
 namespace proto
 {
 
-static const uint8_t SYNC0 = 0xAA; // both frame types start here
-static const uint8_t SYNC1 = 0x55; // ...then this for a pixel frame
+static const uint8_t SYNC0 = 0xAA;    // every frame type starts here
+static const uint8_t SYNC1 = 0x55;    // ...then this for an 8-bit pixel frame
 static const uint8_t CMD_SYNC = 0x56; // ...or this for a command frame
+static const uint8_t SYNC1_16 = 0x57; // ...or this for an 8.8 deep pixel frame
 
-// bytes a pixel frame carries before the pixel data: SYNC0 SYNC1 pin count(2)
-// anim(2) xms(2). Use this rather than a literal so a header change is one edit.
+// bytes a pixel frame (either depth) carries before the pixel data: SYNC0
+// SYNC1/SYNC1_16 pin count(2) anim(2) xms(2). Use this rather than a literal
+// so a header change is one edit.
 static const uint8_t PIX_HEADER = 9;
 
 // The receiver no longer renders effects: the daemon records the configured
@@ -64,8 +76,10 @@ static const uint8_t CMD_SHUTDOWN = 0x01;
 //   hash       FNV-1a over the recording's fields and pixel bytes
 static const uint8_t CMD_REC_BEGIN = 0x02;
 
-// CMD_REC_FRAME: one recorded frame, payload = count*3 corrected RGB bytes
-// (count from the preceding CMD_REC_BEGIN). Sent frameCount times in order.
+// CMD_REC_FRAME: one recorded frame, payload = count*6 bytes — per LED three
+// little-endian 8.8 fixed-point channel values, the same depth the live deep
+// pixel frame carries (count from the preceding CMD_REC_BEGIN). Sent
+// frameCount times in order.
 static const uint8_t CMD_REC_FRAME = 0x03;
 
 // CMD_REC_END: finish the recording for `slot` (payload: slot(1)). The
@@ -92,7 +106,9 @@ static const uint16_t ANIM_SHUTDOWN = 0xFFFF; // shutdown recording replay
 // CMD_REC_BEGIN carries, so the skip-unchanged check is a header read.
 static const uint8_t REC_MAGIC0 = 'L';
 static const uint8_t REC_MAGIC1 = 'R';
-static const uint8_t REC_VERSION = 2; // 2 added loopStart; a v1 file is rejected
+static const uint8_t REC_VERSION = 3; // 3: 8.8 deep pixels (2 added loopStart);
+                                      // an older file is rejected and the slot
+                                      // stays empty until the daemon re-uploads
 
 static const uint8_t REC_FLAG_LOOP = 0x01;
 

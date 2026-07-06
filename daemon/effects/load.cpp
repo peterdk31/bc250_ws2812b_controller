@@ -135,10 +135,10 @@ public:
             float x = d;
 
             // freeze the animation in the unlit track (scale time by `live`):
-            // the 0.04 floor sits right on the dither's single-code boundary,
-            // so any frame-to-frame motion there flips pixels on and off and
-            // twinkles. A static floor dithers to fixed dots — a calm dim
-            // glow — while the lit bar and its tip keep the full living wash.
+            // the floor is meant to read as a resting bed the bar carves into,
+            // so it holds still while the lit bar and its tip keep the full
+            // living wash. (The dim floor itself renders smoothly — sub-code
+            // values are dithered on the receiver at strip-refresh rate.)
             float at = t * live;
 
             // aurora-style wash walking the palette: a flow field blended

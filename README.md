@@ -127,8 +127,7 @@ make receiver                       # build only, no flash
         "reverse": false,       // flip so LED 0 is at the far end
         "brightness": 0.2,      // 0..1, linear
         "gamma": "2.2",         // one value, or three ("2.0 2.2 2.4") per R/G/B
-        "white_balance": "b4ffff", // RRGGBB neutral-white gain; ffffff = off
-        "dither": "spatial"     // "spatial" (diffused strip) or "temporal" (bare)
+        "white_balance": "b4ffff" // RRGGBB neutral-white gain; ffffff = off
     },
     "sensors": [ ... ],         // hwmon candidates, see Sensors
     "esp32": {
@@ -158,11 +157,13 @@ order:
    picks up a tint that full white doesn't, use per-channel values to fix the
    channel that fades too fast (bluish dim = red dropping → `"2.0 2.2 2.2"`).
 
-`dither` hides banding when gamma + low brightness collapse the levels:
-`spatial` (default) blends across neighbouring LEDs — best for a diffused strip;
-`temporal` blends across frames — for a bare strip only (it shimmers at low
-brightness). Restart the daemon after any change so the boot/shutdown recordings
-re-capture with the new colors.
+Low brightness costs no smoothness: the corrected values ride the wire with 8
+extra fractional bits and the receiver rounds them away with a temporal dither
+at its own strip-refresh rate (several hundred Hz — far above flicker fusion),
+so dim gradients glide instead of stepping or shimmering. There is nothing to
+configure; the old `dither` key is gone (this needs receiver firmware from the
+same version — reflash once after updating). Restart the daemon after any
+change so the boot/shutdown recordings re-capture with the new colors.
 
 ### Sensors
 

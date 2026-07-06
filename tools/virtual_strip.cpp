@@ -3,8 +3,10 @@
 // Binds a local datagram socket and renders whatever wire frames arrive as
 // a row of truecolor blocks in the terminal. The `led` daemon mirrors every
 // frame it sends to the ESP32 onto this socket (see host/virtual_sink.hpp),
-// so this shows exactly what the physical strip shows — the same bytes,
-// already brightness/gamma/white-balance corrected — with no hardware.
+// so this shows what the physical strip shows — the same corrected 8.8
+// fixed-point values — with no hardware. Where the receiver dithers the
+// fraction at its strip-refresh rate (common/dither.hpp), this rounds it:
+// on a monitor the rounded value IS the average the strip's dither produces.
 //
 // Decoupled by design: when this isn't running the daemon's mirror send is
 // a no-op, so you can leave the daemon as-is and just launch this to preview
@@ -19,8 +21,10 @@
 //
 // Build: plain g++, no dependencies. Needs a truecolor-capable terminal.
 //
-// Wire frame (common/protocol.hpp): AA 55 pin lo hi anim(2) xms(2) <R G B>*n
-// checksum. anim/xms drive the crossfade this viewer mirrors (see Viewer).
+// Wire frame (common/protocol.hpp): AA 57 pin lo hi anim(2) xms(2)
+// <RR GG BB>*n checksum (8.8 fixed point; the shared parser also still
+// decodes the old AA 55 8-bit frame). anim/xms drive the crossfade this
+// viewer mirrors (see Viewer).
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,7 +86,7 @@ struct Viewer : proto::FrameHandler
     bool drew = false; // set on each painted frame; the loop polls and clears it
 
     void onPixels(uint8_t pin, uint16_t count, uint16_t anim, uint16_t xms,
-                  const uint8_t* rgb) override
+                  const uint16_t* rgb) override
     {
         size_t n = (size_t)count * 3;
         work_.assign(rgb, rgb + n); // a mutable copy we can blend in place
@@ -108,10 +112,13 @@ struct Viewer : proto::FrameHandler
 
         for (int i = 0; i < count; i++)
         {
-            const uint8_t* p = &work_[i * 3];
+            const uint16_t* p = &work_[i * 3];
             char cell[40];
-            // two background-colored spaces per LED — a solid block of its color
-            snprintf(cell, sizeof cell, "\x1b[48;2;%d;%d;%dm  ", p[0], p[1], p[2]);
+            // round the 8.8 values to the terminal's 8 bits — the average the
+            // strip's high-rate dither shows. Two background-colored spaces
+            // per LED: a solid block of its color.
+            snprintf(cell, sizeof cell, "\x1b[48;2;%d;%d;%dm  ",
+                     to8(p[0]), to8(p[1]), to8(p[2]));
             out += cell;
         }
 
@@ -127,9 +134,16 @@ struct Viewer : proto::FrameHandler
     }
 
 private:
+    // nearest 8-bit code for an 8.8 value (≤ 0xFF00, but clamp regardless)
+    static int to8(uint16_t v)
+    {
+        int o = (v + 128) >> 8;
+        return o > 255 ? 255 : o;
+    }
+
     fade::Fader fader_;
-    std::vector<uint8_t> work_;     // incoming frame, blended in place
-    std::vector<uint8_t> lastShown_; // the frame currently on screen
+    std::vector<uint16_t> work_;      // incoming 8.8 frame, blended in place
+    std::vector<uint16_t> lastShown_; // the frame currently on screen
     uint16_t lastAnim_ = 0;
     bool haveLast_ = false;
 };
@@ -179,7 +193,7 @@ int main(int argc, char** argv)
     printf("\x1b[2J\x1b[?25l"); // clear screen, hide cursor
     status("waiting for frames\xe2\x80\xa6  start `led`, or run an effect");
 
-    std::vector<uint8_t> buf(proto::PIX_HEADER + 2048 * 3 + 1); // max ESP32 frame
+    std::vector<uint8_t> buf(proto::PIX_HEADER + 2048 * 6 + 1); // max deep frame
 
     // each datagram is one whole wire frame, but feed it through the shared
     // streaming parser anyway: same framing/checksum as the daemon and ESP32,
