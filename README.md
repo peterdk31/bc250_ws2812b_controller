@@ -246,6 +246,7 @@ instant). `hold` debounces a flapping rule.
 | `gpu_load>N` / `gpu_load<N` | amdgpu busy above/below N % (bare `gpu_load` = `>20`) |
 | `proc:NAME` | a process with that name is running (15-char kernel limit) |
 | `steam_dl` | a Steam download is actively moving bytes |
+| `audio_playing` / `audio_playing>N` | system audio is playing / has been playing over N seconds (debounces notification blips) |
 | `file:/PATH` | the file exists |
 | `!COND` | negation |
 | `A & B` | both hold |
@@ -258,11 +259,24 @@ The `steam_download` effect turns the strip into a live download progress bar
 (percent driven by network throughput; green pulse at 100%). Reading other
 users' Steam libraries needs the daemon running as root (the systemd unit does).
 
+The `audio_*` effects visualise what's playing (combine them with `cycle` for
+variety — they share one capture stream and auto-gain, so hopping between them
+is seamless). The `audio_playing` condition itself is free
+(procfs), but the effects capture samples by spawning `parec` (or
+`pw-record`) on the default sink's monitor while it's active; running as root
+(the systemd unit does) lets it find the user session's PipeWire socket under
+`/run/user/`. Placing its rule *below* the `load` rule means load takes the
+strip whenever it's active and music has it otherwise — first matching rule
+wins.
+
 ## Effects
 
 | name | description | key settings (defaults) |
 |---|---|---|
 | `alarm` | urgent heartbeat throbbing from the center | `color` (ff0000), `pulses_per_second` (2) |
+| `audio_music` | audio-reactive bloom from the center: loudness sets its reach, bass pumps it and sends crests to the tips | `palette` (4a00b4,e02090,ff9c28), `pulse` (0.8), `gain_seconds` (6) |
+| `audio_ripple` | audio-reactive: each bass hit sends a soft ring racing from the center to the tips, colors walking the palette per beat | `palette` (0030a0,00c0e0,8040ff), `travel_seconds` (1.0), `sensitivity` (1.0) |
+| `audio_spectrum` | audio-reactive: bass/mid/treble as breathing glows — lows at the center, highs at the tips | `palette` (ff3020,ffb020,30ffd0), `width` (1.0) |
 | `aurora` | slow drifting color curtains walking a palette | `palette` (10ff80,10a0ff,8040ff), `speed` (1.0) |
 | `boot` | calm bloom from the center into a full wash, then exhales into a dim hold | `intro_seconds` (7), `color` (ffffff) |
 | `breathe` | palette wash on a slow breath with a drifting bright band | `palette` (0d4a44,30e090), `period_seconds` (3.5) |

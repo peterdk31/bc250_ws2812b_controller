@@ -4,7 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <vector>
+#include "audio.hpp"
 #include "hwmon.hpp"
 #include "steam.hpp"
 
@@ -161,6 +163,45 @@ public:
     bool eval() override { return steam::downloads().active; }
 };
 
+// system audio has been playing continuously for more than `seconds`,
+// as observed at the rule tick (audio.hpp); pair with the audio_* effects.
+// Bare `audio_playing` is immediate, `audio_playing>3` ignores short
+// blips like notification sounds.
+class AudioPlayingCondition : public Condition
+{
+public:
+    AudioPlayingCondition(float seconds) : seconds(seconds) {}
+
+    bool eval() override
+    {
+        timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        double now = ts.tv_sec + ts.tv_nsec / 1e9;
+
+        // eval stops being called while a higher-priority rule matches;
+        // after such a gap the old timestamp says nothing about
+        // continuity, so start the clock over
+        bool gap = lastEval >= 0 && now - lastEval > 2.0;
+        lastEval = now;
+
+        if (!audio::playing())
+        {
+            since = -1;
+            return false;
+        }
+
+        if (since < 0 || gap)
+            since = now;
+
+        return now - since >= seconds;
+    }
+
+private:
+    float seconds;
+    double since = -1;
+    double lastEval = -1;
+};
+
 class FileCondition : public Condition
 {
 public:
@@ -248,6 +289,16 @@ static std::unique_ptr<Condition> parseAtom(const std::string& spec,
 
     if (spec == "steam_dl")
         return std::make_unique<SteamDlCondition>();
+
+    if (spec.rfind("audio_playing", 0) == 0)
+    {
+        if (spec.size() == 13)
+            return std::make_unique<AudioPlayingCondition>(0.0f);
+
+        if (spec.size() > 14 && spec[13] == '>')
+            return std::make_unique<AudioPlayingCondition>(
+                (float)atof(spec.c_str() + 14));
+    }
 
     if (spec.rfind("temp", 0) == 0 && spec.size() > 5 &&
         (spec[4] == '>' || spec[4] == '<'))

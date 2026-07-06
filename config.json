@@ -109,6 +109,38 @@
             }
         },
         {
+            "if": "audio_playing",
+            "effect": "cycle",
+            "hold": 0,
+            "settings": {
+                "period_seconds": 40,
+                "effects": [
+                    {
+                        "effect": "audio_music",
+                        "settings": {
+                            "palette": "4a00b4,e02090,ff9c28",
+                            "glow_color": "ffffff",
+                            "pulse": 0.8
+                        }
+                    },
+                    {
+                        "effect": "audio_ripple",
+                        "settings": {
+                            "palette": "0030a0,00c0e0,8040ff",
+                            "glow_color": "ffffff",
+                            "travel_seconds": 1.0
+                        }
+                    },
+                    {
+                        "effect": "audio_spectrum",
+                        "settings": {
+                            "palette": "ff3020,ffb020,30ffd0"
+                        }
+                    }
+                ]
+            }
+        },
+        {
             "if": "proc:gamescope & temp>75 | proc:steam & temp>75",
             "effect": "ember",
             "hold": 0,
@@ -118,30 +150,12 @@
             }
         },
         {
-            "if": "proc:gamescope | proc:steam",
-            "effect": "ember",
-            "hold": 0,
-            "settings": {
-                "palette": "2a0a00,ff7d1e",
-                "min_brightness": 0.18
-            }
-        },
-        {
             "if": "temp>65",
             "effect": "cpu_temp",
             "hold": 0,
             "settings": {
                 "temp_min": 40,
                 "temp_max": 85
-            }
-        },
-        {
-            "if": "temp<48",
-            "effect": "aurora",
-            "hold": 0,
-            "settings": {
-                "speed": 1.0,
-                "palette": "10ff80,10a0ff,8040ff"
             }
         },
         {
