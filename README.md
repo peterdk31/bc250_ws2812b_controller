@@ -127,7 +127,7 @@ make receiver                       # build only, no flash
         "reverse": false,       // flip so LED 0 is at the far end
         "brightness": 0.2,      // 0..1, linear
         "gamma": "2.2",         // one value, or three ("2.0 2.2 2.4") per R/G/B
-        "white_balance": "b4ffff" // RRGGBB neutral-white gain; ffffff = off
+        "white_balance": "ffb0f0" // RRGGBB neutral-white gain; ffffff = off
     },
     "sensors": [ ... ],         // hwmon candidates, see Sensors
     "esp32": {
@@ -145,17 +145,64 @@ make receiver                       # build only, no flash
 ### Tuning the colors
 
 `brightness`, `white_balance`, and `gamma` fold into one per-channel lookup
-table applied on the host, so they cost nothing per frame. Dial them in this
-order:
+table applied on the host, so they cost nothing per frame.
 
-1. **`brightness`** — set for the room.
-2. **`white_balance`** (RRGGBB, `ffffff` = off) — command full white and lower
-   whichever channel leaks through your diffuser too strongly (a black film
-   passes red most → around `b4ffff`). It's a linear gain, so it holds at any
-   brightness.
-3. **`gamma`** (default `2.2`) — perceptual midtone correction. If dim white
-   picks up a tint that full white doesn't, use per-channel values to fix the
-   channel that fades too fast (bluish dim = red dropping → `"2.0 2.2 2.2"`).
+How to read the values — every knob is per-channel, red green blue:
+
+```
+white_balance "b4b0f0"          gamma "1.9 1.8 1.7"
+               ││││└┴─ blue            └┬┘ └┬┘ └┬┘
+               ││└┴─── green          red green blue
+               └┴───── red
+```
+
+Two rules cover every adjustment:
+
+- **White balance scales a channel the same at every level.** Lower a pair →
+  less of that color, from full white down to the dimmest glow. `ff` = leave
+  the channel alone.
+- **Gamma changes how a channel *fades*.** A higher number makes that channel
+  die away faster as colors dim; full-on and off never move. `2.2` is
+  neutral; you only need three different numbers when a tint appears *only*
+  at low levels.
+
+So: name the color the white is leaning toward, then move that channel —
+down in `white_balance` if the tint is there at full brightness, up in
+`gamma` if it only creeps in as things get dim.
+
+Dial the knobs in by symptom, in this order:
+
+1. **Everything too bright or dim for the room** → `brightness` (0..1).
+2. **Full white looks tinted** → `white_balance`: lower the channel(s) of
+   the tint. White leans green → lower the middle pair (`ffb0f0`). This is
+   the strip+diffuser calibration; start from the diffuser table below.
+3. **Full white is neutral, but dim white picks up a tint** →
+   per-channel `gamma`: raise the tint's channel so it fades faster (dim
+   white leans blue → `"2.2 2.2 2.4"`) — or equivalently lower the channel
+   that's going missing (dim white leans blue because red drops out →
+   `"2.0 2.2 2.2"`).
+
+The `solid` effect exists for exactly this — it puts up a fixed test field
+through the normal correction pipeline:
+
+```bash
+led /etc/led-controller/config.json solid    # full white: judge white_balance
+```
+
+Look, adjust the config, run again. For the gamma step you need *dim* white;
+a forced effect has no rule settings, but effects fall back to top-level
+config keys, so temporarily add `"level": 0.25` at the top level of the
+config (next to `"strip"`) and run `solid` again. Remove it when done.
+
+`white_balance` is the *total* correction — strip and diffuser combined into
+one measured value. Starting points per diffuser (always confirm against
+`solid` white):
+
+| Diffuser | `white_balance` | Why |
+|---|---|---|
+| none / clear cover | `ffb0f0` | just the strip's own green excess |
+| white (milky) | `ffb0f0` | near-neutral filter; scatters but barely tints — trim blue a touch (`ffb0e0`) if white reads cool |
+| black / smoked film | `b4b0f0` | dark film passes red most, so take the bare-strip value and pull red down ~30% on top of it. Films vary a lot: one measured black window film landed at `b4ffff` instead — its green/blue cut cancelled the strip's own green excess. Pair with per-channel gamma (e.g. `"1.9 1.8 1.7"`) if dim white still drifts |
 
 Low brightness costs no smoothness: the corrected values ride the wire with 8
 extra fractional bits and the receiver rounds them away with a temporal dither
@@ -232,6 +279,7 @@ users' Steam libraries needs the daemon running as root (the systemd unit does).
 | `pulse` | soft palette rings expanding from the center | `palette` (5028ff,30d0ff), `period_seconds` (4) |
 | `rainbow` | scrolling hue cycle with shimmer | `cycles_per_second` (0.9) |
 | `shutdown` | CRT-style collapse to a point, then a slow phosphor fade | `duration_seconds` (5.0), `color` (0028ff) |
+| `solid` | fixed color everywhere — the color-calibration test field, or a plain static light | `color` (ffffff), `level` (1.0) |
 | `steam_download` | live Steam download bar, green pulse at 100% | `palette` (d4009c,ff5a1e,ffd23c), `done_color` (00ff66) |
 | `tide` | a palette gradient sliding and breathing | `palette` (102060,1890d0,30d0a0,8040ff,102060), `speed` (1.4) |
 
@@ -290,8 +338,8 @@ LED_PORT=none led config.json aurora     # renders into the viewer, no device
 ```
 
 The viewer shows the exact bytes the strip would (already gamma/white-balance/
-brightness corrected). Drop `LED_PORT=none` to drive a real strip and preview at
-once.
+brightness corrected). Drop `LED_PORT=none` to drive a real strip and preview
+at once.
 
 ## The daemon
 
