@@ -12,9 +12,10 @@
 // so sustained music glows gently between hits. Audio levels come from
 // audio::Levels (capture and auto-gain shared by the audio family).
 //
-// Beat detection is a rising edge of the bass envelope over its own
-// slow average — no thresholds tuned to a particular volume, and
-// nothing fires in silence.
+// Beat detection is the bass envelope popping clear of its own recent
+// trough by a *ratio*, with ratio hysteresis before the next ring —
+// self-scaling at any volume, consistent from quiet grooves to loud
+// drops, and nothing fires in silence or on sustained (beatless) bass.
 //
 // config:
 //   palette            ring colors, walked one step per beat
@@ -23,8 +24,6 @@
 //   speed              floor wash drift rate multiplier (default 1.0)
 //   noise              flow/noise blend for the wash (default 0.3)
 //   floor_brightness   dim wash on the track 0..1 (default 0.05)
-//   idle_brightness    ambient wash during in-condition silence (default 0.25)
-//   idle_seconds       quiet time before the idle swell (default 1.5)
 //   width              ring half-width as a fraction of the half-strip
 //                      (default 0.07)
 //   travel_seconds     a ring's center -> tip journey time (default 1.0)
@@ -48,8 +47,6 @@ public:
         speed = cfg.getFloat("speed", 1.0f);
         noiseMix = cfg.getFloat("noise", 0.3f);
         floorLevel = cfg.getFloat("floor_brightness", 0.05f);
-        idleBright = cfg.getFloat("idle_brightness", 0.25f);
-        idleSeconds = cfg.getFloat("idle_seconds", 1.5f);
 
         width = cfg.getFloat("width", 0.07f);
         if (width < 0.02f) width = 0.02f;
@@ -85,20 +82,28 @@ public:
         float lev = lv.level();
         float bass = lv.bass();
 
-        // a beat is the bass envelope popping above its own slow average
-        // (self-scaling, like the auto-gain). One ring per pop: fire on
-        // the rising edge, re-arm once the envelope has clearly fallen
-        avg += (1.0f - expf(-dt / 1.5f)) * (bass - avg);
+        // a beat is the bass envelope popping clear of its own recent
+        // trough — the mean is useless as a reference (auto-gain can
+        // hold it near the peaks for seconds after a loud passage), but
+        // the between-beat dip is what a beat actually rises out of.
+        // The trough follower snaps down with the envelope and drifts
+        // up slowly; both thresholds are ratios of it, so quiet grooves
+        // and loud drops fire alike. Re-arming needs the envelope to
+        // fall back toward the trough, which a sustained beatless swell
+        // never does — that fires exactly once, at its onset.
+        if (bass < low)
+            low = bass;
+        else
+            low += (1.0f - expf(-dt / 1.2f)) * (bass - low);
 
-        bool hot = bass > avg + 0.22f / sens && bass > 0.25f / sens;
-
-        if (hot && armed && t - lastSpawn > 0.12f)
+        if (armed && bass > low * (1.0f + 1.3f / sens) + 0.03f / sens &&
+            t - lastSpawn > 0.15f)
         {
             spawn(bass);
             lastSpawn = t;
             armed = false;
         }
-        else if (!hot && bass < avg + 0.08f / sens)
+        else if (!armed && bass < low * (1.0f + 0.5f / sens) + 0.02f)
         {
             armed = true;
         }
@@ -106,9 +111,10 @@ public:
         for (Ring& r : rings)
             r.age += dt;
 
-        // silence grace, as in `audio_music`: quiet-but-active swells the wash
-        float idleTarget = lv.quietSeconds() > idleSeconds ? 1.0f : 0.0f;
-        idle += (1.0f - expf(-dt / 0.8f)) * (idleTarget - idle);
+        // the water between hits follows the level through a deliberately
+        // lazy envelope: the raw one is tuned to catch hits, and at low
+        // level the auto-gain makes it twitchy — ambience should breathe
+        glowLev += (1.0f - expf(-dt / 0.35f)) * (lev - glowLev);
 
         wash += dt;
 
@@ -126,9 +132,8 @@ public:
 
             // dim breathing floor plus a soft center glow that follows
             // the overall level, so the water is never dead between hits
-            float glow = 0.30f * lev * expf(-d * d * (1.0f / 0.065f));
-            float fl = floorLevel + (idleBright - floorLevel) * idle;
-            float base = fl + glow;
+            float glow = 0.30f * glowLev * expf(-d * d * (1.0f / 0.065f));
+            float base = floorLevel + glow;
 
             float w = motion::mix(motion::flow(d, wash, speed),
                                   motion::noise(d, wash, speed), noiseMix);
@@ -214,8 +219,6 @@ private:
     float speed = 1.0f;
     float noiseMix = 0.3f;
     float floorLevel = 0.05f;
-    float idleBright = 0.25f;
-    float idleSeconds = 1.5f;
     float width = 0.07f;
     float travel = 1.0f;
     float sens = 1.0f;
@@ -223,11 +226,11 @@ private:
 
     bool acquired = false;
     Ring rings[MAX_RINGS];
-    float avg = 0;
+    float low = 0;
     bool armed = true;
     float lastSpawn = -1e9f;
     float colorPhase = 0;
-    float idle = 0;
+    float glowLev = 0;
     float wash = 0;
 };
 

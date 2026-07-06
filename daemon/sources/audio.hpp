@@ -419,19 +419,12 @@ public:
         bassE += (bassT > bassE ? aUp : aDn) * (bassT - bassE);
         midE += (midT > midE ? aUp : aDn) * (midT - midE);
         trebE += (trebT > trebE ? aUp : aDn) * (trebT - trebE);
-
-        if (lev > 0.06f)
-            lastLoud = clk;
     }
 
     float level() const { return lev; }
     float bass() const { return bassE; }
     float mid() const { return midE; }
     float treble() const { return trebE; }
-
-    // seconds since the audio was last audibly loud; effects use this
-    // to swell into their idle wash during in-condition silence
-    float quietSeconds() const { return clk - lastLoud; }
 
     // false once a live capture has heard nothing but digital silence
     // for holdSec: the capture itself keeps the sink's RUNNING flag up
@@ -507,8 +500,16 @@ private:
 
         lastData = clk;
 
-        if (signal)
-            lastSignal = clk;
+        // nothing but dither in this chunk: that's silence, not a quiet
+        // passage to normalise — auto-gain would amplify the noise into
+        // full-scale flicker as the peaks sag toward their floor
+        if (!signal)
+        {
+            rmsT = bassT = midT = trebT = 0;
+            return;
+        }
+
+        lastSignal = clk;
 
         float decay = expf(-dt / gainSeconds);
 
@@ -544,7 +545,6 @@ private:
           trebPeak = 0.02f;
     float lev = 0, bassE = 0, midE = 0, trebE = 0;
     float lastData = 0;
-    float lastLoud = 0;
     float lastSignal = 0;
 };
 

@@ -20,8 +20,6 @@
 //   speed              drift / shimmer rate multiplier (default 1.0)
 //   noise              flow/noise blend for the floor wash (default 0.3)
 //   floor_brightness   dim wash on the track 0..1 (default 0.05)
-//   idle_brightness    ambient wash during in-condition silence (default 0.25)
-//   idle_seconds       quiet time before the idle swell (default 1.5)
 //   width              band width multiplier (default 1.0)
 //   attack_seconds / release_seconds / gain_seconds   as in `audio_music`
 class Spectrum : public Effect
@@ -41,8 +39,6 @@ public:
         speed = cfg.getFloat("speed", 1.0f);
         noiseMix = cfg.getFloat("noise", 0.3f);
         floorLevel = cfg.getFloat("floor_brightness", 0.05f);
-        idleBright = cfg.getFloat("idle_brightness", 0.25f);
-        idleSeconds = cfg.getFloat("idle_seconds", 1.5f);
 
         width = cfg.getFloat("width", 1.0f);
         if (width < 0.2f) width = 0.2f;
@@ -69,10 +65,6 @@ public:
         // properly dark instead of hovering
         float env[3] = {powf(lv.bass(), 1.3f), powf(lv.mid(), 1.3f),
                         powf(lv.treble(), 1.3f)};
-
-        // silence grace, as in `audio_music`
-        float idleTarget = lv.quietSeconds() > idleSeconds ? 1.0f : 0.0f;
-        idle += (1.0f - expf(-dt / 0.8f)) * (idleTarget - idle);
 
         wash += dt;
 
@@ -109,8 +101,6 @@ public:
             float d = i < half ? (half - i - 0.5f) / half
                                : (i + 0.5f - half) / half;
 
-            float fl = floorLevel + (idleBright - floorLevel) * idle;
-
             float w = motion::mix(motion::flow(d, wash, speed),
                                   motion::noise(d, wash, speed), noiseMix);
             float v = 0.6f + 0.4f * motion::shimmer(d, wash, speed);
@@ -118,9 +108,9 @@ public:
             uint8_t fr, fg, fb;
             palette.at(w, fr, fg, fb);
 
-            float rr = fr * v * fl;
-            float gg = fg * v * fl;
-            float bb = fb * v * fl;
+            float rr = fr * v * floorLevel;
+            float gg = fg * v * floorLevel;
+            float bb = fb * v * floorLevel;
 
             // the three band glows, additive over the floor
             for (int k = 0; k < 3; k++)
@@ -149,12 +139,9 @@ private:
     float speed = 1.0f;
     float noiseMix = 0.3f;
     float floorLevel = 0.05f;
-    float idleBright = 0.25f;
-    float idleSeconds = 1.5f;
     float width = 1.0f;
 
     bool acquired = false;
-    float idle = 0;
     float wash = 0;
 };
 

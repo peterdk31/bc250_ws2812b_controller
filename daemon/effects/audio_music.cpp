@@ -25,11 +25,6 @@
 //   speed              drift / shimmer rate multiplier (default 1.2)
 //   noise              flow/noise blend 0 (sine flow) .. 1 (noise) (default 0.3)
 //   floor_brightness   dim wash on the unlit track 0..1 (default 0.05)
-//   idle_brightness    calm ambient wash the floor swells into when the
-//                      audio goes quiet, so the strip is never left blank
-//                      while the audio device lingers open after playback
-//                      (~5 s under PipeWire) 0..1 (default 0.25)
-//   idle_seconds       quiet time before the idle swell starts (default 1.5)
 //   attack_seconds     level rise time constant (default 0.035)
 //   release_seconds    level fall time constant (default 0.3)
 //   gain_seconds       auto-gain window: how fast "loud" adapts (default 6)
@@ -55,8 +50,6 @@ public:
         speed = cfg.getFloat("speed", 1.2f);
         noiseMix = cfg.getFloat("noise", 0.3f);
         floorLevel = cfg.getFloat("floor_brightness", 0.05f);
-        idleBright = cfg.getFloat("idle_brightness", 0.25f);
-        idleSeconds = cfg.getFloat("idle_seconds", 1.5f);
 
         pulseStrength = cfg.getFloat("pulse", 0.8f);
         pulseWidth = cfg.getFloat("pulse_width", 0.18f);
@@ -90,12 +83,6 @@ public:
         float lev = lv.level();
         float bassE = lv.bass();
 
-        // silence grace: once the music has been quiet for a while (but
-        // the rule is still holding us active), ease the floor up into a
-        // calm ambient wash rather than sitting near-black
-        float idleTarget = lv.quietSeconds() > idleSeconds ? 1.0f : 0.0f;
-        idle += (1.0f - expf(-dt / 0.8f)) * (idleTarget - idle);
-
         // integrated clocks (never scale t directly — a rate change would
         // teleport the pattern): the wash quickens with treble sparkle,
         // the crest with overall level
@@ -128,10 +115,8 @@ public:
             float fill = live;
 
             // the unlit track keeps a faint wash rather than going black,
-            // so the bloom rises out of a living floor instead of an edge;
-            // in the silence grace the floor swells toward the idle level
-            float fl = floorLevel + (idleBright - floorLevel) * idle;
-            if (fill < fl) fill = fl;
+            // so the bloom rises out of a living floor instead of an edge
+            if (fill < floorLevel) fill = floorLevel;
 
             float w = motion::mix(motion::flow(d, wash, speed),
                                   motion::noise(d, wash, speed), noiseMix);
@@ -170,8 +155,6 @@ private:
     float speed = 1.2f;
     float noiseMix = 0.3f;
     float floorLevel = 0.05f;
-    float idleBright = 0.25f;
-    float idleSeconds = 1.5f;
     float pulseStrength = 0.8f;
     float pulseWidth = 0.18f;
     float rateIdle = 0.4f;
@@ -179,7 +162,6 @@ private:
     float glowR = 255, glowG = 255, glowB = 255;
 
     bool acquired = false;
-    float idle = 0;
     float wash = 0, phase = 0;
 };
 
