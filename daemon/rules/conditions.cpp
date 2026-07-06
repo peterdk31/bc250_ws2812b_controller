@@ -163,14 +163,22 @@ public:
     bool eval() override { return steam::downloads().active; }
 };
 
-// system audio has been playing continuously for more than `seconds`,
-// as observed at the rule tick (audio.hpp); pair with the audio_* effects.
-// Bare `audio_playing` is immediate, `audio_playing>3` ignores short
-// blips like notification sounds.
+// system audio has been playing continuously for more than `after`
+// seconds, as observed at the rule tick (audio.hpp); pair with the
+// audio_* effects. Bare `audio_playing` is immediate, and
+// `audio_playing(after=3,silence=8)` tunes both edges: `after` ignores
+// short blips like notification sounds (`audio_playing>3` is shorthand
+// for it), `silence` is how many seconds of flat silence release the
+// condition once an effect's own monitor capture is holding the sink
+// awake.
 class AudioPlayingCondition : public Condition
 {
 public:
-    AudioPlayingCondition(float seconds) : seconds(seconds) {}
+    AudioPlayingCondition(float after, float silence)
+        : after(after > 0 ? after : 0),
+          // a zero/negative hold would drop the instant the capture
+          // opens on a quiet moment; keep enough to hear a real gap
+          silence(silence > 0.5f ? silence : 0.5f) {}
 
     bool eval() override
     {
@@ -184,8 +192,33 @@ public:
         bool gap = lastEval >= 0 && now - lastEval > 2.0;
         lastEval = now;
 
-        if (!audio::playing())
+        bool run = audio::playing();
+
+        // after the silence gate below trips, the RUNNING flag is
+        // stale: the capture that held the sink awake stops with the
+        // effect, and PipeWire takes its own idle timeout to let the
+        // flag fall. Trust it again once it actually falls, or once
+        // it has outlived that timeout — then only real playback can
+        // explain it.
+        if (distrustUntil > 0)
         {
+            if (run && now < distrustUntil)
+            {
+                since = -1;
+                return false;
+            }
+
+            distrustUntil = 0;
+        }
+
+        // once an audio effect is up, its monitor capture keeps the
+        // sink RUNNING (audio.hpp) — hearsSignal() breaks that loop
+        // after `silence` seconds of flat monitor input.
+        if (!run || !audio::Levels::shared().hearsSignal(silence))
+        {
+            if (run)
+                distrustUntil = now + 10.0;
+
             since = -1;
             return false;
         }
@@ -193,13 +226,15 @@ public:
         if (since < 0 || gap)
             since = now;
 
-        return now - since >= seconds;
+        return now - since >= after;
     }
 
 private:
-    float seconds;
+    float after;
+    float silence;
     double since = -1;
     double lastEval = -1;
+    double distrustUntil = 0;
 };
 
 class FileCondition : public Condition
@@ -275,6 +310,53 @@ static std::string trim(const std::string& s)
     return s.substr(start, end - start + 1);
 }
 
+// the "key=value,key=value" inside a condition's parentheses, written
+// into the matching slots; an unknown key or malformed pair fails the
+// parse (and with it daemon startup, so typos surface immediately)
+static bool parseCondArgs(
+    const std::string& args,
+    std::initializer_list<std::pair<const char*, float*>> keys)
+{
+    size_t start = 0;
+
+    while (start < args.size())
+    {
+        size_t comma = args.find(',', start);
+
+        std::string pair = trim(args.substr(start, comma == std::string::npos
+                                             ? std::string::npos
+                                             : comma - start));
+
+        size_t eq = pair.find('=');
+
+        if (eq == std::string::npos)
+            return false;
+
+        std::string key = trim(pair.substr(0, eq));
+        std::string val = trim(pair.substr(eq + 1));
+        bool known = false;
+
+        for (auto& k : keys)
+        {
+            if (key == k.first)
+            {
+                *k.second = (float)atof(val.c_str());
+                known = true;
+            }
+        }
+
+        if (!known || val.empty())
+            return false;
+
+        if (comma == std::string::npos)
+            break;
+
+        start = comma + 1;
+    }
+
+    return true;
+}
+
 static std::unique_ptr<Condition> parseAtom(const std::string& spec,
                                             const Config& cfg)
 {
@@ -292,12 +374,21 @@ static std::unique_ptr<Condition> parseAtom(const std::string& spec,
 
     if (spec.rfind("audio_playing", 0) == 0)
     {
-        if (spec.size() == 13)
-            return std::make_unique<AudioPlayingCondition>(0.0f);
+        float after = 0.0f;
+        float silence = 2.5f;
 
+        if (spec.size() == 13)
+            return std::make_unique<AudioPlayingCondition>(after, silence);
+
+        // `>N` is shorthand for (after=N)
         if (spec.size() > 14 && spec[13] == '>')
             return std::make_unique<AudioPlayingCondition>(
-                (float)atof(spec.c_str() + 14));
+                (float)atof(spec.c_str() + 14), silence);
+
+        if (spec.size() > 14 && spec[13] == '(' && spec.back() == ')' &&
+            parseCondArgs(spec.substr(14, spec.size() - 15),
+                          {{"after", &after}, {"silence", &silence}}))
+            return std::make_unique<AudioPlayingCondition>(after, silence);
     }
 
     if (spec.rfind("temp", 0) == 0 && spec.size() > 5 &&

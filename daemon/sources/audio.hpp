@@ -24,6 +24,14 @@
 // few seconds after the last stream stops, so the flag drops shortly
 // after silence — a natural hold.
 //
+// One trap: our own monitor capture counts as a client of the sink, so
+// while it runs PipeWire never sees the sink as idle and the RUNNING
+// flag never drops (the "pavucontrol keeps devices awake" effect) —
+// detection alone would latch true forever once an audio effect is up.
+// While the capture is live we can hear the truth directly instead:
+// sustained digital silence on the monitor means playback stopped, and
+// Levels::hearsSignal() reports exactly that to the rule condition.
+//
 // Capture can't be that cheap: samples only exist inside the user's
 // PipeWire/PulseAudio session, so we spawn its standard capture client
 // (`parec`, falling back to `pw-record`) on the default sink monitor
@@ -376,6 +384,7 @@ public:
             cap.start();
             retryAt = clk;      // an immediate respawn attempt is fine
             lastData = clk;     // don't read the inactive gap as starvation
+            lastSignal = clk;   // fresh capture starts with a grace period
         }
     }
 
@@ -393,7 +402,9 @@ public:
         // bring it back while a music effect is up
         if (!cap.running() && clk >= retryAt)
         {
-            cap.start();
+            if (cap.start())
+                lastSignal = clk;
+
             retryAt = clk + 2.0f;
         }
 
@@ -422,6 +433,16 @@ public:
     // to swell into their idle wash during in-condition silence
     float quietSeconds() const { return clk - lastLoud; }
 
+    // false once a live capture has heard nothing but digital silence
+    // for holdSec: the capture itself keeps the sink's RUNNING flag up
+    // (see the detection note at the top), so the monitor going flat is
+    // the only sign that playback actually stopped. With no capture the
+    // flag is trustworthy and this stays true.
+    bool hearsSignal(float holdSec) const
+    {
+        return !cap.running() || clk - lastSignal < holdSec;
+    }
+
 private:
     Levels()
     {
@@ -437,6 +458,7 @@ private:
         int16_t buf[2048];
         double sq = 0, bsq = 0, msq = 0, tsq = 0;
         int total = 0;
+        bool signal = false;
 
         // bounded drain: a stall's worth of backlog, not a whole pipe
         while (total < 16384)
@@ -448,6 +470,10 @@ private:
 
             for (int i = 0; i < n; i++)
             {
+                // above ±1 LSB of dither counts as someone playing
+                if (buf[i] > 3 || buf[i] < -3)
+                    signal = true;
+
                 float s = buf[i] / 32768.0f;
 
                 lpBass += kBass * (s - lpBass);
@@ -480,6 +506,9 @@ private:
         }
 
         lastData = clk;
+
+        if (signal)
+            lastSignal = clk;
 
         float decay = expf(-dt / gainSeconds);
 
@@ -516,6 +545,7 @@ private:
     float lev = 0, bassE = 0, midE = 0, trebE = 0;
     float lastData = 0;
     float lastLoud = 0;
+    float lastSignal = 0;
 };
 
 } // namespace audio

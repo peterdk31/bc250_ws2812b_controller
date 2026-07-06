@@ -109,7 +109,7 @@
             }
         },
         {
-            "if": "audio_playing",
+            "if": "audio_playing(after=0, silence=2.5)",
             "effect": "cycle",
             "hold": 0,
             "settings": {

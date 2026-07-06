@@ -246,7 +246,7 @@ instant). `hold` debounces a flapping rule.
 | `gpu_load>N` / `gpu_load<N` | amdgpu busy above/below N % (bare `gpu_load` = `>20`) |
 | `proc:NAME` | a process with that name is running (15-char kernel limit) |
 | `steam_dl` | a Steam download is actively moving bytes |
-| `audio_playing` / `audio_playing>N` | system audio is playing / has been playing over N seconds (debounces notification blips) |
+| `audio_playing` / `audio_playing(after=N,silence=M)` | system audio is playing; `after` requires N seconds of playback first (debounces notification blips; `audio_playing>N` is shorthand), `silence` releases after M seconds of flat silence (default 2.5) |
 | `file:/PATH` | the file exists |
 | `!COND` | negation |
 | `A & B` | both hold |
@@ -265,7 +265,10 @@ is seamless). The `audio_playing` condition itself is free
 (procfs), but the effects capture samples by spawning `parec` (or
 `pw-record`) on the default sink's monitor while it's active; running as root
 (the systemd unit does) lets it find the user session's PipeWire socket under
-`/run/user/`. Placing its rule *below* the `load` rule means load takes the
+`/run/user/`. While that capture runs it keeps the sink awake, so the
+condition switches to listening to the monitor itself: after `silence` seconds
+of digital silence (default 2.5) it drops. Raise it if gaps between tracks
+kick you out of the effect, lower it for a snappier fall-back. Placing its rule *below* the `load` rule means load takes the
 strip whenever it's active and music has it otherwise — first matching rule
 wins.
 
@@ -363,9 +366,10 @@ sudo make install        # /usr/local/bin/led + systemd unit + default config
 sudo make uninstall      # remove everything, including the config
 ```
 
-`make install` never overwrites an existing config, and adds your user to the
-serial port's group (effective next login) so `led` can run unprivileged for
-testing. The unit restarts on serial failure every 2 s, so unplugging the
+`make install` never overwrites an existing config, restarts the service if
+it's running (so a rebuilt daemon goes live immediately), and adds your user
+to the serial port's group (effective next login) so `led` can run
+unprivileged for testing. The unit restarts on serial failure every 2 s, so unplugging the
 adapter heals itself.
 
 ```
