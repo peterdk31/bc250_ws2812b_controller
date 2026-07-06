@@ -12,10 +12,11 @@
 // so sustained music glows gently between hits. Audio levels come from
 // audio::Levels (capture and auto-gain shared by the audio family).
 //
-// Beat detection is the bass envelope popping clear of its own recent
-// trough by a *ratio*, with ratio hysteresis before the next ring —
-// self-scaling at any volume, consistent from quiet grooves to loud
-// drops, and nothing fires in silence or on sustained (beatless) bass.
+// Beat detection runs on audio::Levels' fast-release bass envelope,
+// popping clear of its own recent trough by a *ratio*, with ratio
+// hysteresis before the next ring — self-scaling at any volume,
+// consistent from quiet grooves to loud drops, and nothing fires in
+// silence or on sustained (beatless) bass.
 //
 // config:
 //   palette            ring colors, walked one step per beat
@@ -80,30 +81,31 @@ public:
         lv.update(dt);
 
         float lev = lv.level();
-        float bass = lv.bass();
+        float bass = lv.bassFast();
 
-        // a beat is the bass envelope popping clear of its own recent
-        // trough — the mean is useless as a reference (auto-gain can
-        // hold it near the peaks for seconds after a loud passage), but
-        // the between-beat dip is what a beat actually rises out of.
-        // The trough follower snaps down with the envelope and drifts
-        // up slowly; both thresholds are ratios of it, so quiet grooves
-        // and loud drops fire alike. Re-arming needs the envelope to
-        // fall back toward the trough, which a sustained beatless swell
-        // never does — that fires exactly once, at its onset.
+        // a beat is the fast bass envelope popping clear of its own
+        // recent trough (bassFast() — the display envelope's slow
+        // release leaves no valley between beats to pop out of). The
+        // trough follower snaps down with every dip and drifts up
+        // slowly; both thresholds are ratios of it, so quiet grooves
+        // and loud drops fire alike, and re-arming needs a fall back
+        // toward the trough — a sustained beatless swell never dips,
+        // so it fires exactly once, at its onset.
         if (bass < low)
             low = bass;
         else
-            low += (1.0f - expf(-dt / 1.2f)) * (bass - low);
+            low += (1.0f - expf(-dt / 1.5f)) * (bass - low);
 
-        if (armed && bass > low * (1.0f + 1.3f / sens) + 0.03f / sens &&
+        if (armed && bass > low * (1.0f + 0.35f / sens) + 0.02f / sens &&
             t - lastSpawn > 0.15f)
         {
-            spawn(bass);
+            // ring strength from the pop ratio, not the raw level, so
+            // a quiet groove's hits ripple as boldly as a loud drop's
+            spawn(fminf((bass / (low + 0.02f) - 1.0f) / 1.2f, 1.0f));
             lastSpawn = t;
             armed = false;
         }
-        else if (!armed && bass < low * (1.0f + 0.5f / sens) + 0.02f)
+        else if (!armed && bass < low * (1.0f + 0.25f / sens) + 0.01f)
         {
             armed = true;
         }
@@ -197,8 +199,8 @@ private:
     static const int MAX_RINGS = 6;
 
     // take the most-faded slot, so a dense run of beats recycles the
-    // ring that matters least
-    void spawn(float bass)
+    // ring that matters least; punch is the hit's pop ratio mapped 0..1
+    void spawn(float punch)
     {
         Ring* slot = &rings[0];
 
@@ -211,7 +213,7 @@ private:
         colorPhase -= floorf(colorPhase);
 
         slot->age = 0;
-        slot->strength = fminf(0.35f + 0.75f * bass, 1.1f);
+        slot->strength = 0.35f + 0.75f * punch;
         slot->color = colorPhase;
     }
 

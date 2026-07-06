@@ -419,12 +419,24 @@ public:
         bassE += (bassT > bassE ? aUp : aDn) * (bassT - bassE);
         midE += (midT > midE ? aUp : aDn) * (midT - midE);
         trebE += (trebT > trebE ? aUp : aDn) * (trebT - trebE);
+
+        // beat detection needs its own fast-release bass envelope: the
+        // configurable one above is a *visual* choice, and its slow
+        // release leaves no valley between beats at dance tempos
+        float fUp = 1.0f - expf(-dt / 0.015f);
+        float fDn = 1.0f - expf(-dt / 0.10f);
+
+        bassF += (bassT > bassF ? fUp : fDn) * (bassT - bassF);
     }
 
     float level() const { return lev; }
     float bass() const { return bassE; }
     float mid() const { return midE; }
     float treble() const { return trebE; }
+
+    // the fast-release bass envelope, for onset/beat detection — deep
+    // valleys between hits where bass() has barely started falling
+    float bassFast() const { return bassF; }
 
     // false once a live capture has heard nothing but digital silence
     // for holdSec: the capture itself keeps the sink's RUNNING flag up
@@ -500,16 +512,21 @@ private:
 
         lastData = clk;
 
-        // nothing but dither in this chunk: that's silence, not a quiet
-        // passage to normalise — auto-gain would amplify the noise into
-        // full-scale flicker as the peaks sag toward their floor
+        if (signal)
+            lastSignal = clk;
+
+        // quiet audio rides the dither threshold, so single signal-less
+        // chunks are normal — hold the current targets through them
+        // (zeroing would flap the envelopes full-range: auto-gain
+        // amplifies the noise chunks as the peaks sag toward their
+        // floor). Only sustained silence reads as silence.
         if (!signal)
         {
-            rmsT = bassT = midT = trebT = 0;
+            if (clk - lastSignal > 0.25f)
+                rmsT = bassT = midT = trebT = 0;
+
             return;
         }
-
-        lastSignal = clk;
 
         float decay = expf(-dt / gainSeconds);
 
@@ -541,6 +558,7 @@ private:
     float kBass = 0.02f, kTreb = 0.3f;
     float lpBass = 0, lpTreb = 0;
     float rmsT = 0, bassT = 0, midT = 0, trebT = 0;
+    float bassF = 0;
     float rmsPeak = 0.02f, bassPeak = 0.02f, midPeak = 0.02f,
           trebPeak = 0.02f;
     float lev = 0, bassE = 0, midE = 0, trebE = 0;
