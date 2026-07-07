@@ -16,7 +16,7 @@
 //
 // Levels are self-normalising (see audio.hpp), so the effect fills the
 // strip at any volume instead of needing gain tuned per source. No
-// capture client / no session → it degrades to the dim floor wash.
+// capture client / no session → it degrades to darkness.
 //
 // config:
 //   palette            comma-separated stops the wash walks
@@ -24,7 +24,6 @@
 //   glow_color         RRGGBB the bass crests lean toward (default ffffff)
 //   speed              drift / shimmer rate multiplier (default 1.2)
 //   noise              flow/noise blend 0 (sine flow) .. 1 (noise) (default 0.3)
-//   floor_brightness   dim wash on the unlit track 0..1 (default 0.05)
 //   attack_seconds     level rise time constant (default 0.035)
 //   release_seconds    level fall time constant (default 0.3)
 //   gain_seconds       auto-gain window: how fast "loud" adapts (default 6)
@@ -49,7 +48,6 @@ public:
         palette = color::Gradient(cfg.get("palette", "4a00b4,e02090,ff9c28"));
         speed = cfg.getFloat("speed", 1.2f);
         noiseMix = cfg.getFloat("noise", 0.3f);
-        floorLevel = cfg.getFloat("floor_brightness", 0.05f);
 
         pulseStrength = cfg.getFloat("pulse", 0.8f);
         pulseWidth = cfg.getFloat("pulse_width", 0.18f);
@@ -112,11 +110,10 @@ public:
             if (live < 0.0f) live = 0.0f;
             if (live > 1.0f) live = 1.0f;
 
+            // the unlit track stays truly dark — a faint wash there would
+            // sit below one 8-bit step after gamma, where the receiver's
+            // dither reads as jitter on the strip
             float fill = live;
-
-            // the unlit track keeps a faint wash rather than going black,
-            // so the bloom rises out of a living floor instead of an edge
-            if (fill < floorLevel) fill = floorLevel;
 
             float w = motion::mix(motion::flow(d, wash, speed),
                                   motion::noise(d, wash, speed), noiseMix);
@@ -154,7 +151,6 @@ private:
     color::Gradient palette;
     float speed = 1.2f;
     float noiseMix = 0.3f;
-    float floorLevel = 0.05f;
     float pulseStrength = 0.8f;
     float pulseWidth = 0.18f;
     float rateIdle = 0.4f;

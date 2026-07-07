@@ -27,7 +27,6 @@
 //                      (default cool teal -> blue -> violet)
 //   speed              drift / shimmer rate multiplier (default 1.4)
 //   noise              flow/noise blend 0 (sine flow) .. 1 (noise) (default 0.3)
-//   floor_brightness   dim wash on the unlit track 0..1 (default 0.04)
 //   pulse              heartbeat strength, 0 disables (default 0.5)
 //   pulse_width        crest half-width as a fraction of the half-strip
 //                      (default 0.16)
@@ -46,7 +45,6 @@ public:
         palette = color::Gradient(cfg.get("palette", "00e0c0,2060ff,a040ff"));
         speed = cfg.getFloat("speed", 1.4f);
         noiseMix = cfg.getFloat("noise", 0.3f);
-        floorLevel = cfg.getFloat("floor_brightness", 0.04f);
 
         pulseStrength = cfg.getFloat("pulse", 0.5f);
         pulseWidth = cfg.getFloat("pulse_width", 0.16f);
@@ -122,11 +120,10 @@ public:
             if (live < 0.0f) live = 0.0f;
             if (live > 1.0f) live = 1.0f;
 
+            // the unlit track stays truly dark — a faint wash there would
+            // sit below one 8-bit step after gamma, where the receiver's
+            // dither reads as jitter on the strip
             float fill = live;
-
-            // the unlit track keeps a faint wash rather than going black,
-            // so the bar fades down into a living floor instead of an edge
-            if (fill < floorLevel) fill = floorLevel;
 
             // spatial coordinate for the wash/shimmer mirrored about the
             // center (distance outward, 0..1), so both halves flow
@@ -134,21 +131,14 @@ public:
             // across the strip in one screen direction
             float x = d;
 
-            // freeze the animation in the unlit track (scale time by `live`):
-            // the floor is meant to read as a resting bed the bar carves into,
-            // so it holds still while the lit bar and its tip keep the full
-            // living wash. (The dim floor itself renders smoothly — sub-code
-            // values are dithered on the receiver at strip-refresh rate.)
-            float at = t * live;
-
             // aurora-style wash walking the palette: a flow field blended
             // with value noise, so the color drifts and never repeats
-            float w = motion::mix(motion::flow(x, at, speed),
-                                  motion::noise(x, at, speed), noiseMix);
+            float w = motion::mix(motion::flow(x, t, speed),
+                                  motion::noise(x, t, speed), noiseMix);
 
             // a separate slow field shimmers the brightness, so even a
             // full bar is always gently moving
-            float v = 0.6f + 0.4f * motion::shimmer(x, at, speed);
+            float v = 0.6f + 0.4f * motion::shimmer(x, t, speed);
 
             uint8_t r, g, b;
             palette.at(w, r, g, b);
@@ -203,7 +193,6 @@ private:
     color::Gradient palette;
     float speed = 1.4f;
     float noiseMix = 0.3f;
-    float floorLevel = 0.04f;
     float pulseStrength = 0.5f;
     float pulseWidth = 0.16f;
     float rateIdle = 0.5f;

@@ -8,8 +8,8 @@
 // strip that races outward toward both tips, decelerating and fading
 // like a real ripple. Ring colors walk the palette one step per beat,
 // so a run of hits paints a sequence rather than repeating one color.
-// Underneath, a dim aurora-style wash breathes with the overall level,
-// so sustained music glows gently between hits. Audio levels come from
+// Underneath, a soft center glow breathes with the overall level, so
+// sustained music glows gently between hits. Audio levels come from
 // audio::Levels (capture and auto-gain shared by the audio family).
 //
 // Beat detection runs on audio::Levels' fast-release bass envelope,
@@ -22,9 +22,8 @@
 //   palette            ring colors, walked one step per beat
 //                      (default deep blue -> cyan -> violet)
 //   glow_color         RRGGBB newborn rings lean toward (default ffffff)
-//   speed              floor wash drift rate multiplier (default 1.0)
+//   speed              glow wash drift rate multiplier (default 1.0)
 //   noise              flow/noise blend for the wash (default 0.3)
-//   floor_brightness   dim wash on the track 0..1 (default 0.05)
 //   width              ring half-width as a fraction of the half-strip
 //                      (default 0.07)
 //   travel_seconds     a ring's center -> tip journey time (default 1.0)
@@ -47,7 +46,6 @@ public:
         palette = color::Gradient(cfg.get("palette", "0030a0,00c0e0,8040ff"));
         speed = cfg.getFloat("speed", 1.0f);
         noiseMix = cfg.getFloat("noise", 0.3f);
-        floorLevel = cfg.getFloat("floor_brightness", 0.05f);
 
         width = cfg.getFloat("width", 0.07f);
         if (width < 0.02f) width = 0.02f;
@@ -132,10 +130,11 @@ public:
             float d = i < half ? (half - i - 0.5f) / half
                                : (i + 0.5f - half) / half;
 
-            // dim breathing floor plus a soft center glow that follows
-            // the overall level, so the water is never dead between hits
-            float glow = 0.30f * glowLev * expf(-d * d * (1.0f / 0.065f));
-            float base = floorLevel + glow;
+            // a soft center glow follows the overall level, so the water
+            // breathes between hits; the rest of the track stays truly
+            // dark — a dim floor would sit below one 8-bit step after
+            // gamma, where the receiver's dither reads as jitter
+            float base = 0.30f * glowLev * expf(-d * d * (1.0f / 0.065f));
 
             float w = motion::mix(motion::flow(d, wash, speed),
                                   motion::noise(d, wash, speed), noiseMix);
@@ -220,7 +219,6 @@ private:
     color::Gradient palette;
     float speed = 1.0f;
     float noiseMix = 0.3f;
-    float floorLevel = 0.05f;
     float width = 0.07f;
     float travel = 1.0f;
     float sens = 1.0f;
