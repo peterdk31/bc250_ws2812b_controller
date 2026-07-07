@@ -2,7 +2,7 @@
 #include "effect.hpp"
 #include "motion.hpp"
 
-// EXPERIMENTAL power-off (not the default shutdown — wired for testing only).
+// The default power-off animation (config esp32.shutdown).
 //
 // Roughly the inverse of button_on: the lit strip "flies" back into the power
 // button just past the left / index-0 end. The lit region collapses from the

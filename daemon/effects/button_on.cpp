@@ -2,7 +2,7 @@
 #include "effect.hpp"
 #include "motion.hpp"
 
-// EXPERIMENTAL power-on (not the default boot — wired for testing only).
+// The default power-on animation (config esp32.power_on).
 //
 // The idea: the strip's light looks like it spills out of the physical power
 // button, which sits just past one end of the strip (the index-0 end by

@@ -29,13 +29,14 @@
         "power_on": {
             "sequence": [
                 {
-                    "effect": "boot",
-                    "record_seconds": 8.5,
+                    "effect": "button_on",
+                    "record_seconds": 4.5,
                     "settings": {
-                        "intro_seconds": 7,
+                        "reverse": true,
                         "color": "ffffff",
-                        "settle_seconds": 1.5,
-                        "settle_level": 0.05
+                        "spread_seconds": 2.5,
+                        "period_seconds": 4,
+                        "min_brightness": 0.05
                     }
                 },
                 {
@@ -51,10 +52,11 @@
             ]
         },
         "shutdown": {
-            "effect": "shutdown",
+            "effect": "button_off",
             "settings": {
-                "color": "0028ff",
-                "duration_seconds": 5.0
+                "reverse": true,
+                "color": "ffffff",
+                "duration_seconds": 1.4
             }
         }
     },
