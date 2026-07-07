@@ -36,7 +36,6 @@
         { "effect": "ember", "settings": { "palette": "2a0a00,ff7d1e", "min_brightness": 0.18 } },
         { "effect": "rainbow" },
         { "effect": "load", "settings": { "smoothing_seconds": 0.7, "palette": "00e0c0,2060ff,a040ff" } },
-        { "effect": "cpu_temp", "settings": { "temp_min": 40, "temp_max": 85 } },
         { "effect": "alarm", "settings": { "pulses_per_second": 2 } },
         { "effect": "steam_download" },
         { "effect": "boot", "seconds": 8, "settings": { "intro_seconds": 4, "color": "ffffff", "settle_seconds": 1.5, "settle_level": 0.05 } },

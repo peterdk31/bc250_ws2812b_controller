@@ -151,15 +151,6 @@
             }
         },
         {
-            "if": "temp>65",
-            "effect": "cpu_temp",
-            "hold": 0,
-            "settings": {
-                "temp_min": 40,
-                "temp_max": 85
-            }
-        },
-        {
             "effect": "cycle",
             "hold": 0,
             "settings": {

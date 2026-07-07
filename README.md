@@ -215,8 +215,8 @@ change so the boot/shutdown recordings re-capture with the new colors.
 ### Sensors
 
 `sensors` is an ordered list of `chip:label` hwmon candidates; the first present
-wins (a bare chip name means its `temp1_input`). Used by `temp` conditions and
-the `cpu_temp` effect. The daemon keeps rescanning until one appears. The default
+wins (a bare chip name means its `temp1_input`). Used by `temp` conditions.
+The daemon keeps rescanning until one appears. The default
 covers the BC-250 (`k10temp:Tctl`, then the NCT6686D under either nct driver).
 
 ### Rules
@@ -286,7 +286,6 @@ wins.
 | `button_off` | experimental: the lit strip collapses into the power button | `duration_seconds` (1.4), `color` (ffffff), `reverse` (true) |
 | `button_on` | experimental: light spills out of the power button, then pulses | `spread_seconds` (2.5), `period_seconds` (4), `color` (ffffff) |
 | `comet` | Larson scanner with a fading tail, optional mirror | `palette` (8040ff,30c0ff), `sweeps_per_second` (0.7), `tail_pixels` (8) |
-| `cpu_temp` | temperature bar along a hue ramp | `temp_min` (40), `temp_max` (85), `hot_color` (ff0000) |
 | `cycle` | rotates through a list of other effects | `period_seconds` (30), `effects` (list) |
 | `drift` | soft palette glows wandering over a dark base | `palette` (2858ff,30d0b0), `blobs` (3), `speed` (1.4) |
 | `ember` | slow warm aurora-style flow through an ember palette | `palette` (2a0a00,ff7d1e), `speed` (1.4) |
@@ -383,7 +382,7 @@ led --list              list available effects
 Drop a file in `daemon/effects/` — it's compiled in and self-registers. Effects
 render against the host `Strip`; the receiver just replays what's streamed. Pure
 animations (no host data) can also be a boot/shutdown slot; data-driven ones
-(`cpu_temp`, `load`) can't.
+(`load`) can't.
 
 ```cpp
 #include "effect.hpp"

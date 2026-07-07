@@ -11,7 +11,7 @@
 #include <vector>
 
 // /sys/class/hwmon sensor discovery and reading, shared by the
-// cpu_temp effect and the temp rule conditions
+// load effect and the temp rule conditions
 namespace hwmon
 {
 
