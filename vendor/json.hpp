@@ -366,8 +366,6 @@ private:
         }
     }
 
-    // \uXXXX is not supported; config strings here are names, paths
-    // and hex colors
     bool parseString(std::string& out)
     {
         pos++; // '"'
@@ -401,11 +399,89 @@ private:
                 case 'n':  out += '\n'; break;
                 case 'r':  out += '\r'; break;
                 case 't':  out += '\t'; break;
+
+                case 'u':
+                    if (!parseUnicodeEscape(out))
+                        return false;
+                    break;
+
                 default:   return fail("unsupported string escape");
             }
         }
 
         return fail("unterminated string");
+    }
+
+    // four hex digits after "\u"; -1 on malformed input
+    long hex4()
+    {
+        if (pos + 4 > s.size())
+            return -1;
+
+        long v = 0;
+
+        for (int i = 0; i < 4; i++)
+        {
+            char c = s[pos + i];
+            v <<= 4;
+
+            if (c >= '0' && c <= '9')      v |= c - '0';
+            else if (c >= 'a' && c <= 'f') v |= c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F') v |= c - 'A' + 10;
+            else return -1;
+        }
+
+        pos += 4;
+        return v;
+    }
+
+    // \uXXXX (with surrogate pairs) appended as UTF-8; needed since
+    // pactl output flows through here, not just our own config
+    bool parseUnicodeEscape(std::string& out)
+    {
+        long cp = hex4();
+
+        if (cp < 0)
+            return fail("bad \\u escape");
+
+        if (cp >= 0xD800 && cp <= 0xDBFF) // high surrogate: pair up
+        {
+            if (pos + 2 > s.size() || s[pos] != '\\' || s[pos + 1] != 'u')
+                return fail("lone high surrogate");
+
+            pos += 2;
+            long lo = hex4();
+
+            if (lo < 0xDC00 || lo > 0xDFFF)
+                return fail("bad low surrogate");
+
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+        }
+        else if (cp >= 0xDC00 && cp <= 0xDFFF)
+            return fail("lone low surrogate");
+
+        if (cp < 0x80)
+            out += (char)cp;
+        else if (cp < 0x800)
+        {
+            out += (char)(0xC0 | (cp >> 6));
+            out += (char)(0x80 | (cp & 0x3F));
+        }
+        else if (cp < 0x10000)
+        {
+            out += (char)(0xE0 | (cp >> 12));
+            out += (char)(0x80 | ((cp >> 6) & 0x3F));
+            out += (char)(0x80 | (cp & 0x3F));
+        }
+        else
+        {
+            out += (char)(0xF0 | (cp >> 18));
+            out += (char)(0x80 | ((cp >> 12) & 0x3F));
+            out += (char)(0x80 | ((cp >> 6) & 0x3F));
+            out += (char)(0x80 | (cp & 0x3F));
+        }
+
+        return true;
     }
 
     bool parseNumber(Value& out)
