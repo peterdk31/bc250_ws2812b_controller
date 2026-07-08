@@ -246,7 +246,7 @@ instant). `hold` debounces a flapping rule.
 | `gpu_load>N` / `gpu_load<N` | amdgpu busy above/below N % (bare `gpu_load` = `>20`) |
 | `proc:NAME` | a process with that name is running (15-char kernel limit) |
 | `steam_dl` | a Steam download is actively moving bytes |
-| `audio_playing` / `audio_playing(after=N,silence=M)` | system audio is playing; `after` requires N seconds of playback first (debounces notification blips; `audio_playing>N` is shorthand), `silence` releases after M seconds of flat silence (default 2.5) |
+| `audio_playing` | system audio is actually playing (see below) |
 | `file:/PATH` | the file exists |
 | `!COND` | negation |
 | `A & B` | both hold |
@@ -261,14 +261,20 @@ users' Steam libraries needs the daemon running as root (the systemd unit does).
 
 The `audio_*` effects visualise what's playing (combine them with `cycle` for
 variety — they share one capture stream and auto-gain, so hopping between them
-is seamless). The `audio_playing` condition itself is free
-(procfs), but the effects capture samples by spawning `parec` (or
-`pw-record`) on the default sink's monitor while it's active; running as root
+is seamless). The effects capture samples by spawning `parec` (or
+`pw-record`) on the default sink's monitor while active; running as root
 (the systemd unit does) lets it find the user session's PipeWire socket under
-`/run/user/`. While that capture runs it keeps the sink awake, so the
-condition switches to listening to the monitor itself: after `silence` seconds
-of digital silence (default 2.5) it drops. Raise it if gaps between tracks
-kick you out of the effect, lower it for a snappier fall-back. Placing its rule *below* the `load` rule means load takes the
+`/run/user/`.
+
+The `audio_playing` condition costs nothing while the system is silent (one
+procfs read per tick). Once anything is audible it asks the sound server for
+its playback stream list (`pactl -f json list sink-inputs`, spawned
+asynchronously about once a second): an uncorked stream means playing, corked
+or none means paused/stopped. That verdict is immune to quiet passages inside
+the music and reacts to pause/resume within a second or two. It is also the
+only source of truth: if the list can't be fetched while audio is audible
+(no `pactl`, no reachable session), the condition stays false and a note is
+left on stderr. Placing the rule *below* the `load` rule means load takes the
 strip whenever it's active and music has it otherwise — first matching rule
 wins.
 

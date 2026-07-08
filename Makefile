@@ -75,7 +75,8 @@ IDF_GENERATED = firmware/managed_components firmware/dependencies.lock
 HEADERS = daemon/output/strip.hpp daemon/config_loader.hpp vendor/json.hpp \
           daemon/effects/effect.hpp daemon/rules/condition.hpp daemon/color/color.hpp \
           daemon/sources/hwmon.hpp daemon/sources/steam.hpp \
-          daemon/sources/audio.hpp daemon/rules/rules.hpp \
+          daemon/sources/audio.hpp daemon/sources/audio_detect.hpp \
+          daemon/rules/rules.hpp \
           daemon/output/sink.hpp daemon/output/serial_sink.hpp daemon/output/virtual_sink.hpp \
           daemon/output/virtual_strip_socket.hpp daemon/output/recorder.hpp \
           daemon/color/color_lut.hpp common/protocol.hpp common/motion.hpp \

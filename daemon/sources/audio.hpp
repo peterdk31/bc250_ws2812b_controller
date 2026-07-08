@@ -14,23 +14,23 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <string>
+#include "json.hpp"
 
-// System audio playback detection and capture, shared by the `audio`
-// rule condition and the audio_* effects.
+// System audio playback detection and capture, shared by the
+// audio_playing rule condition (via audio_detect.hpp) and the audio_*
+// effects.
 //
-// Detection reads /proc/asound (a few procfs lines per rule tick, no
-// deps): whenever anything is actually feeding the sound card, ALSA
-// marks a playback substream RUNNING. PipeWire suspends idle devices a
-// few seconds after the last stream stops, so the flag drops shortly
-// after silence — a natural hold.
-//
-// One trap: our own monitor capture counts as a client of the sink, so
-// while it runs PipeWire never sees the sink as idle and the RUNNING
-// flag never drops (the "pavucontrol keeps devices awake" effect) —
-// detection alone would latch true forever once an audio effect is up.
-// While the capture is live we can hear the truth directly instead:
-// sustained digital silence on the monitor means playback stopped, and
-// Levels::hearsSignal() reports exactly that to the rule condition.
+// Detection has two layers. The cheap gate is /proc/asound (a few
+// procfs lines, no deps): whenever anything is actually feeding the
+// sound card, ALSA marks a playback substream RUNNING. The flag can't
+// decide on its own, though — our own monitor capture counts as a
+// client of the sink, so while an audio effect runs PipeWire never
+// sees the sink as idle and the flag never drops (the "pavucontrol
+// keeps devices awake" effect), and flat silence inside real playback
+// looks the same as silence. So while the flag is up, the truth comes
+// from the sound server's own playback stream list (StreamQuery /
+// classifySinkInputs below): uncorked sink-inputs are playback, corked
+// or none is paused/stopped.
 //
 // Capture can't be that cheap: samples only exist inside the user's
 // PipeWire/PulseAudio session, so we spawn its standard capture client
@@ -44,7 +44,7 @@ namespace audio
 {
 
 // true while any ALSA playback substream is RUNNING
-inline bool playing()
+inline bool alsaRunning()
 {
     DIR* cards = opendir("/proc/asound");
     if (!cards) return false;
@@ -177,6 +177,186 @@ inline void findUserSession(std::string& server, std::string& runtimeDir)
 
     closedir(dir);
 }
+
+// what the sound server reports about playback streams: UNKNOWN when
+// it couldn't be asked or the answer couldn't be read
+enum class Streams { UNKNOWN, SILENT, PLAYING };
+
+// classify a `pactl -f json list sink-inputs` document. Sink-inputs
+// are playback streams only — our own monitor capture is a
+// source-output and never appears here — so any uncorked entry is
+// real playback and corked means paused. Entries that don't carry a
+// boolean "corked" (schema drift) aren't guessed at: they make an
+// otherwise-silent answer UNKNOWN, while a clearly uncorked entry
+// still wins.
+inline Streams classifySinkInputs(const std::string& text)
+{
+    json::Value doc;
+    std::string err;
+
+    if (!json::parse(text, doc, err) || !doc.isArray())
+        return Streams::UNKNOWN;
+
+    bool unsure = false;
+
+    for (auto& in : doc.items)
+    {
+        const json::Value* corked =
+            in.isObject() ? in.find("corked") : nullptr;
+
+        if (!corked || corked->type != json::Value::Type::Bool)
+            unsure = true;
+        else if (!corked->boolean)
+            return Streams::PLAYING;
+    }
+
+    return unsure ? Streams::UNKNOWN : Streams::SILENT;
+}
+
+// one-shot `pactl -f json list sink-inputs`, run asynchronously so
+// the render loop never waits on it: start() forks on one rule tick,
+// poll() harvests the answer on a later one. The child is pointed at
+// the user session the same way the capture child is.
+class StreamQuery
+{
+public:
+    ~StreamQuery() { abandon(); }
+
+    bool running() const { return fd >= 0; }
+
+    bool start()
+    {
+        if (fd >= 0)
+            return true;
+
+        std::string pactl = findInPath("pactl");
+
+        if (pactl.empty())
+            return false;
+
+        std::string server, runtimeDir;
+        findUserSession(server, runtimeDir);
+
+        int p[2];
+
+        if (pipe(p) != 0)
+            return false;
+
+        pid = fork();
+
+        if (pid < 0)
+        {
+            close(p[0]);
+            close(p[1]);
+            pid = -1;
+            return false;
+        }
+
+        if (pid == 0)
+        {
+            dup2(p[1], 1);
+            close(p[0]);
+            close(p[1]);
+
+            int null = open("/dev/null", O_RDWR);
+
+            if (null >= 0)
+            {
+                dup2(null, 0);
+                dup2(null, 2);
+                close(null);
+            }
+
+            if (!server.empty())
+                setenv("PULSE_SERVER", server.c_str(), 1);
+
+            if (!runtimeDir.empty())
+                setenv("XDG_RUNTIME_DIR", runtimeDir.c_str(), 1);
+
+            execl(pactl.c_str(), "pactl", "-f", "json", "list",
+                  "sink-inputs", (char*)nullptr);
+            _exit(127);
+        }
+
+        close(p[1]);
+        fcntl(p[0], F_SETFL, O_NONBLOCK);
+        fd = p[0];
+        out.clear();
+        return true;
+    }
+
+    // drain without blocking; -1 while the child is still going, else
+    // final: 1 clean exit with output in `result`, 0 failure
+    int poll(std::string& result)
+    {
+        if (fd < 0)
+            return 0;
+
+        char buf[4096];
+
+        while (true)
+        {
+            ssize_t n = ::read(fd, buf, sizeof buf);
+
+            if (n > 0)
+            {
+                // a sane answer is a few KB; a runaway child just gets
+                // truncated into a parse failure
+                if (out.size() < 262144)
+                    out.append(buf, (size_t)n);
+
+                continue;
+            }
+
+            if (n < 0 && errno == EINTR)
+                continue;
+
+            if (n < 0)
+                return -1; // EAGAIN: still producing
+
+            break; // EOF: child done
+        }
+
+        close(fd);
+        fd = -1;
+
+        int status = 0;
+        bool ok = false;
+
+        if (pid > 0 && waitpid(pid, &status, 0) == pid)
+            ok = WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+                 !out.empty();
+
+        pid = -1;
+        result = std::move(out);
+        out.clear();
+        return ok ? 1 : 0;
+    }
+
+    // kill and reap a child we no longer want an answer from
+    void abandon()
+    {
+        if (pid > 0)
+        {
+            kill(pid, SIGKILL);
+            waitpid(pid, nullptr, 0);
+            pid = -1;
+        }
+
+        if (fd >= 0)
+        {
+            close(fd);
+            fd = -1;
+        }
+
+        out.clear();
+    }
+
+private:
+    pid_t pid = -1;
+    int fd = -1;
+    std::string out;
+};
 
 // the default sink's monitor as raw s16le mono samples, via a spawned
 // parec/pw-record child read non-blocking. Dies (EOF) when the session
@@ -437,16 +617,6 @@ public:
     // the fast-release bass envelope, for onset/beat detection — deep
     // valleys between hits where bass() has barely started falling
     float bassFast() const { return bassF; }
-
-    // false once a live capture has heard nothing but digital silence
-    // for holdSec: the capture itself keeps the sink's RUNNING flag up
-    // (see the detection note at the top), so the monitor going flat is
-    // the only sign that playback actually stopped. With no capture the
-    // flag is trustworthy and this stays true.
-    bool hearsSignal(float holdSec) const
-    {
-        return !cap.running() || clk - lastSignal < holdSec;
-    }
 
 private:
     Levels()
