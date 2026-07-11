@@ -300,8 +300,8 @@ wins.
 |---|---|---|
 | `alarm` | urgent heartbeat throbbing from the center | `color` (ff0000), `pulses_per_second` (2) |
 | `audio_music` | audio-reactive bloom from the center: loudness sets its reach, bass pumps it and sends crests to the tips | `palette` (4a00b4,e02090,ff9c28), `pulse` (0.8), `gain_seconds` (6) |
-| `audio_ripple` | audio-reactive: each bass hit sends a soft ring racing from the center to the tips, colors walking the palette per beat | `palette` (0030a0,00c0e0,8040ff), `travel_seconds` (1.0), `sensitivity` (1.0) |
-| `audio_spectrum` | audio-reactive analyzer meter: a bar grows from the strip start with the loudness, bass pumping its base and treble its tip, a peak-hold dot falling back between hits | `palette` (00d860,ffc020,ff3020), `pump` (0.7), `peak_color` (ffffff) |
+| `audio_ripple` | audio-reactive: each bass hit sends a wave crest with a luminous wake racing from the center to the tips, reflecting back off them, colors walking the palette per beat | `palette` (0030a0,00c0e0,8040ff), `travel_seconds` (1.0), `sensitivity` (1.0), `reflect` (0.6) |
+| `audio_spectrum` | audio-reactive liquid analyzer: a spring-loaded bar grows from the strip start with the loudness, a meniscus shine on its tip, bass pumping its base and treble its tip, a peak dot falling back with a comet tail between hits | `palette` (00e6b4,3a56ff,ff2e88), `pump` (0.7), `bounce` (0.6), `peak_color` (ffffff) |
 | `aurora` | slow drifting color curtains walking a palette | `palette` (10ff80,10a0ff,8040ff), `speed` (1.0) |
 | `boot` | calm bloom from the center into a full wash, then exhales into a dim hold | `intro_seconds` (7), `color` (ffffff) |
 | `breathe` | palette wash on a slow breath with a drifting bright band | `palette` (0d4a44,30e090), `period_seconds` (3.5) |

@@ -4,13 +4,17 @@
 #include "motion.hpp"
 #include "audio.hpp"
 
-// beats as water: each bass hit drops a soft ring at the center of the
-// strip that races outward toward both tips, decelerating and fading
-// like a real ripple. Ring colors walk the palette one step per beat,
-// so a run of hits paints a sequence rather than repeating one color.
-// Underneath, a soft center glow breathes with the overall level, so
-// sustained music glows gently between hits. Audio levels come from
-// audio::Levels (capture and auto-gain shared by the audio family).
+// beats as water: each bass hit drops a wave crest at the center of the
+// strip that races outward toward both tips, decelerating, widening as
+// it disperses, and dragging a luminous wake over the water it has
+// crossed. At the tip it reflects, lapping faintly back toward the
+// center like a wave off a pool wall. Ring colors walk the palette one
+// step per beat, so a run of hits paints a sequence rather than
+// repeating one color. Underneath, a soft center glow breathes with the
+// overall level and widens its reach with the bass, and treble sparkle
+// quickens the surface wash — so the water lives between hits instead
+// of waiting for them. Audio levels come from audio::Levels (capture
+// and auto-gain shared by the audio family).
 //
 // Beat detection runs on audio::Levels' fast-release bass envelope,
 // popping clear of its own recent trough by a *ratio*, with ratio
@@ -24,9 +28,16 @@
 //   glow_color         RRGGBB newborn rings lean toward (default ffffff)
 //   speed              glow wash drift rate multiplier (default 1.0)
 //   noise              flow/noise blend for the wash (default 0.3)
-//   width              ring half-width as a fraction of the half-strip
+//   width              crest half-width as a fraction of the half-strip
+//                      at birth; crests widen as they disperse
 //                      (default 0.07)
-//   travel_seconds     a ring's center -> tip journey time (default 1.0)
+//   wake               luminous tail behind each crest, in crest widths
+//                      (default 2.0, 0 for clean rings)
+//   reflect            how much of a crest survives the tip and laps
+//                      back toward the center, 0..1 (default 0.6,
+//                      0 disables the reflection)
+//   travel_seconds     a ring's center -> tip journey time; the lap
+//                      back takes the same again (default 1.0)
 //   sensitivity        beat threshold scale; higher fires on softer hits
 //                      (default 1.0)
 //   attack_seconds / release_seconds / gain_seconds   as in `audio_music`
@@ -49,6 +60,11 @@ public:
 
         width = cfg.getFloat("width", 0.07f);
         if (width < 0.02f) width = 0.02f;
+        wake = cfg.getFloat("wake", 2.0f);
+        if (wake < 0.0f) wake = 0.0f;
+        reflectAmt = cfg.getFloat("reflect", 0.6f);
+        if (reflectAmt < 0.0f) reflectAmt = 0.0f;
+        if (reflectAmt > 1.0f) reflectAmt = 1.0f;
         travel = cfg.getFloat("travel_seconds", 1.0f);
         if (travel < 0.1f) travel = 0.1f;
         sens = cfg.getFloat("sensitivity", 1.0f);
@@ -116,12 +132,63 @@ public:
         // level the auto-gain makes it twitchy — ambience should breathe
         glowLev += (1.0f - expf(-dt / 0.35f)) * (lev - glowLev);
 
-        wash += dt;
+        // the glow's reach follows the low end through its own lazy
+        // follower: a full bass line widens the water, a sparse one
+        // keeps it pooled at the center
+        glowBass += (1.0f - expf(-dt / 0.25f)) * (lv.bass() - glowBass);
 
-        float inv2w2 = 1.0f / (2.0f * width * width);
+        // treble sparkle quickens the surface (integrated clock — never
+        // scale t directly, a rate change would teleport the pattern)
+        wash += dt * (1.0f + 0.8f * lv.treble());
+
+        // resolve each ring once per frame: crests decelerate out to the
+        // tip, then — reflected — leave the wall gently and fade on the
+        // way back; they widen as they disperse, and a newborn's crest
+        // leans toward glow_color before settling into its palette color
+        struct Live
+        {
+            float pos, dir, env, inv2w2, wakeLen, color, lean;
+        };
+        Live live[MAX_RINGS];
+        int nLive = 0;
+
+        float life = reflectAmt > 0.0f ? 2.0f : 1.0f;
+        float endLevel = 0.5f * reflectAmt;
+
+        for (const Ring& ring : rings)
+        {
+            float u = ring.age / travel;
+
+            if (u >= life)
+                continue;
+
+            Live& L = live[nLive++];
+
+            float cw = width * (1.0f + 0.5f * u);
+            L.inv2w2 = 1.0f / (2.0f * cw * cw);
+            L.wakeLen = wake * cw;
+            L.color = ring.color;
+            L.lean = u < 1.0f ? 0.5f * (1.0f - u) : 0.0f;
+
+            if (u < 1.0f)
+            {
+                L.pos = 1.0f - (1.0f - u) * (1.0f - u);
+                L.dir = 1.0f;
+                L.env = ring.strength * (1.0f - (1.0f - endLevel) * u);
+            }
+            else
+            {
+                float s = u - 1.0f;
+                L.pos = 1.0f - s * s;
+                L.dir = -1.0f;
+                L.env = ring.strength * endLevel * (2.0f - u);
+            }
+        }
 
         int leds = strip.size();
         float half = leds / 2.0f;
+
+        float invG = 1.0f / (0.045f + 0.07f * glowBass);
 
         for (int i = 0; i < leds; i++)
         {
@@ -130,11 +197,12 @@ public:
             float d = i < half ? (half - i - 0.5f) / half
                                : (i + 0.5f - half) / half;
 
-            // a soft center glow follows the overall level, so the water
-            // breathes between hits; the rest of the track stays truly
-            // dark — a dim floor would sit below one 8-bit step after
-            // gamma, where the receiver's dither reads as jitter
-            float base = 0.30f * glowLev * expf(-d * d * (1.0f / 0.065f));
+            // a soft center glow follows the overall level and swells
+            // with the bass, so the water breathes between hits; the
+            // rest of the track stays truly dark — a dim floor would
+            // sit below one 8-bit step after gamma, where the
+            // receiver's dither reads as jitter
+            float base = 0.30f * glowLev * expf(-d * d * invG);
 
             float w = motion::mix(motion::flow(d, wash, speed),
                                   motion::noise(d, wash, speed), noiseMix);
@@ -147,32 +215,30 @@ public:
             float gg = g * v * base;
             float bb = b * v * base;
 
-            // rings, additive: position decelerates toward the tip (fast
-            // birth, gentle arrival), brightness fades with age, and a
-            // newborn ring leans toward glow_color before settling into
-            // its palette color
-            for (const Ring& ring : rings)
+            // crests, additive: a clean gaussian front, and behind it
+            // the wake — a luminous exponential tail dragged over the
+            // water the crest has already crossed
+            for (int j = 0; j < nLive; j++)
             {
-                if (ring.age >= travel)
-                    continue;
+                const Live& L = live[j];
 
-                float u = ring.age / travel;
-                float pos = 1.0f - (1.0f - u) * (1.0f - u);
+                float s = (d - L.pos) * L.dir;
+                float g2 = expf(-s * s * L.inv2w2);
 
-                float dd = d - pos;
-                float g2 = expf(-dd * dd * inv2w2)
-                    * ring.strength * (1.0f - u);
+                if (s < 0.0f && wake > 0.0f)
+                    g2 = fmaxf(g2, 0.45f * expf(s / L.wakeLen));
+
+                g2 *= L.env;
 
                 if (g2 <= 0.003f)
                     continue;
 
                 uint8_t cr, cg, cb;
-                palette.at(ring.color, cr, cg, cb);
+                palette.at(L.color, cr, cg, cb);
 
-                float lean = 0.5f * (1.0f - u);
-                float pr = cr + (glowR - cr) * lean;
-                float pg = cg + (glowG - cg) * lean;
-                float pb = cb + (glowB - cb) * lean;
+                float pr = cr + (glowR - cr) * L.lean;
+                float pg = cg + (glowG - cg) * L.lean;
+                float pb = cb + (glowB - cb) * L.lean;
 
                 rr += pr * g2;
                 gg += pg * g2;
@@ -195,7 +261,9 @@ private:
         float color = 0;
     };
 
-    static const int MAX_RINGS = 6;
+    // reflection doubles a ring's life, so a dense run of beats needs a
+    // deeper pool before recycling starts stealing visible rings
+    static const int MAX_RINGS = 8;
 
     // take the most-faded slot, so a dense run of beats recycles the
     // ring that matters least; punch is the hit's pop ratio mapped 0..1
@@ -220,6 +288,8 @@ private:
     float speed = 1.0f;
     float noiseMix = 0.3f;
     float width = 0.07f;
+    float wake = 2.0f;
+    float reflectAmt = 0.6f;
     float travel = 1.0f;
     float sens = 1.0f;
     float glowR = 255, glowG = 255, glowB = 255;
@@ -231,6 +301,7 @@ private:
     float lastSpawn = -1e9f;
     float colorPhase = 0;
     float glowLev = 0;
+    float glowBass = 0;
     float wash = 0;
 };
 

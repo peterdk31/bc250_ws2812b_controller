@@ -136,7 +136,7 @@
                     {
                         "effect": "audio_spectrum",
                         "settings": {
-                            "palette": "00d860,ffc020,ff3020",
+                            "palette": "00e6b4,3a56ff,ff2e88",
                             "peak_color": "ffffff"
                         }
                     }
