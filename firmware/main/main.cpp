@@ -59,19 +59,26 @@
 // how often the strip is re-latched between host frames. Frames arrive as 8.8
 // fixed-point values (see common/protocol.hpp); every latch rounds them to
 // the strip's 8 bits with a fresh ordered threshold (common/dither.hpp), so a
-// sub-code value renders as a duty cycle between adjacent codes. At the
-// ~300-500 Hz this period yields (the serial read's ~2 ms block and the RMT
-// transfer time set the real cadence) the toggling sits far above flicker
-// fusion — the eye sees only the average, so dim gradients glide instead of
-// stepping. A long strip's RMT time (~30 µs/LED) throttles this naturally;
-// that's fine, the rate only needs to stay comfortably above ~200 Hz.
-#define DITHER_REFRESH_US 2000
+// fractional value renders as a duty cycle between adjacent codes. The
+// ~500-900 Hz this period yields (the serial read's ~1 ms block and the RMT
+// transfer time set the real cadence) is the dither's whole budget: the
+// blink-rate floor below can only keep fractions whose pulse rate clears
+// DITHER_MIN_BLINK_HZ, so a faster latch means finer fractions survive. A
+// long strip's RMT time (~30 µs/LED) throttles this naturally; the floor
+// adapts (see refreshStrip), so slow latches degrade to rounding, not flicker.
+#define DITHER_REFRESH_US 1000
 
-// a latch that comes this long after the previous one is too slow to dither
-// invisibly (the duty cycle would read as flicker, not an average) — a very
-// long strip's RMT transfer, or a starved loop. Such latches round to nearest
-// instead: banding comes back, flicker doesn't. Kicks in below ~200 Hz.
-#define SLOW_LATCH_US 5000
+// the slowest pulse rate a dithered fraction may produce. A duty cycle's
+// pulse rate is fraction × latch rate: exact on average, but a near-code
+// value pulses *slowly* — value 2.02 shows code 3 six times a second, and at
+// dim codes each pulse is a huge relative step (code 2→3 is +50%), so it
+// reads as twinkling, not as an average. Fractions whose pulse rate (or gap
+// rate, for near-1 fractions) would land below this floor round to the
+// nearest code instead: a steady, slightly-off level in place of a slow
+// blink. The floor is computed from the actual latch gap, so a starved loop
+// or a very long strip degrades gracefully toward plain rounding — this also
+// replaces the old fixed slow-latch cutoff.
+#define DITHER_MIN_BLINK_HZ 100
 
 // LittleFS mount point and the recording files (one per slot; see
 // common/protocol.hpp).
@@ -396,32 +403,43 @@ void refreshStrip()
 
     ditherTick++;
 
-    // latching too slowly to hide the dither? round this latch to nearest
-    // instead (see SLOW_LATCH_US)
-    bool slow = lastRefreshUs != 0 &&
-                esp_timer_get_time() - lastRefreshUs > SLOW_LATCH_US;
+    // the smallest fraction (in 1/256ths) whose pulse rate at the current
+    // latch cadence still clears DITHER_MIN_BLINK_HZ; fractions closer to a
+    // code than this round to it instead of dithering. The previous latch gap
+    // is the best predictor of the next one; at 128 the band is empty and
+    // every value rounds to nearest (the old slow-latch behavior).
+    uint32_t dtUs = lastRefreshUs != 0
+                        ? (uint32_t)(esp_timer_get_time() - lastRefreshUs)
+                        : DITHER_REFRESH_US;
+    uint32_t fmin =
+        (uint32_t)((uint64_t)dtUs * DITHER_MIN_BLINK_HZ * 256 / 1000000);
+    if (fmin > 128)
+        fmin = 128;
 
     for (uint16_t i = 0; i < count; i++)
     {
         // one threshold for the pixel's three channels, so a dim colour
         // rounds up together and stays on-hue (see common/dither.hpp)
-        uint8_t t = slow ? 128 : dither::threshold(ditherTick, i);
+        uint8_t t = dither::threshold(ditherTick, i);
         uint8_t c[3];
 
         for (int k = 0; k < 3; k++)
         {
             uint32_t v = scratch[i * 3 + k];
+            uint32_t f = v & 0xFF;
 
+            // dither only fractions that pulse above the blink floor — and
             // never duty-cycle against true black: a sub-code value (below
-            // code 1) would render as code-1 flashes on an unlit LED at
-            // fraction × latch rate — a small fraction blinks at tens of Hz,
-            // and at 100% contrast the eye catches every blink (a pale
-            // diffuser makes it glaring; a dark one merely hides it). Round
-            // to nearest instead: a fade tail ends on a steady code 1, then
-            // true zero — the same thing the host viewer shows. Toggling
-            // between two *lit* codes stays dithered; that's the banding the
-            // dither exists to hide, and it has no flash-from-black to catch.
-            uint32_t s = v + (v < 0x100 ? 128u : t);
+            // code 1) would flash an unlit LED at 100% contrast, which the
+            // eye catches even at rates that pass between two lit codes (a
+            // pale diffuser makes it glaring; a dark one merely hides it).
+            // Everything else rounds to nearest — a steady level, the same
+            // thing the host viewer shows.
+            uint32_t s;
+            if (v < 0x100 || f < fmin || f >= 256 - fmin)
+                s = v + 128;
+            else
+                s = v + t;
 
             // values are ≤ 0xFF00 (code*256), so +t can't exceed 0xFFFF;
             // clamp anyway so an out-of-spec value can't wrap to near-black
@@ -760,11 +778,14 @@ void loop()
     // drain whatever the link has and push it through the shared parser
     // (common/receiver.hpp); it carries state across these chunks, recognizes
     // complete frames and calls the StripHandler, which lights the strip
-    // (onPixels) or acts on a command (onCommand). The first read blocks a
-    // couple of ms so an idle loop yields to the RTOS instead of spinning;
-    // once bytes arrive we drain the burst with non-blocking reads.
+    // (onPixels) or acts on a command (onCommand). The first read blocks one
+    // tick so an idle loop yields to the RTOS instead of spinning — kept to
+    // 1 ms because this block plus the RMT transfer is the latch cadence, and
+    // the dither's blink floor eats less resolution the faster we latch (see
+    // DITHER_REFRESH_US). Once bytes arrive we drain the burst with
+    // non-blocking reads.
     uint8_t chunk[256];
-    TickType_t wait = pdMS_TO_TICKS(2);
+    TickType_t wait = pdMS_TO_TICKS(1);
     int n;
     do
     {

@@ -16,11 +16,19 @@
 // fast enough to be invisible. The on-screen viewer shows the plain rounded
 // value instead: on a monitor that IS the average the strip's dither produces.
 //
-// One exception, applied by the receiver at the latch: values below code 1
-// are rounded to nearest, never dithered — duty-cycling an unlit LED means
-// 100%-contrast flashes from black at fraction × latch rate, which the eye
-// catches (through a pale diffuser, glaringly) where a toggle between two
-// lit codes passes unseen.
+// Two exceptions, applied by the receiver at the latch (see refreshStrip):
+//
+//  - values below code 1 are rounded to nearest, never dithered —
+//    duty-cycling an unlit LED means 100%-contrast flashes from black,
+//    which the eye catches (through a pale diffuser, glaringly) at rates
+//    that pass unseen between two lit codes.
+//
+//  - a duty cycle's pulse rate is fraction × latch rate, so a near-code
+//    fraction pulses slowly — value 2.02 would show code 3 a few times a
+//    second, a visible twinkle at dim codes where one step is a big
+//    relative jump. Fractions whose pulse (or gap) rate would fall below
+//    the receiver's blink floor round to the nearest code instead: a
+//    steady, slightly-off level in place of a slow blink.
 namespace dither
 {
 
