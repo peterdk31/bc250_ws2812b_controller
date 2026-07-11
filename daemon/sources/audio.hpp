@@ -428,14 +428,16 @@ public:
             if (!runtimeDir.empty())
                 setenv("XDG_RUNTIME_DIR", runtimeDir.c_str(), 1);
 
-            // the "44100"s below are RATE; execl wants string literals
+            // the "44100"s below are RATE; execl wants string literals.
+            // 10 ms latency keeps chunks shorter than a ~16 ms frame, so
+            // every frame sees fresh samples instead of every other one
             if (!parec.empty())
                 execl(parec.c_str(), "parec", "--raw", "--format=s16le",
-                      "--rate=44100", "--channels=1", "--latency-msec=30",
+                      "--rate=44100", "--channels=1", "--latency-msec=10",
                       "-d", "@DEFAULT_MONITOR@", (char*)nullptr);
             else
                 execl(pwrec.c_str(), "pw-record", "--raw", "--format", "s16",
-                      "--rate", "44100", "--channels", "1",
+                      "--rate", "44100", "--channels", "1", "--latency", "10ms",
                       "-P", "stream.capture.sink=true", "-", (char*)nullptr);
 
             _exit(127);
@@ -669,9 +671,11 @@ private:
                 break;
         }
 
-        // the client delivers ~30 ms chunks against ~16 ms frames, so
-        // empty frames are normal: hold the last measurement briefly,
-        // and only read sustained starvation as silence
+        // the client delivers ~10 ms chunks against ~16 ms frames, so
+        // most frames see fresh samples — but the server may clamp the
+        // latency request, so empty frames still happen: hold the last
+        // measurement briefly, and only read sustained starvation as
+        // silence
         if (total == 0)
         {
             if (clk - lastData > 0.25f)
@@ -722,7 +726,7 @@ private:
     int users = 0;
     float clk = 0;
     float retryAt = 0;
-    float attackSec = 0.035f;
+    float attackSec = 0.02f;
     float releaseSec = 0.3f;
     float gainSeconds = 6.0f;
     float kBass = 0.02f, kTreb = 0.3f;

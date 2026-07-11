@@ -24,7 +24,7 @@
 //   glow_color         RRGGBB the bass crests lean toward (default ffffff)
 //   speed              drift / shimmer rate multiplier (default 1.2)
 //   noise              flow/noise blend 0 (sine flow) .. 1 (noise) (default 0.3)
-//   attack_seconds     level rise time constant (default 0.035)
+//   attack_seconds     level rise time constant (default 0.02)
 //   release_seconds    level fall time constant (default 0.3)
 //   gain_seconds       auto-gain window: how fast "loud" adapts (default 6)
 //   pulse              bass swell/crest strength, 0 disables (default 0.8)
@@ -62,7 +62,7 @@ public:
 
         audio::Levels& lv = audio::Levels::shared();
 
-        lv.configure(cfg.getFloat("attack_seconds", 0.035f),
+        lv.configure(cfg.getFloat("attack_seconds", 0.02f),
                      cfg.getFloat("release_seconds", 0.3f),
                      cfg.getFloat("gain_seconds", 6.0f));
         lv.acquire();

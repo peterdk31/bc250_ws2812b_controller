@@ -83,7 +83,7 @@ public:
 
         audio::Levels& lv = audio::Levels::shared();
 
-        lv.configure(cfg.getFloat("attack_seconds", 0.035f),
+        lv.configure(cfg.getFloat("attack_seconds", 0.02f),
                      cfg.getFloat("release_seconds", 0.3f),
                      cfg.getFloat("gain_seconds", 6.0f));
         lv.acquire();
