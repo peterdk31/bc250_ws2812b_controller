@@ -17,6 +17,11 @@ sensors → rules → effect → frames ──serial──→ RMT ──→ WS28
 ## Hardware
 
 - An ESP32 or ESP32-C3 dev board over USB (`/dev/ttyUSB0` or `/dev/ttyACM0`).
+  **Prefer the C3**: its native USB lets the firmware tell whether the host is
+  actually running, so the boot animation also plays on reboots and on machines
+  that keep standby power on their USB ports. A plain ESP32 can't see any of
+  that over UART and only plays it after a true power cycle (see
+  [How it works](#how-it-works)).
 - A WS2812/WS2812B strip: data to the GPIO set as `strip.pin` (default 13), plus
   5 V and GND from a supply that can handle it (not the board's regulator; share
   grounds).
@@ -79,6 +84,17 @@ pipeline), records them, and uploads them once at startup; the receiver stores
 them and replays them. So editing the boot/shutdown effects also needs no
 reflash — just a daemon restart. A fresh, never-recorded board stays blank
 until the daemon has run once and uploaded the recordings.
+
+*When* the boot animation plays depends on the board. It always runs from chip
+reset until the daemon's first frame. On USB-native chips (the C3 and friends)
+it also re-arms whenever the USB host goes away and comes back — the bus
+keepalives stop for a few seconds and return — which covers a reboot (shutdown
+animation, dark while the host is down, boot animation as it comes back up)
+and a power-on where standby VBUS kept the receiver running the whole time. A
+plain ESP32's UART carries no trace of the host's state, so it shows the boot
+animation only when it genuinely loses power; on a reboot it stays dark after
+the shutdown animation until the daemon returns. If the power-on animation
+matters to you, get a C3.
 
 The serial baud auto-negotiates: if bytes arrive but no frame decodes, the
 receiver cycles through the supported rates until frames validate, then
