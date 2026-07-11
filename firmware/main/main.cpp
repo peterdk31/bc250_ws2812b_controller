@@ -410,9 +410,21 @@ void refreshStrip()
 
         for (int k = 0; k < 3; k++)
         {
+            uint32_t v = scratch[i * 3 + k];
+
+            // never duty-cycle against true black: a sub-code value (below
+            // code 1) would render as code-1 flashes on an unlit LED at
+            // fraction × latch rate — a small fraction blinks at tens of Hz,
+            // and at 100% contrast the eye catches every blink (a pale
+            // diffuser makes it glaring; a dark one merely hides it). Round
+            // to nearest instead: a fade tail ends on a steady code 1, then
+            // true zero — the same thing the host viewer shows. Toggling
+            // between two *lit* codes stays dithered; that's the banding the
+            // dither exists to hide, and it has no flash-from-black to catch.
+            uint32_t s = v + (v < 0x100 ? 128u : t);
+
             // values are ≤ 0xFF00 (code*256), so +t can't exceed 0xFFFF;
             // clamp anyway so an out-of-spec value can't wrap to near-black
-            uint32_t s = (uint32_t)scratch[i * 3 + k] + t;
             c[k] = s >= 0xFF00 ? 255 : (uint8_t)(s >> 8);
         }
 

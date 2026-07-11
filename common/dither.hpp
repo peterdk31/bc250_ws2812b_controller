@@ -15,6 +15,12 @@
 // values and the rounding decision moves to the one place that can make it
 // fast enough to be invisible. The on-screen viewer shows the plain rounded
 // value instead: on a monitor that IS the average the strip's dither produces.
+//
+// One exception, applied by the receiver at the latch: values below code 1
+// are rounded to nearest, never dithered — duty-cycling an unlit LED means
+// 100%-contrast flashes from black at fraction × latch rate, which the eye
+// catches (through a pale diffuser, glaringly) where a toggle between two
+// lit codes passes unseen.
 namespace dither
 {
 
