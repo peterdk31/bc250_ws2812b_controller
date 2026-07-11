@@ -465,22 +465,37 @@ bool loadRecording(uint8_t slot, rec::Recording& out)
 
 void saveRecording(uint8_t slot, const rec::Recording& r)
 {
-    FILE* f = fopen(recPath(slot), "wb");
+    // write to a temp file and rename over the slot only if every byte
+    // landed: LittleFS's rename is atomic, so an interrupted write (power
+    // cut, esptool reset mid-upload) can never leave a valid-looking header
+    // over truncated data — the slot keeps its previous recording instead
+    char tmp[40];
+    snprintf(tmp, sizeof tmp, "%s.tmp", recPath(slot));
+
+    FILE* f = fopen(tmp, "wb");
     if (!f)
         return;
 
     uint8_t hdr[rec::Recording::kHeaderLen];
     r.encodeHeader(hdr);
-    fwrite(hdr, 1, sizeof hdr, f);
+    bool ok = fwrite(hdr, 1, sizeof hdr, f) == sizeof hdr;
 
-    if (!r.data.empty())
-        fwrite(r.data.data(), 1, r.data.size(), f);
+    if (ok && !r.data.empty())
+        ok = fwrite(r.data.data(), 1, r.data.size(), f) == r.data.size();
 
-    fclose(f);
+    ok = (fclose(f) == 0) && ok;
+
+    if (ok)
+        rename(tmp, recPath(slot));
+    else
+        remove(tmp);
 }
 
 // the hash stored in a slot's file, or 0 if missing/invalid; lets begin()
-// decide whether an upload is unchanged without reading the whole file
+// decide whether an upload is unchanged without reading the whole file. The
+// hash counts only when the file's size matches what its header declares, so
+// a truncated file (however it got that way) reads as "different" and the
+// incoming upload rewrites it instead of being skipped forever
 uint32_t storedHash(uint8_t slot)
 {
     FILE* f = fopen(recPath(slot), "rb");
@@ -488,10 +503,19 @@ uint32_t storedHash(uint8_t slot)
         return 0;
 
     uint8_t hdr[rec::Recording::kHeaderLen];
-    bool ok = fread(hdr, 1, sizeof hdr, f) == sizeof hdr;
-    fclose(f);
+    uint32_t h = 0;
 
-    return ok ? rec::Recording::headerHash(hdr) : 0;
+    if (fread(hdr, 1, sizeof hdr, f) == sizeof hdr)
+    {
+        rec::Recording meta;
+        if (meta.decodeHeader(hdr) && fseek(f, 0, SEEK_END) == 0 &&
+            ftell(f) == (long)(sizeof hdr +
+                               (size_t)meta.frameCount * meta.frameBytes()))
+            h = rec::Recording::headerHash(hdr);
+    }
+
+    fclose(f);
+    return h;
 }
 
 // start replaying whatever is in `active`, re-initing the strip if the
