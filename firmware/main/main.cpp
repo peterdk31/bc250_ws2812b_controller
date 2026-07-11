@@ -104,6 +104,16 @@
 #define HOST_TIMEOUT_MS 5000
 #endif
 
+// host-restart detection (USB Serial/JTAG links only): a running host's USB
+// controller sends SOF keepalives every millisecond, and the driver exposes
+// their presence as usb_serial_jtag_is_connected(). When they stop for this
+// long the host is powered off or rebooting — the receiver itself usually
+// stays powered (standby VBUS), so without this it would never replay the
+// power-on recording again. When the keepalives return after such a gap, the
+// loop re-arms the boot replay as if freshly reset. Long enough to ride out
+// brief bus resets (re-enumeration takes ~1 s); a real power-down is minutes.
+#define HOST_GONE_MS 3000
+
 // when bytes keep arriving but never form a valid frame, the host is probably
 // talking at another rate: step through the candidates (the same set the
 // host's baudToSpeed() supports) until frames decode. Even the slowest replay
@@ -190,6 +200,19 @@ void flushInput()
     }
 }
 #endif
+
+// whether a USB host is currently driving the bus (SOF keepalives seen).
+// A UART can't observe its host, so that build always reports true and the
+// host-restart re-arm below never fires there — a plain ESP32 gets reset by
+// the port-open/power-cycle instead.
+bool hostPresent()
+{
+#if LINK_UART
+    return true;
+#else
+    return usb_serial_jtag_is_connected();
+#endif
+}
 } // namespace link
 
 // --- NVS (the old Preferences store) ----------------------------------------
@@ -237,6 +260,10 @@ uint8_t currentPin = 13;
 // sends a shutdown command and exits.
 bool hostSeen = false;
 bool shuttingDown = false; // replaying the shutdown recording (host has gone)
+
+// host-restart detection state (see HOST_GONE_MS; only moves on USB links)
+uint32_t usbSilentSince = 0; // millis() when SOF keepalives stopped (0 = present)
+bool usbHostLost = false;    // keepalives have been gone > HOST_GONE_MS
 
 // the recording currently playing (held in RAM so re-recording its on-flash
 // file can never race playback), and the shared stepper that paces it
@@ -605,6 +632,11 @@ struct StripHandler : proto::FrameHandler
         blanked = false;
         hostSeen = true;
 
+        // a live frame is the strongest "host is here" signal; drop any
+        // pending host-restart re-arm so it can't hijack the stream
+        usbHostLost = false;
+        usbSilentSince = 0;
+
         // the host is (back) in control: drop any standalone replay and free
         // its RAM, and clear the shutdown latch so a stop/start resumes cleanly
         shuttingDown = false;
@@ -731,6 +763,44 @@ void loop()
     } while (n == (int)sizeof chunk);
 
     unsigned long now = millis();
+
+    // notice the host going away and coming back (USB links; see HOST_GONE_MS).
+    // When it returns after a real absence, re-arm the power-on replay exactly
+    // as if this chip had been reset: a host restart shows the boot animation
+    // even though the receiver never lost power. Gated on hostSeen so a cold
+    // boot — where the replay is already running while the host is still
+    // enumerating — isn't restarted midway.
+    if (!link::hostPresent())
+    {
+        if (usbSilentSince == 0)
+            usbSilentSince = now ? now : 1;
+        else if (!usbHostLost && now - usbSilentSince > HOST_GONE_MS)
+            usbHostLost = true;
+    }
+    else
+    {
+        usbSilentSince = 0;
+
+        if (usbHostLost)
+        {
+            usbHostLost = false;
+
+            if (hostSeen)
+            {
+                hostSeen = false;
+                shuttingDown = false;
+                blanked = false;
+                replayXms = 0;
+
+                // drop any half-parsed leftovers from the previous session
+                receiver.reset();
+                link::flushInput();
+
+                if (loadRecording(proto::SLOT_POWER_ON, active))
+                    beginReplay();
+            }
+        }
+    }
 
     // only after the host has talked once, and only when no shutdown replay
     // owns the strip: a silent host that never sent a shutdown command (a
