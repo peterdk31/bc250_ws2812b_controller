@@ -89,7 +89,11 @@ static void recordAndUpload(const Config& cfg, const Strip& strip,
         rec::Recording r;
 
         if (rec::record(cfg, strip, slot.path, r))
+        {
+            fprintf(stderr, "recorded %s: %u frames @ %u ms; uploading\n",
+                    slot.path, r.frameCount, r.frameMs);
             rec::upload(sinks, slot.id, r);
+        }
     }
 }
 
