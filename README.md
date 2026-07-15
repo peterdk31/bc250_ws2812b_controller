@@ -379,12 +379,14 @@ minus its WiFi/BLE):
   board boots.
 - **Hold** for 5 s while on → PS_ON# is released — a hard power-off for a
   wedged machine.
-- With the optional **sense** wire (BC-250: TPMS1 pin 9, ~3.3 V while the
-  board is up): a graceful OS shutdown is followed down (the sense line drops,
-  the receiver releases PS_ON# so the PSU turns off too), and a board that
-  never comes up within 10 s releases the PSU instead of leaving it energized.
-  Without the wire, both are skipped: after an OS shutdown the PSU stays on
-  until the next long-press.
+- With the **sense** wire (BC-250: TPMS1 pin 9, ~2.9 V while the board is
+  up): a graceful OS shutdown is followed down (the sense line drops, the
+  receiver releases PS_ON# so the PSU turns off too), and a board that never
+  comes up within 10 s releases the PSU instead of leaving it energized.
+  The wire is optional but strongly recommended — without it both are
+  skipped, and after every OS shutdown the PSU stays energized, holding
+  PS_ON#, until a 5 s long-press; what's left is less a power button than a
+  toggle that sticks on.
 
 Wiring (ESP32-C3 defaults shown; every pin is a `PWR_*` make variable):
 
@@ -394,7 +396,24 @@ Wiring (ESP32-C3 defaults shown; every pin is a `PWR_*` make variable):
 | GPIO2 (`PWR_BUTTON`) | momentary switch terminal A (internal pull-up, pressed = low) |
 | GPIO1 (`PWR_BUTTON_GND`, -1 if the switch is wired to a real GND) | switch terminal B — driven low as a local ground, so the button needs no run to a real GND |
 | GPIO0 (`PWR_SENSE`, -1 = not wired) | board-power sense, e.g. BC-250 TPMS1 pin 9 — read as an averaged ADC voltage with hysteresis (`PWR_SENSE_LOW`/`PWR_SENSE_HIGH` mV), the line is too soft for a digital read |
-| 5VSB + GND | PSU standby rail, so the receiver runs while the machine is off |
+| 5VSB + GND | PSU standby rail, so the receiver runs while the machine is off — **read the warning below before also plugging in USB** |
+
+> ⚠️ **Critical — 5VSB and USB at the same time.** In this role the receiver
+> is powered from 5VSB *and* still plugged into the host's USB for the LED
+> link. That is two hard-paralleled 5 V supplies: most dev boards tie the USB
+> connector's VBUS straight to their 5 V pin, so whichever rail sits higher
+> pushes current into the other with nothing to limit it. Whenever the
+> machine is off — the normal state for a power button — that means the
+> receiver back-feeds the host's **dead** USB port continuously: current
+> flows backwards through the port's VBUS circuitry (which is not designed
+> for it and can be damaged) and phantom-powers part of the motherboard's
+> 5 V rail off the PSU's small standby supply. **Cut or unpin the 5 V wire
+> (red) in the USB cable**; keep D+, D− and GND. The receiver then runs
+> solely from 5VSB and USB still works fully as a self-powered device —
+> flashing, the LED link and the USB host-presence detection are unaffected.
+> Some dev boards do have a protection diode between the USB jack and the
+> 5 V pin, which blocks the back-feed — but many compact clones don't, so
+> don't bet the port on it.
 
 Two pin caveats: GPIO2 is a C3 *strapping pin* — the pull-up keeps it happy,
 but a button held down through a chip reset (or while entering flash mode)
@@ -410,7 +429,19 @@ prebuilt image works and pins change without touching source. `PWR=on` writes
 the partition alongside a normal flash, and `make flash-pwr` writes *only*
 that partition — re-pinning takes a couple of seconds and keeps the installed
 firmware. Once written, the settings survive reflashes (a plain `make flash`
-never touches them):
+never touches them). Two guardrails to know about:
+
+- **The firmware must be v1.6.0 or newer** — that's where the `pwrcfg`
+  partition first exists. `make flash-pwr` against an older installed
+  firmware (or `PWR=on` with an older `FW_RELEASE` pinned) writes a sector
+  that firmware never reads: a silent no-op. Update the firmware itself
+  first.
+- The wiring is validated before anything is written: `tools/pwrcfg.py`
+  rejects pins the firmware would silently drop (nonexistent on `TARGET`,
+  SPI-flash or host-link pads, a non-ADC sense pin, a collision with the
+  `strip.pin` LED data pin) and nonsense tunings (inverted hysteresis
+  thresholds). The receiver has no console, so a config it can't use would
+  otherwise just look like a dead button.
 
 ```sh
 sudo make flash PWR=on                        # flash firmware + default wiring

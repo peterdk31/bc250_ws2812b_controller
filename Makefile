@@ -27,6 +27,7 @@ CONFIG ?= $(firstword $(wildcard /etc/led-controller/config.json config.json))
 CONFIG_GET = ./led --config-get $(CONFIG)
 BAUD ?= $(or $(shell $(CONFIG_GET) sinks.serial.baud 2>/dev/null),921600)
 TIMEOUT_MS ?= $(or $(shell $(CONFIG_GET) esp32.host_timeout_ms 2>/dev/null),5000)
+STRIP_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),13)
 
 # ATX power switch (README "Power switch"): the wiring lives in the receiver's
 # small `pwrcfg` flash partition, not in the firmware image, so it's chosen at
@@ -220,13 +221,18 @@ PWRCFG_OFF = $(shell awk -F, '$$1=="pwrcfg" {gsub(/ /,""); print $$4}' firmware/
 PWRCFG_BIN = firmware/dist/pwrcfg.bin
 # shell snippet (companion to ESPTOOL_RESOLVE): when PWR is set, encode the
 # PWR_* vars into $(PWRCFG_BIN) and set $$pwr to the extra offset+file pair for
-# esptool write_flash; empty otherwise. Absolute path — flash-source runs
-# esptool from the build dir.
+# esptool write_flash; empty otherwise. pwrcfg.py refuses wiring the firmware
+# would silently drop (bad pin for TARGET, non-ADC sense, collision with the
+# strip.pin data pin, ...) — the firmware has no console, so this is the only
+# place a mistake can be caught. Absolute path — flash-source runs esptool
+# from the build dir.
 PWRCFG_RESOLVE = pwr=""; \
 	if [ -n "$(PWR)" ]; then \
 		case "$(PWR)" in on|off) ;; *) echo 'PWR must be "on" or "off" (see README, Power switch)'; exit 1;; esac; \
+		[ -n "$(PWRCFG_OFF)" ] || { echo "no pwrcfg offset found in firmware/partitions.csv"; exit 1; }; \
 		mkdir -p firmware/dist; \
 		python3 tools/pwrcfg.py --out "$(PWRCFG_BIN)" $(if $(filter off,$(PWR)),--disabled) \
+			--target $(TARGET) --strip-pin $(STRIP_PIN) \
 			--ps-on $(PWR_PS_ON) --button $(PWR_BUTTON) --button-gnd $(PWR_BUTTON_GND) \
 			--sense $(PWR_SENSE) --hold $(PWR_HOLD) --boot-timeout $(PWR_BOOT_TIMEOUT) \
 			--sense-low $(PWR_SENSE_LOW) --sense-high $(PWR_SENSE_HIGH) || exit 1; \
