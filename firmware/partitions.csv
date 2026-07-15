@@ -7,8 +7,12 @@
 #
 # Minimal 4 MB layout: a single factory app (no OTA — we always flash over
 # USB/serial) and a 2 MB storage partition. nvs holds the receiver's saved baud
-# and strip geometry.
+# and strip geometry. pwrcfg is a 4 KB sector holding the power-switch wiring
+# (see power_switch.cpp), written at flash time by `make flash PWR=on` /
+# `make flash-pwr` — its own partition so it survives app reflashes and needs
+# no toolchain to write.
 # Name,     Type, SubType,  Offset,   Size,     Flags
 nvs,        data, nvs,      0x9000,   0x7000,
-factory,    app,  factory,  0x10000,  0x1F0000,
+factory,    app,  factory,  0x10000,  0x1EF000,
+pwrcfg,     data, 0x40,     0x1FF000, 0x1000,
 storage,    data, spiffs,   0x200000, 0x200000,

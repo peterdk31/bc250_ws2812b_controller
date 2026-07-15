@@ -28,6 +28,25 @@ CONFIG_GET = ./led --config-get $(CONFIG)
 BAUD ?= $(or $(shell $(CONFIG_GET) sinks.serial.baud 2>/dev/null),921600)
 TIMEOUT_MS ?= $(or $(shell $(CONFIG_GET) esp32.host_timeout_ms 2>/dev/null),5000)
 
+# ATX power switch (README "Power switch"): the wiring lives in the receiver's
+# small `pwrcfg` flash partition, not in the firmware image, so it's chosen at
+# flash time and survives reflashes. PWR=on writes it alongside `flash` /
+# `flash-source` (PWR=off writes it disabled); unset leaves whatever is on the
+# chip. `make flash-pwr` writes only that partition — change pins in seconds
+# without touching the app. The defaults are this project's BC-250 hookup on
+# an ESP32-C3 (note GPIO2 is a C3 strapping pin: fine with the pull-up, but a
+# button held through a reset keeps the chip from booting until released; and
+# a plain ESP32 needs different pins — GPIO1/3 are its UART0, 0/2 strapping).
+PWR ?=
+PWR_PS_ON ?= 3
+PWR_BUTTON ?= 2
+PWR_BUTTON_GND ?= 1
+PWR_SENSE ?= 0
+PWR_HOLD ?= 5
+PWR_BOOT_TIMEOUT ?= 10
+PWR_SENSE_LOW ?= 800
+PWR_SENSE_HIGH ?= 2000
+
 # PORT: config (or a command-line override) is authoritative; detection only
 # fills a gap. Resolution order: command-line override > configured
 # sinks.serial.port > first likely device node > default. Config wins over
@@ -196,6 +215,24 @@ ESPTOOL_RESOLVE = tool="$(ESPTOOL)"; \
 	[ -n "$$tool" ] || { python3 -c 'import esptool' >/dev/null 2>&1 && tool="python3 -m esptool"; }; \
 	[ -n "$$tool" ] || { echo "esptool not found on host (it's tiny — 'pipx install esptool' or 'pip install --user esptool')"; exit 1; }
 
+# the pwrcfg partition's offset, read from the table itself so it can't drift
+PWRCFG_OFF = $(shell awk -F, '$$1=="pwrcfg" {gsub(/ /,""); print $$4}' firmware/partitions.csv)
+PWRCFG_BIN = firmware/dist/pwrcfg.bin
+# shell snippet (companion to ESPTOOL_RESOLVE): when PWR is set, encode the
+# PWR_* vars into $(PWRCFG_BIN) and set $$pwr to the extra offset+file pair for
+# esptool write_flash; empty otherwise. Absolute path — flash-source runs
+# esptool from the build dir.
+PWRCFG_RESOLVE = pwr=""; \
+	if [ -n "$(PWR)" ]; then \
+		case "$(PWR)" in on|off) ;; *) echo 'PWR must be "on" or "off" (see README, Power switch)'; exit 1;; esac; \
+		mkdir -p firmware/dist; \
+		python3 tools/pwrcfg.py --out "$(PWRCFG_BIN)" $(if $(filter off,$(PWR)),--disabled) \
+			--ps-on $(PWR_PS_ON) --button $(PWR_BUTTON) --button-gnd $(PWR_BUTTON_GND) \
+			--sense $(PWR_SENSE) --hold $(PWR_HOLD) --boot-timeout $(PWR_BOOT_TIMEOUT) \
+			--sense-low $(PWR_SENSE_LOW) --sense-high $(PWR_SENSE_HIGH) || exit 1; \
+		pwr="$(PWRCFG_OFF) $(CURDIR)/$(PWRCFG_BIN)"; \
+	fi
+
 # prebuilt firmware images published to GitHub Releases by .github/workflows/
 # firmware.yml. `make flash` downloads the merged image for TARGET and writes it,
 # so the common case needs no ESP-IDF and no container — just esptool. Pin a
@@ -240,7 +277,7 @@ receiver: led receiver-toolchain
 # the unit covers the normal case; fuser -k clears a hand-started daemon.
 flash:
 	-@$(MAKE) --no-print-directory serial-perms
-	@$(ESPTOOL_RESOLVE); \
+	@$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); \
 	mkdir -p firmware/dist; img="firmware/dist/$(FW_BIN)"; \
 	echo "fetching $(FW_URL)"; \
 	if command -v curl >/dev/null 2>&1; then fetch="curl -fSL -o $$img $(FW_URL)"; \
@@ -257,7 +294,7 @@ flash:
 		fuser -v $(PORT) || true; fuser -k $(PORT) || true; sleep 1; \
 	fi; \
 	echo "flashing $(TARGET) via $$tool on $(PORT)"; \
-	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash 0x0 "$$img"; \
+	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash 0x0 "$$img" $$pwr; \
 	rc=$$?; \
 	[ $$active = 1 ] && systemctl start led-controller; \
 	exit $$rc
@@ -270,7 +307,7 @@ flash:
 flash-source: receiver
 	-@$(MAKE) --no-print-directory serial-perms
 	@[ -f "$(RECEIVER_BUILD)/flash_args" ] || { echo "flash_args missing in $(RECEIVER_BUILD) (did the build run?)"; exit 1; }; \
-	$(ESPTOOL_RESOLVE); \
+	$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); \
 	active=0; systemctl is-active --quiet led-controller && active=1; \
 	[ $$active = 1 ] && systemctl stop led-controller; \
 	if command -v fuser >/dev/null 2>&1 && fuser $(PORT) >/dev/null 2>&1; then \
@@ -278,7 +315,27 @@ flash-source: receiver
 		fuser -v $(PORT) || true; fuser -k $(PORT) || true; sleep 1; \
 	fi; \
 	echo "flashing $(TARGET) via $$tool on $(PORT)"; \
-	( cd "$(RECEIVER_BUILD)" && $$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash @flash_args ); \
+	( cd "$(RECEIVER_BUILD)" && $$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash @flash_args $$pwr ); \
+	rc=$$?; \
+	[ $$active = 1 ] && systemctl start led-controller; \
+	exit $$rc
+
+# write only the 4 KB pwrcfg partition: enable, re-pin or disable the power
+# switch without reflashing the firmware (a couple of seconds). Requires
+# PWR=on or PWR=off. Note esptool still resets the chip — the reflashing
+# caveat in the README (Power switch) applies here too.
+flash-pwr:
+	-@$(MAKE) --no-print-directory serial-perms
+	@[ -n "$(PWR)" ] || { echo 'set PWR=on (write the wiring, PWR_* vars override defaults) or PWR=off (disable)'; exit 1; }; \
+	$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); \
+	active=0; systemctl is-active --quiet led-controller && active=1; \
+	[ $$active = 1 ] && systemctl stop led-controller; \
+	if command -v fuser >/dev/null 2>&1 && fuser $(PORT) >/dev/null 2>&1; then \
+		echo "$(PORT) still held after stopping the service; freeing it:"; \
+		fuser -v $(PORT) || true; fuser -k $(PORT) || true; sleep 1; \
+	fi; \
+	echo "writing power-switch config ($(PWR)) via $$tool on $(PORT)"; \
+	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash $$pwr; \
 	rc=$$?; \
 	[ $$active = 1 ] && systemctl start led-controller; \
 	exit $$rc
@@ -289,4 +346,4 @@ receiver-clean:
 	rm -rf firmware/build firmware/build-* firmware/dist $(IDF_GENERATED)
 	-@[ -n "$(CONTAINER)" ] && $(CONTAINER) rmi $(IDF_IMAGE) 2>/dev/null || true
 
-.PHONY: all install install-config uninstall clean udev-rule serial-perms receiver-toolchain receiver receiver-clean flash flash-source
+.PHONY: all install install-config uninstall clean udev-rule serial-perms receiver-toolchain receiver receiver-clean flash flash-source flash-pwr

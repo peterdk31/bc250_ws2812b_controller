@@ -15,6 +15,10 @@
 //   render.*       strip output: led_strip device, crossfade blend, dither
 //   rec_store.*    the boot/shutdown recordings on LittleFS
 //   led_service.*  the protocol endpoint, baud hunt, host liveness, replay
+//
+// power_switch.* is the first such sibling feature: the ATX PS_ON# power
+// button, its own task with its own NVS namespace, wiring read from the
+// `pwrcfg` flash partition — the two services never touch.
 // The wire protocol, framing, recording format/replay and crossfading are the
 // shared common/ code the daemon also compiles (on the include path — see
 // CMakeLists.txt).
@@ -30,18 +34,24 @@
 #include "nvs_flash.h"
 
 #include "led_service.hpp"
+#include "power_switch.hpp"
 #include "rec_store.hpp" // LFS_BASE
 
 extern "C" void app_main(void)
 {
-    // NVS (backs prefs.*). Re-init after erasing if the partition is from an
-    // old layout or full.
+    // NVS (backs prefs.* and the power switch). Re-init after erasing if the
+    // partition is from an old layout or full.
     esp_err_t nerr = nvs_flash_init();
     if (nerr == ESP_ERR_NVS_NO_FREE_PAGES || nerr == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
         nvs_flash_erase();
         nvs_flash_init();
     }
+
+    // the power switch first, before the (slower) filesystem mount: if this is
+    // a reset that interrupted an asserted PS_ON#, the board's power is
+    // floating on the PSU's pull-up until start() re-asserts it
+    pwr::start();
 
     // LittleFS on the "storage" partition; format on first boot if unformatted
     esp_vfs_littlefs_conf_t lc = {};

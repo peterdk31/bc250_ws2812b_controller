@@ -7,9 +7,9 @@
 # requirements automatically, so they don't need listing here.
 idf_component_register(
     SRCS "main.cpp" "link.cpp" "prefs.cpp" "render.cpp" "rec_store.cpp"
-         "led_service.cpp"
+         "led_service.cpp" "power_switch.cpp"
     INCLUDE_DIRS "." "${CMAKE_CURRENT_LIST_DIR}/../../common"
-    REQUIRES driver nvs_flash esp_timer
+    REQUIRES driver nvs_flash esp_timer esp_adc esp_partition
 )
 
 # HOST_BAUD and HOST_TIMEOUT_MS are baked in so the receiver and daemon agree on

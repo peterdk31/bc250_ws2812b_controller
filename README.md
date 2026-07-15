@@ -25,6 +25,9 @@ sensors → rules → effect → frames ──serial──→ RMT ──→ WS28
 - A WS2812/WS2812B strip: data to the GPIO set as `strip.pin` (default 13), plus
   5 V and GND from a supply that can handle it (not the board's regulator; share
   grounds).
+- Optionally, a momentary power button and a wire to the PSU's PS_ON# line —
+  the receiver can then stand in for the PS_ON→GND jumper an ATX/FSP supply
+  needs before it starts (see [Power switch](#power-switch)).
 
 ## Getting started
 
@@ -362,6 +365,87 @@ Preview a slot exactly as the receiver will replay it, without hardware:
 make virtual-strip && ./virtual-strip                    # one terminal
 LED_PORT=none ./led config.json --preview power_on       # another
 ```
+
+## Power switch
+
+An ATX/FSP supply (like the BC-250's FSP500-30AS) doesn't start until its
+PS_ON# line (the green wire) is pulled to ground — normally a permanent
+jumper. With the receiver powered from the PSU's **5VSB** standby rail, it can
+drive that line instead and act as the machine's power button
+(after [Thunkar/bc250-esp32-switch](https://github.com/Thunkar/bc250-esp32-switch),
+minus its WiFi/BLE):
+
+- **Tap** the button while off → PS_ON# is sunk to ground, the PSU starts, the
+  board boots.
+- **Hold** for 5 s while on → PS_ON# is released — a hard power-off for a
+  wedged machine.
+- With the optional **sense** wire (BC-250: TPMS1 pin 9, ~3.3 V while the
+  board is up): a graceful OS shutdown is followed down (the sense line drops,
+  the receiver releases PS_ON# so the PSU turns off too), and a board that
+  never comes up within 10 s releases the PSU instead of leaving it energized.
+  Without the wire, both are skipped: after an OS shutdown the PSU stays on
+  until the next long-press.
+
+Wiring (ESP32-C3 defaults shown; every pin is a `PWR_*` make variable):
+
+| receiver pin | connects to |
+|---|---|
+| GPIO3 (`PWR_PS_ON`) | PS_ON# — driven open-drain, so the PSU's internal 5 V pull-up is never fought |
+| GPIO2 (`PWR_BUTTON`) | momentary switch terminal A (internal pull-up, pressed = low) |
+| GPIO1 (`PWR_BUTTON_GND`, -1 if the switch is wired to a real GND) | switch terminal B — driven low as a local ground, so the button needs no run to a real GND |
+| GPIO0 (`PWR_SENSE`, -1 = not wired) | board-power sense, e.g. BC-250 TPMS1 pin 9 — read as an averaged ADC voltage with hysteresis (`PWR_SENSE_LOW`/`PWR_SENSE_HIGH` mV), the line is too soft for a digital read |
+| 5VSB + GND | PSU standby rail, so the receiver runs while the machine is off |
+
+Two pin caveats: GPIO2 is a C3 *strapping pin* — the pull-up keeps it happy,
+but a button held down through a chip reset (or while entering flash mode)
+stops the chip booting until it's released. And the defaults are C3-specific:
+on a plain ESP32, GPIO1/3 are its UART0 console and 0/2 are strapping pins —
+pick different ones. If the sense wire isn't connected, set `PWR_SENSE=-1`
+rather than leaving the input floating: a floating ADC pin reads noise, and
+the boot timeout may cut the PSU seconds after every power-on.
+
+The feature is **off until opted into at flash time**: the settings live in a
+small dedicated flash partition (`pwrcfg`), not in the firmware image, so the
+prebuilt image works and pins change without touching source. `PWR=on` writes
+the partition alongside a normal flash, and `make flash-pwr` writes *only*
+that partition — re-pinning takes a couple of seconds and keeps the installed
+firmware. Once written, the settings survive reflashes (a plain `make flash`
+never touches them):
+
+```sh
+sudo make flash PWR=on                        # flash firmware + default wiring
+sudo make flash-pwr PWR=on PWR_SENSE=-1       # re-pin only (e.g. no sense wire)
+sudo make flash-pwr PWR=on PWR_HOLD=8         # timings too (seconds)
+sudo make flash-pwr PWR=off                   # disable the feature
+
+# the prebuilt image with every setting spelled out (values shown are the
+# defaults — name only the ones you change)
+sudo make flash PWR=on \
+    PWR_PS_ON=3 PWR_BUTTON=2 PWR_BUTTON_GND=1 PWR_SENSE=0 \
+    PWR_HOLD=5 PWR_BOOT_TIMEOUT=10 \
+    PWR_SENSE_LOW=800 PWR_SENSE_HIGH=2000
+```
+
+The switch runs standalone — no daemon involved; the button matters exactly
+when the host is off. Disabling with `PWR=off` releases an asserted PS_ON#
+once the receiver reboots into the new setting — put the jumper back first if
+the machine's power already hangs on the receiver.
+
+**Reflashing caveat:** once the machine's power hangs on this pin, remember
+that flashing the receiver *from that machine* resets the chip mid-write. On
+a **C3** the firmware defends itself: the asserted level is latched in the
+always-on pad domain (`gpio_hold_en`) so it rides through the chip's internal
+resets — including into the flashing ROM — and on any reboot that isn't a true
+loss of standby power the intent is also restored from flash first thing at
+boot. Still, verify a `make flash` on your wiring once — with a temporary
+PS_ON→GND jumper in place — before trusting it with unsaved work. On a
+**plain ESP32 neither defense works for flashing**: esptool resets it by
+pulling the EN pin, a genuine chip power cycle that drops pad holds and reads
+as a power-on reset. Flash one from another machine or with the jumper in
+place. (Crashes/watchdog resets are still ridden out there too, provided
+the PS_ON pin is one of its RTC-capable pins: 0, 2, 4, 12–15, 25–27, 32, 33.)
+After a genuine 5VSB power loss the machine always stays off until the button
+is pressed.
 
 ## Previewing without hardware
 
