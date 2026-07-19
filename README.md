@@ -394,7 +394,7 @@ Wiring (ESP32-C3 defaults shown; every pin is a `PWR_*` make variable):
 |---|---|
 | GPIO3 (`PWR_PS_ON`) | PS_ON# — driven open-drain, so the PSU's internal 5 V pull-up is never fought |
 | GPIO0 (`PWR_BUTTON`) | momentary switch terminal A (internal pull-up, pressed = low) |
-| GPIO1 (`PWR_BUTTON_GND`, -1 if the switch is wired to a real GND) | switch terminal B — driven low as a local ground, so the button needs no run to a real GND |
+| GPIO21 (`PWR_BUTTON_GND`, -1 if the switch is wired to a real GND) | switch terminal B — driven low as a local ground, so the button needs no run to a real GND. (U0TXD: free while the host link is USB) |
 | GPIO2 (`PWR_SENSE`, -1 = not wired) | optional board-power sense, e.g. BC-250 TPMS1 pin 9 — read as an averaged ADC voltage with hysteresis (`PWR_SENSE_LOW`/`PWR_SENSE_HIGH` mV), the line is too soft for a digital read |
 | GPIO8 (`PWR_LED`, -1 = none) | optional feedback: the board's own little LED *blinks* while the button reads pressed, so button wiring can be eyeballed without a PSU. GPIO8 is the plain onboard LED on common C3 dev boards; a blink shows regardless of the LED's polarity |
 | 5VSB + GND | PSU standby rail, so the receiver runs while the machine is off — **read the warning below before also plugging in USB** |
@@ -457,7 +457,7 @@ sudo make flash-pwr PWR=off                   # disable the feature
 # the prebuilt image with every setting spelled out (values shown are the
 # defaults — name only the ones you change)
 sudo make flash PWR=on \
-    PWR_PS_ON=3 PWR_BUTTON=0 PWR_BUTTON_GND=1 PWR_SENSE=2 PWR_LED=8 \
+    PWR_PS_ON=3 PWR_BUTTON=0 PWR_BUTTON_GND=21 PWR_SENSE=2 PWR_LED=8 \
     PWR_HOLD=5 PWR_BOOT_TIMEOUT=10 \
     PWR_SENSE_LOW=800 PWR_SENSE_HIGH=2000
 ```
