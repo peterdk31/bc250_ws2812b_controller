@@ -31,6 +31,10 @@ import sys
 #               unreliable per errata — deliberately excluded
 #   hold:       pins where gpio_hold_en can latch PS_ON# through a reset; on
 #               the plain ESP32 only the RTC-capable ones. None = every pin
+#   strap:      strapping pins, sampled for boot mode at reset. Only checked
+#               for the sense wire: that line is driven low whenever the
+#               machine is off, so a cold standby power-up can strap a
+#               wrong/invalid boot mode (the button idles high and is fine)
 #   reserved:   pins this project already talks to the host on
 CHIPS = {
     'esp32c3': dict(
@@ -39,6 +43,7 @@ CHIPS = {
         input_only=set(),
         adc={0, 1, 2, 3, 4},
         hold=None,
+        strap={2, 8, 9},
         reserved={18: 'USB D- (the host link)', 19: 'USB D+ (the host link)'},
     ),
     'esp32': dict(
@@ -48,6 +53,7 @@ CHIPS = {
         adc={32, 33, 34, 35, 36, 37, 38, 39,        # ADC1
              0, 2, 4, 12, 13, 14, 15, 25, 26, 27},  # ADC2 (fine: no WiFi here)
         hold={0, 2, 4, 12, 13, 14, 15, 25, 26, 27, 32, 33},
+        strap={0, 2, 5, 12, 15},
         reserved={1: 'UART0 TX (the host link)', 3: 'UART0 RX (the host link)'},
     ),
 }
@@ -67,10 +73,10 @@ p.add_argument('--target', default='',
 p.add_argument('--strip-pin', type=int, default=-1,
                help='the LED data pin (strip.pin), to catch collisions')
 p.add_argument('--ps-on', type=int, default=3, help='PS_ON# pin (open-drain)')
-p.add_argument('--button', type=int, default=2, help='momentary button pin')
+p.add_argument('--button', type=int, default=0, help='momentary button pin')
 p.add_argument('--button-gnd', type=int, default=1,
                help="local ground for the button's second terminal, -1 = real GND")
-p.add_argument('--sense', type=int, default=0,
+p.add_argument('--sense', type=int, default=2,
                help='board-power sense pin (ADC), -1 = not wired')
 p.add_argument('--hold', type=float, default=5,
                help='seconds to hold the button to force off')
@@ -154,6 +160,12 @@ if not a.disabled and not errors:
                           f'{a.target} — the firmware would silently run '
                           'without sense (no shutdown follow-down, no boot '
                           'timeout)')
+        elif flag == '--sense' and v in chip['strap']:
+            warnings.append(
+                f'--sense {v}: GPIO{v} is a strapping pin on {a.target}, and '
+                'the sense line is low whenever the machine is off — a cold '
+                'standby power-up can strap a wrong boot mode and keep the '
+                'chip (and the button) dead until the line drifts high')
         if flag == '--ps-on' and chip['hold'] is not None \
                 and v not in chip['hold']:
             warnings.append(

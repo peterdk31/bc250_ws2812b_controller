@@ -393,9 +393,9 @@ Wiring (ESP32-C3 defaults shown; every pin is a `PWR_*` make variable):
 | receiver pin | connects to |
 |---|---|
 | GPIO3 (`PWR_PS_ON`) | PS_ON# — driven open-drain, so the PSU's internal 5 V pull-up is never fought |
-| GPIO2 (`PWR_BUTTON`) | momentary switch terminal A (internal pull-up, pressed = low) |
+| GPIO0 (`PWR_BUTTON`) | momentary switch terminal A (internal pull-up, pressed = low) |
 | GPIO1 (`PWR_BUTTON_GND`, -1 if the switch is wired to a real GND) | switch terminal B — driven low as a local ground, so the button needs no run to a real GND |
-| GPIO0 (`PWR_SENSE`, -1 = not wired) | board-power sense, e.g. BC-250 TPMS1 pin 9 — read as an averaged ADC voltage with hysteresis (`PWR_SENSE_LOW`/`PWR_SENSE_HIGH` mV), the line is too soft for a digital read |
+| GPIO2 (`PWR_SENSE`, -1 = not wired) | optional board-power sense, e.g. BC-250 TPMS1 pin 9 — read as an averaged ADC voltage with hysteresis (`PWR_SENSE_LOW`/`PWR_SENSE_HIGH` mV), the line is too soft for a digital read |
 | 5VSB + GND | PSU standby rail, so the receiver runs while the machine is off — **read the warning below before also plugging in USB** |
 
 > ⚠️ **Critical — 5VSB and USB at the same time.** In this role the receiver
@@ -415,13 +415,16 @@ Wiring (ESP32-C3 defaults shown; every pin is a `PWR_*` make variable):
 > 5 V pin, which blocks the back-feed — but many compact clones don't, so
 > don't bet the port on it.
 
-Two pin caveats: GPIO2 is a C3 *strapping pin* — the pull-up keeps it happy,
-but a button held down through a chip reset (or while entering flash mode)
-stops the chip booting until it's released. And the defaults are C3-specific:
-on a plain ESP32, GPIO1/3 are its UART0 console and 0/2 are strapping pins —
-pick different ones. If the sense wire isn't connected, set `PWR_SENSE=-1`
-rather than leaving the input floating: a floating ADC pin reads noise, and
-the boot timeout may cut the PSU seconds after every power-on.
+Three pin caveats. First, the default sense pin GPIO2 is a C3 *strapping
+pin*, and the sense line sits low exactly when the machine is off: after a
+standby power loss the chip can come up in an invalid boot mode and stay dead
+— button and all — until the line drifts high. This project's hookup accepts
+that risk (`tools/pwrcfg.py` warns about it at flash time); GPIO4 is the
+ADC-capable pin free of it. Second, if the sense wire isn't connected, set
+`PWR_SENSE=-1` rather than leaving the input floating: a floating ADC pin
+reads noise, and the boot timeout may cut the PSU seconds after every
+power-on. Third, the defaults are C3-specific: on a plain ESP32, GPIO1/3 are
+its UART0 console and 0/2 are strapping pins — pick different ones.
 
 The feature is **off until opted into at flash time**: the settings live in a
 small dedicated flash partition (`pwrcfg`), not in the firmware image, so the
@@ -452,7 +455,7 @@ sudo make flash-pwr PWR=off                   # disable the feature
 # the prebuilt image with every setting spelled out (values shown are the
 # defaults — name only the ones you change)
 sudo make flash PWR=on \
-    PWR_PS_ON=3 PWR_BUTTON=2 PWR_BUTTON_GND=1 PWR_SENSE=0 \
+    PWR_PS_ON=3 PWR_BUTTON=0 PWR_BUTTON_GND=1 PWR_SENSE=2 \
     PWR_HOLD=5 PWR_BOOT_TIMEOUT=10 \
     PWR_SENSE_LOW=800 PWR_SENSE_HIGH=2000
 ```

@@ -35,14 +35,16 @@ STRIP_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),13)
 # `flash-source` (PWR=off writes it disabled); unset leaves whatever is on the
 # chip. `make flash-pwr` writes only that partition — change pins in seconds
 # without touching the app. The defaults are this project's BC-250 hookup on
-# an ESP32-C3 (note GPIO2 is a C3 strapping pin: fine with the pull-up, but a
-# button held through a reset keeps the chip from booting until released; and
-# a plain ESP32 needs different pins — GPIO1/3 are its UART0, 0/2 strapping).
+# an ESP32-C3: button across GPIO0/1, TPMS1 sense on GPIO2, PS_ON# on GPIO3.
+# Accepted caveat: GPIO2 is a C3 strapping pin and the sense line sits low
+# while the machine is off, so a cold 5VSB power-up can strap the chip into
+# an invalid boot mode until the line drifts high (GPIO4 avoids this). A
+# plain ESP32 needs different pins — GPIO1/3 are its UART0, 0/2 strapping.
 PWR ?=
 PWR_PS_ON ?= 3
-PWR_BUTTON ?= 2
+PWR_BUTTON ?= 0
 PWR_BUTTON_GND ?= 1
-PWR_SENSE ?= 0
+PWR_SENSE ?= 2
 PWR_HOLD ?= 5
 PWR_BOOT_TIMEOUT ?= 10
 PWR_SENSE_LOW ?= 800
