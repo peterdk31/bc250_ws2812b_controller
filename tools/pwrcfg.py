@@ -76,7 +76,7 @@ p.add_argument('--target', default='',
 p.add_argument('--strip-pin', type=int, default=-1,
                help='the LED data pin (strip.pin), to catch collisions')
 p.add_argument('--ps-on', type=int, default=3, help='PS_ON# pin (open-drain)')
-p.add_argument('--button', type=int, default=0, help='momentary button pin')
+p.add_argument('--button', type=int, default=1, help='momentary button pin')
 p.add_argument('--button-gnd', type=int, default=21,
                help="local ground for the button's second terminal, -1 = real GND")
 p.add_argument('--sense', type=int, default=2,

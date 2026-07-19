@@ -35,7 +35,7 @@ STRIP_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),13)
 # `flash-source` (PWR=off writes it disabled); unset leaves whatever is on the
 # chip. `make flash-pwr` writes only that partition — change pins in seconds
 # without touching the app. The defaults are this project's BC-250 hookup on
-# an ESP32-C3: button across GPIO0/21, TPMS1 sense on GPIO2, PS_ON# on GPIO3.
+# an ESP32-C3: button across GPIO1/21, TPMS1 sense on GPIO2, PS_ON# on GPIO3.
 # (GPIO21 is the C3's U0TXD — free while the host link is USB, but it's a
 # J5-UART candidate pin; move the button to a real GND if that link lands.)
 # Accepted caveat: GPIO2 is a C3 strapping pin and the sense line sits low
@@ -47,7 +47,7 @@ STRIP_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),13)
 # is the plain LED on common C3 dev boards, -1 = none.
 PWR ?=
 PWR_PS_ON ?= 3
-PWR_BUTTON ?= 0
+PWR_BUTTON ?= 1
 PWR_BUTTON_GND ?= 21
 PWR_SENSE ?= 2
 PWR_LED ?= 8
