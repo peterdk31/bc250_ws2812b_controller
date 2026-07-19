@@ -40,11 +40,15 @@ STRIP_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),13)
 # while the machine is off, so a cold 5VSB power-up can strap the chip into
 # an invalid boot mode until the line drifts high (GPIO4 avoids this). A
 # plain ESP32 needs different pins — GPIO1/3 are its UART0, 0/2 strapping.
+# PWR_LED blinks the board's own LED while the button reads pressed (wiring
+# feedback; a blink shows on active-high and active-low LEDs alike) — GPIO8
+# is the plain LED on common C3 dev boards, -1 = none.
 PWR ?=
 PWR_PS_ON ?= 3
 PWR_BUTTON ?= 0
 PWR_BUTTON_GND ?= 1
 PWR_SENSE ?= 2
+PWR_LED ?= 8
 PWR_HOLD ?= 5
 PWR_BOOT_TIMEOUT ?= 10
 PWR_SENSE_LOW ?= 800
@@ -236,7 +240,8 @@ PWRCFG_RESOLVE = pwr=""; \
 		python3 tools/pwrcfg.py --out "$(PWRCFG_BIN)" $(if $(filter off,$(PWR)),--disabled) \
 			--target $(TARGET) --strip-pin $(STRIP_PIN) \
 			--ps-on $(PWR_PS_ON) --button $(PWR_BUTTON) --button-gnd $(PWR_BUTTON_GND) \
-			--sense $(PWR_SENSE) --hold $(PWR_HOLD) --boot-timeout $(PWR_BOOT_TIMEOUT) \
+			--sense $(PWR_SENSE) --led $(PWR_LED) \
+			--hold $(PWR_HOLD) --boot-timeout $(PWR_BOOT_TIMEOUT) \
 			--sense-low $(PWR_SENSE_LOW) --sense-high $(PWR_SENSE_HIGH) || exit 1; \
 		pwr="$(PWRCFG_OFF) $(CURDIR)/$(PWRCFG_BIN)"; \
 	fi

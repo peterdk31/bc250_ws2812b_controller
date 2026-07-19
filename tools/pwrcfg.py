@@ -8,9 +8,12 @@ The layout must match Config::decode in firmware/main/power_switch.cpp:
     "PWR1" magic, then
     enabled(1) button_pin(1) ps_on_pin(1) button_gnd_pin(1) sense_pin(1)
     hold_ms(2) boot_timeout_ms(2) sense_low_mv(2) sense_high_mv(2)
+    led_pin(1)
 
-u16s little-endian; pins are GPIO numbers, 0xFF = not wired. The defaults
-here are this project's BC-250 hookup (ESP32-C3).
+u16s little-endian; pins are GPIO numbers, 0xFF = not wired. Fields are only
+ever APPENDED (firmware older than a field reads a shorter blob and ignores
+the tail; firmware newer than a blob reads erased flash, 0xFF = not wired).
+The defaults here are this project's BC-250 hookup (ESP32-C3).
 
 The firmware has no console and quietly drops anything it can't use (a pin
 past GPIO_NUM_MAX decodes as "not wired" — for PS_ON that means the whole
@@ -78,6 +81,10 @@ p.add_argument('--button-gnd', type=int, default=1,
                help="local ground for the button's second terminal, -1 = real GND")
 p.add_argument('--sense', type=int, default=2,
                help='board-power sense pin (ADC), -1 = not wired')
+p.add_argument('--led', type=int, default=8,
+               help='feedback LED pin, blinks while the button reads pressed '
+                    '(8 = the plain onboard LED on common C3 dev boards), '
+                    '-1 = none')
 p.add_argument('--hold', type=float, default=5,
                help='seconds to hold the button to force off')
 p.add_argument('--boot-timeout', type=float, default=10,
@@ -106,7 +113,7 @@ elif a.sense_low >= a.sense_high:
         'the PSU shortly after every power-on')
 
 pins = {'--ps-on': a.ps_on, '--button': a.button,
-        '--button-gnd': a.button_gnd, '--sense': a.sense}
+        '--button-gnd': a.button_gnd, '--sense': a.sense, '--led': a.led}
 for flag, v in pins.items():
     if not -1 <= v <= 0xFE:
         errors.append(f'{flag} {v}: not a GPIO number (-1 = not wired)')
@@ -182,11 +189,12 @@ for w in warnings:
     print(f'pwrcfg warning: {w}', file=sys.stderr)
 
 blob = b'PWR1' + struct.pack(
-    '<5B4H',
+    '<5B4HB',
     0 if a.disabled else 1,
     pin(a.button), pin(a.ps_on), pin(a.button_gnd), pin(a.sense),
     hold_ms, boot_timeout_ms,
-    a.sense_low, a.sense_high)
+    a.sense_low, a.sense_high,
+    pin(a.led))
 
 with open(a.out, 'wb') as f:
     f.write(blob)

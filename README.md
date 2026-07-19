@@ -396,6 +396,7 @@ Wiring (ESP32-C3 defaults shown; every pin is a `PWR_*` make variable):
 | GPIO0 (`PWR_BUTTON`) | momentary switch terminal A (internal pull-up, pressed = low) |
 | GPIO1 (`PWR_BUTTON_GND`, -1 if the switch is wired to a real GND) | switch terminal B — driven low as a local ground, so the button needs no run to a real GND |
 | GPIO2 (`PWR_SENSE`, -1 = not wired) | optional board-power sense, e.g. BC-250 TPMS1 pin 9 — read as an averaged ADC voltage with hysteresis (`PWR_SENSE_LOW`/`PWR_SENSE_HIGH` mV), the line is too soft for a digital read |
+| GPIO8 (`PWR_LED`, -1 = none) | optional feedback: the board's own little LED *blinks* while the button reads pressed, so button wiring can be eyeballed without a PSU. GPIO8 is the plain onboard LED on common C3 dev boards; a blink shows regardless of the LED's polarity |
 | 5VSB + GND | PSU standby rail, so the receiver runs while the machine is off — **read the warning below before also plugging in USB** |
 
 > ⚠️ **Critical — 5VSB and USB at the same time.** In this role the receiver
@@ -438,7 +439,8 @@ never touches them). Two guardrails to know about:
   partition first exists. `make flash-pwr` against an older installed
   firmware (or `PWR=on` with an older `FW_RELEASE` pinned) writes a sector
   that firmware never reads: a silent no-op. Update the firmware itself
-  first.
+  first. (Individual settings added later are simply ignored by firmware
+  that predates them — e.g. v1.6.0 exactly reads everything but `PWR_LED`.)
 - The wiring is validated before anything is written: `tools/pwrcfg.py`
   rejects pins the firmware would silently drop (nonexistent on `TARGET`,
   SPI-flash or host-link pads, a non-ADC sense pin, a collision with the
@@ -455,7 +457,7 @@ sudo make flash-pwr PWR=off                   # disable the feature
 # the prebuilt image with every setting spelled out (values shown are the
 # defaults — name only the ones you change)
 sudo make flash PWR=on \
-    PWR_PS_ON=3 PWR_BUTTON=0 PWR_BUTTON_GND=1 PWR_SENSE=2 \
+    PWR_PS_ON=3 PWR_BUTTON=0 PWR_BUTTON_GND=1 PWR_SENSE=2 PWR_LED=8 \
     PWR_HOLD=5 PWR_BOOT_TIMEOUT=10 \
     PWR_SENSE_LOW=800 PWR_SENSE_HIGH=2000
 ```

@@ -47,6 +47,7 @@ namespace pwr
 
 static const uint32_t POLL_MS = 10;             // task cadence; all debounces count in these
 static const uint32_t DEBOUNCE_MS = 30;         // button, and sense going UP
+static const uint32_t LED_BLINK_MS = 100;       // feedback LED half-period while pressed
 static const uint32_t BOARD_OFF_DEBOUNCE_MS = 1500; // sense must stay down this long
                                                     // (filters dips during boot/reset)
 static const int SENSE_OVERSAMPLE = 16; // ADC reads averaged per sample: TPMS1 is
@@ -64,12 +65,15 @@ static const int SENSE_OVERSAMPLE = 16; // ADC reads averaged per sample: TPMS1 
 //     "PWR1" magic, then
 //     enabled(1) button_pin(1) ps_on_pin(1) button_gnd_pin(1) sense_pin(1)
 //     hold_ms(2) boot_timeout_ms(2) sense_low_mv(2) sense_high_mv(2)
+//     led_pin(1)
 //
 // u16s little-endian; pins are GPIO numbers, 0xFF = not wired. An erased
 // partition (no magic) leaves the feature off, so a fresh board or a plain
-// `make flash` is inert until someone opts in with PWR=on.
+// `make flash` is inert until someone opts in with PWR=on. Fields only ever
+// get APPENDED: a blob written before led_pin existed reads 0xFF (erased
+// flash) there, i.e. not wired — both directions stay compatible.
 
-static const uint16_t WIRE_LEN = 13;
+static const uint16_t WIRE_LEN = 14;
 
 struct Config
 {
@@ -78,6 +82,7 @@ struct Config
     int8_t psOnPin = -1;
     int8_t buttonGndPin = -1;
     int8_t sensePin = -1;
+    int8_t ledPin = -1;             // feedback LED: blinks while the button reads pressed
     uint16_t holdMs = 5000;         // hold the button this long to force off
     uint16_t bootTimeoutMs = 10000; // sense never came up after power-on -> release
     uint16_t senseLowMv = 800;      // hysteresis: below = board down...
@@ -102,6 +107,7 @@ struct Config
         bootTimeoutMs = u16(p + 7);
         senseLowMv = u16(p + 9);
         senseHighMv = u16(p + 11);
+        ledPin = pin(p[13]);
         return true;
     }
 };
@@ -346,6 +352,16 @@ static void loop()
             btnLongFired = true;
             powerOff();
         }
+
+        // feedback LED: blink while the debounced button reads pressed. A
+        // blink is visible on active-high and active-low LEDs alike, so the
+        // board's polarity never needs configuring; idle drives HIGH, which
+        // is dark on the common active-low onboard LEDs.
+        if (g_cfg.ledPin >= 0)
+        {
+            bool low = btnStable && (now - btnPressStart) / LED_BLINK_MS % 2 == 0;
+            gpio_set_level((gpio_num_t)g_cfg.ledPin, low ? 0 : 1);
+        }
     }
 
     if (g_adc && g_state != OFF)
@@ -454,6 +470,15 @@ void start()
         io.mode = GPIO_MODE_OUTPUT;
         gpio_config(&io);
         gpio_set_level((gpio_num_t)g_cfg.buttonGndPin, 0);
+    }
+
+    if (g_cfg.ledPin >= 0)
+    {
+        gpio_set_level((gpio_num_t)g_cfg.ledPin, 1); // level before mode, as with PS_ON#
+        gpio_config_t io = {};
+        io.pin_bit_mask = 1ULL << g_cfg.ledPin;
+        io.mode = GPIO_MODE_OUTPUT;
+        gpio_config(&io);
     }
 
     senseSetup();
