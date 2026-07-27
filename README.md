@@ -392,7 +392,7 @@ Wiring (ESP32-C3 defaults shown; every pin is a `PWR_*` make variable):
 
 | receiver pin | connects to |
 |---|---|
-| GPIO3 (`PWR_PS_ON`) | PS_ON# — driven open-drain, so the PSU's internal 5 V pull-up is never fought |
+| GPIO3 (`PWR_PS_ON`) | gate of an N-channel MOSFET that sinks PS_ON# to ground (see note below) — **not** PS_ON# directly |
 | GPIO1 (`PWR_BUTTON`) | momentary switch terminal A (internal pull-up, pressed = low) |
 | GPIO21 (`PWR_BUTTON_GND`, -1 if the switch is wired to a real GND) | switch terminal B — driven low as a local ground, so the button needs no run to a real GND. (U0TXD: free while the host link is USB) |
 | GPIO2 (`PWR_SENSE`, -1 = not wired) | optional board-power sense, e.g. BC-250 TPMS1 pin 9 — read as an averaged ADC voltage with hysteresis (`PWR_SENSE_LOW`/`PWR_SENSE_HIGH` mV), the line is too soft for a digital read |
@@ -415,6 +415,66 @@ Wiring (ESP32-C3 defaults shown; every pin is a `PWR_*` make variable):
 > Some dev boards do have a protection diode between the USB jack and the
 > 5 V pin, which blocks the back-feed — but many compact clones don't, so
 > don't bet the port on it.
+
+**The PS_ON# pin drives a MOSFET, not PS_ON# directly.** A 3.3 V pad can't be
+tied to PS_ON#: the line is pulled to 5 V inside the PSU, and letting it rise
+back-feeds the pad's clamp diode so it never reaches a clean "off" — direct
+drive doesn't work. Wire a small N-channel MOSFET (a **2N7000** is plenty for
+PS_ON#'s ~1 mA) as a low-side switch: **gate** ← `PWR_PS_ON`, **source** →
+GND, **drain** → PS_ON#. `PWR_PS_ON` HIGH turns the MOSFET on and pulls PS_ON#
+to ground (PSU on); LOW releases it (PSU off). Add a **gate pull-down (~100 kΩ,
+gate → GND)** so the MOSFET stays off whenever the pad isn't driving it — at
+power-up before the firmware runs, during a reset, and on the `PWR=off` release
+path; without it a floating gate could start the PSU on its own. (100 kΩ is
+ample: the gate is a near-pure capacitance, and the line switches about once
+per boot.)
+
+```
+ESP32-C3  (running on the PSU's 5VSB standby rail — see the USB warning above)
+──────────────────────────────────────────────────────────────────────────────
+  5V      ──  PSU 5VSB
+  GND     ──  PSU GND
+  GPIO4   ──  WS2812B strip DIN   (strip.pin)        ── the LED output; daemon-set
+  GPIO3   ──  2N7000 gate         (PWR_PS_ON)        ── PS_ON# via MOSFET, below
+  GPIO1   ──  button  N (common)  (PWR_BUTTON)
+  GPIO21  ──  button  NO          (PWR_BUTTON_GND)
+  GPIO2   ──  BC-250 TPMS1 pin 9  (PWR_SENSE)        ── optional board sense
+  GPIO8   ──  onboard LED         (PWR_LED)          ── feedback, no wiring
+
+
+PS_ON# drive — low-side N-channel MOSFET (2N7000)
+──────────────────────────────────────────────────────────────────────────────
+                 PS_ON#   (PSU "green" wire; the PSU pulls it up to +5 V)
+                    │
+                    │ D (drain)
+                 ┌──┴──┐
+   GPIO3 ──┬─────┤ G   │   2N7000
+           │     └──┬──┘   (N-channel)
+       [100 kΩ]     │ S (source)
+           │        │
+          GND      GND
+
+   GPIO3 HIGH → MOSFET on  → PS_ON# pulled to GND  → PSU ON
+   GPIO3 LOW  → MOSFET off → PS_ON# floats to +5 V → PSU OFF
+   The 100 kΩ gate→GND pull-down holds it OFF whenever GPIO3 isn't driving.
+
+
+Button (momentary; N = common, NO = normally-open)
+──────────────────────────────────────────────────────────────────────────────
+   Pressing shorts N→NO. GPIO1 idles high on its internal pull-up; GPIO21 is
+   driven low as the button's local ground, so a press pulls GPIO1 low.
+   Tap = power on, 5 s hold = force off.  (Wire N and NO — NOT the NC terminal.)
+
+
+LED strip (WS2812B)
+──────────────────────────────────────────────────────────────────────────────
+   DIN ← GPIO4; the strip's +5 V and GND come from the PSU's main 5 V rail (a
+   26-LED strip is more than the 5VSB rail should carry), sharing a common GND
+   with the ESP32-C3. GPIO4 is the C3 build's value — the strip pin is the
+   daemon's `strip.pin` (pushed at runtime, cached in NVS), NOT a flash-time
+   PWR_* setting, so it just must not collide with the pins above or the C3's
+   flash pins (GPIO12–17). The repo's default strip.pin 13 is an ESP32 value.
+```
 
 Three pin caveats. First, the default sense pin GPIO2 is a C3 *strapping
 pin*, and the sense line sits low exactly when the machine is off: after a

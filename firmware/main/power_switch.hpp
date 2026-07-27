@@ -3,7 +3,8 @@
 // ATX power-switch service: with the receiver powered from the PSU's 5VSB
 // standby rail, it stands in for the jumper the BC-250 otherwise needs on the
 // FSP unit's PS_ON# line. A tap on a momentary button sinks PS_ON# to ground
-// (PSU on, board boots); holding it for HOLD_MS forces the PSU off. An
+// (via an N-channel MOSFET the pin gates — PSU on, board boots); holding it
+// for HOLD_MS forces the PSU off. An
 // optional analog sense wire (BC-250 TPMS1 pin 9) tells it when the board is
 // actually up, which adds: follow a graceful OS shutdown down (release PS_ON#
 // when the board turns itself off), and release if the board never comes up

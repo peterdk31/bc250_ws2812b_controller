@@ -18,9 +18,11 @@
 
 // The control model (after Thunkar/bc250-esp32-switch, minus its WiFi/BLE):
 //
-//   * PS_ON# is active LOW and pulled up to 5 V inside the PSU, so the pin is
-//     driven OPEN-DRAIN: sink to ground = PSU on, high-Z = PSU off. We never
-//     push 3.3 V against the PSU's pull-up.
+//   * PS_ON# is active LOW and pulled up to 5 V inside the PSU. The pin does
+//     not touch it directly — a 3.3 V pad can't sit on a 5 V-pulled line — but
+//     drives the gate of an N-channel MOSFET that sinks PS_ON# to ground:
+//     gate HIGH = PSU on, gate LOW = PSU off (see applyPsOn). A gate pull-down
+//     keeps the MOSFET off whenever the pad isn't driving.
 //   * The button reads with an internal pull-up (pressed = LOW); an optional
 //     second pin is driven LOW as the button's local ground, so a two-wire
 //     switch needs no run to a real GND pin.
@@ -183,15 +185,26 @@ static uint32_t senseChange = 0;
 // keep the hold.
 static void applyPsOn(bool assert_)
 {
-    // level BEFORE mode: a fresh pad's output register is 0, so configuring
-    // the pin as an output first would sink PS_ON# low for a moment on every
-    // boot — a spurious power-on pulse
-    gpio_set_level((gpio_num_t)g_cfg.psOnPin, assert_ ? 0 : 1);
+    // The pin drives the gate of an N-channel MOSFET (2N7000: gate here,
+    // source to GND, drain to PS_ON#), not PS_ON# directly. Gate HIGH turns
+    // the MOSFET on and sinks PS_ON# to ground (PSU on); gate LOW turns it off
+    // and the PSU's own 5 V pull-up carries PS_ON# high (PSU off). The
+    // transistor is what makes this work at all: a 3.3 V pad can't sit on a
+    // line pulled to 5 V — releasing it back-feeds the pad's clamp and never
+    // reaches a clean 5 V "off" — so the MOSFET level-shifts and the pad only
+    // ever sees a 3.3 V gate. A gate pull-down (~100 kΩ to ground) holds the
+    // MOSFET off whenever the pad isn't driving: before start() runs, through
+    // a reset, and on the PWR=off release path that leaves the pin an input.
+    //
+    // level BEFORE mode still, and now it's the safe direction too: a fresh
+    // pad's output register is 0 = gate low = MOSFET off, so bring-up never
+    // sinks PS_ON# — the old spurious power-on pulse can't happen.
+    gpio_set_level((gpio_num_t)g_cfg.psOnPin, assert_ ? 1 : 0);
 
     gpio_config_t io = {};
     io.pin_bit_mask = 1ULL << g_cfg.psOnPin;
-    io.mode = GPIO_MODE_OUTPUT_OD;
-    io.pull_up_en = GPIO_PULLUP_DISABLE; // the PSU's own 5 V pull-up owns the idle level
+    io.mode = GPIO_MODE_OUTPUT; // push-pull: we drive a gate, not the 5 V line
+    io.pull_up_en = GPIO_PULLUP_DISABLE;
     io.pull_down_en = GPIO_PULLDOWN_DISABLE;
     gpio_config(&io);
 

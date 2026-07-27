@@ -75,7 +75,8 @@ p.add_argument('--target', default='',
                help='chip the config is for (validates pins, e.g. esp32c3)')
 p.add_argument('--strip-pin', type=int, default=-1,
                help='the LED data pin (strip.pin), to catch collisions')
-p.add_argument('--ps-on', type=int, default=3, help='PS_ON# pin (open-drain)')
+p.add_argument('--ps-on', type=int, default=3,
+               help='pin driving the PS_ON# MOSFET gate (see README)')
 p.add_argument('--button', type=int, default=1, help='momentary button pin')
 p.add_argument('--button-gnd', type=int, default=21,
                help="local ground for the button's second terminal, -1 = real GND")
