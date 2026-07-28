@@ -136,7 +136,8 @@ install: led
 	install -Dm644 led-controller.service /etc/systemd/system/led-controller.service
 	test -f /etc/led-controller/config.json || install -Dm644 config.json /etc/led-controller/config.json
 	systemctl daemon-reload
-	-systemctl try-restart led-controller
+	-systemctl enable led-controller
+	-systemctl restart led-controller
 	-@$(MAKE) --no-print-directory udev-rule
 	-@$(MAKE) --no-print-directory serial-perms
 
