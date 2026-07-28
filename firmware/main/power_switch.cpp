@@ -14,7 +14,14 @@
 #include "esp_system.h"
 #include "nvs.h"
 
+#include "dbglog.hpp"
 #include "util.hpp"
+
+// Diagnostics go to the in-RAM debug log (dbglog.hpp), which the daemon drains
+// into journalctl when its debug backchannel is on. Off by default and near-
+// free: event lines are rare, and the chatty per-sample line is gated on
+// dbglog::active() so an un-watched board never formats it.
+#define PLOG(fmt, ...) dbglog::line("pwr: " fmt, ##__VA_ARGS__)
 
 // The control model (after Thunkar/bc250-esp32-switch, minus its WiFi/BLE):
 //
@@ -145,6 +152,13 @@ enum State
     ON
 };
 
+static const char* stateName(State s)
+{
+    return s == OFF ? "OFF" : s == BOOTING ? "BOOTING" : "ON";
+}
+
+static const uint32_t SAMPLE_LOG_MS = 1000; // min gap between periodic mv lines
+
 static nvs_handle_t g_nvs = 0;
 static State g_state = OFF;
 static bool g_asserted = false;  // PS_ON# currently sunk low
@@ -168,6 +182,7 @@ static bool senseLevel = false; // hysteresis state
 static bool senseStable = false;
 static bool senseLastRaw = false;
 static uint32_t senseChange = 0;
+static uint32_t g_lastSampleMs = 0; // throttles the periodic mv log
 
 // ---- PS_ON# line ----
 
@@ -248,12 +263,18 @@ static void senseSetup()
 
     adc_unit_t unit;
     if (adc_oneshot_io_to_channel(g_cfg.sensePin, &unit, &g_chan) != ESP_OK)
+    {
+        PLOG("sense: gpio%d is not ADC-capable; running without sense",
+             g_cfg.sensePin);
         return; // not an ADC-capable pin; run without sense
+    }
 
     adc_oneshot_unit_init_cfg_t uc = {};
     uc.unit_id = unit;
     if (adc_oneshot_new_unit(&uc, &g_adc) != ESP_OK)
     {
+        PLOG("sense: gpio%d ADC unit init FAILED; running without sense",
+             g_cfg.sensePin);
         g_adc = nullptr;
         return;
     }
@@ -282,6 +303,10 @@ static void senseSetup()
     if (adc_cali_create_scheme_line_fitting(&cal, &g_cali) != ESP_OK)
         g_cali = nullptr;
 #endif
+
+    PLOG("sense: gpio%d -> ADC%d ch%d init=OK cali=%s (low=%u high=%u mv)",
+         g_cfg.sensePin, (int)unit + 1, (int)g_chan, g_cali ? "yes" : "raw",
+         g_cfg.senseLowMv, g_cfg.senseHighMv);
 }
 
 static uint32_t readSenseMv()
@@ -310,6 +335,7 @@ static void powerOn(uint32_t now)
     psuAssert();
     g_bootStart = now;
     g_state = g_adc ? BOOTING : ON;
+    PLOG("power ON: asserting PS_ON#, state=%s", stateName(g_state));
 
     // fresh sense tracking for this power cycle
     senseLevel = senseStable = senseLastRaw = false;
@@ -363,6 +389,8 @@ static void loop()
             now - btnPressStart >= g_cfg.holdMs)
         {
             btnLongFired = true;
+            PLOG("power OFF: button held %ums, releasing PS_ON#",
+                 (unsigned)(now - btnPressStart));
             powerOff();
         }
 
@@ -381,6 +409,16 @@ static void loop()
     {
         uint32_t mv = readSenseMv();
 
+        // throttled raw reading: the single most useful diagnostic — what the
+        // sense line actually sits at. Gated on active() so it costs nothing
+        // unless the host is draining the log.
+        if (dbglog::active() && now - g_lastSampleMs >= SAMPLE_LOG_MS)
+        {
+            g_lastSampleMs = now;
+            PLOG("sense mv=%u state=%s level=%d stable=%d", (unsigned)mv,
+                 stateName(g_state), senseLevel, senseStable);
+        }
+
         // hysteresis on the averaged voltage...
         if (senseLevel)
             senseLevel = !(mv < g_cfg.senseLowMv);
@@ -393,6 +431,9 @@ static void loop()
         {
             senseLastRaw = senseLevel;
             senseChange = now;
+            PLOG("sense level %s mv=%u (low=%u high=%u)",
+                 senseLevel ? "up" : "down", (unsigned)mv, g_cfg.senseLowMv,
+                 g_cfg.senseHighMv);
         }
 
         uint32_t need = senseLevel ? DEBOUNCE_MS : BOARD_OFF_DEBOUNCE_MS;
@@ -400,15 +441,27 @@ static void loop()
         if (senseLevel != senseStable && now - senseChange >= need)
         {
             senseStable = senseLevel;
+            PLOG("sense STABLE %s (state=%s)", senseStable ? "up" : "down",
+                 stateName(g_state));
 
             if (g_state == BOOTING && senseStable)
+            {
                 g_state = ON;
+                PLOG("boot confirmed: sense up -> state=ON");
+            }
             else if (g_state == ON && !senseStable)
+            {
+                PLOG("power OFF: follow-down, board went away, releasing PS_ON#");
                 powerOff(); // the board shut itself down; the PSU follows it
+            }
         }
 
         if (g_state == BOOTING && now - g_bootStart >= g_cfg.bootTimeoutMs)
+        {
+            PLOG("power OFF: boot-timeout, sense never came up in %ums",
+                 g_cfg.bootTimeoutMs);
             powerOff(); // never came up; don't leave the PSU energized
+        }
     }
 }
 
@@ -445,6 +498,11 @@ void start()
         }
         return;
     }
+
+    PLOG("cfg button=%d gnd=%d ps_on=%d sense=%d led=%d hold=%u boottmo=%u",
+         g_cfg.buttonPin, g_cfg.buttonGndPin, g_cfg.psOnPin, g_cfg.sensePin,
+         g_cfg.ledPin, g_cfg.holdMs, g_cfg.bootTimeoutMs);
+    PLOG("start: reset=%d savedOn=%d", (int)esp_reset_reason(), (int)g_savedOn);
 
     if (g_savedOn && esp_reset_reason() != ESP_RST_POWERON)
     {

@@ -21,6 +21,12 @@ int read(uint8_t* buf, size_t maxlen, TickType_t wait);
 void setBaud(uint32_t baud);
 void flushInput();
 
+// send bytes back to the host. The link is host→receiver for everything else;
+// this exists only for the debug log backchannel (dbglog.cpp / protocol.hpp's
+// LOG_SYNC frame). Best-effort and briefly bounded so a stalled or absent host
+// (buffer full) can never block the caller.
+void write(const uint8_t* buf, size_t len);
+
 // whether a USB host is currently driving the bus (SOF keepalives seen).
 // A UART can't observe its host, so that build always reports true and the
 // host-restart re-arm (led_service.cpp) never fires there — a plain ESP32

@@ -14,6 +14,7 @@
 #include "receiver.hpp"
 #include "recording.hpp"
 
+#include "dbglog.hpp"
 #include "link.hpp"
 #include "prefs.hpp"
 #include "rec_store.hpp"
@@ -169,6 +170,16 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
             rec_store::save(recSlot, recRx.rec);
 
         recRx.reset();
+    }
+    else if (cmd == proto::CMD_LOG_DRAIN)
+    {
+        // debug backchannel: reply with the buffered log lines the host hasn't
+        // seen. Payload is the host's highest-seen seq (little-endian, 0 = all).
+        uint32_t since = len >= 4
+            ? (uint32_t)payload[0] | ((uint32_t)payload[1] << 8)
+              | ((uint32_t)payload[2] << 16) | ((uint32_t)payload[3] << 24)
+            : 0;
+        dbglog::onDrain(since);
     }
 }
 

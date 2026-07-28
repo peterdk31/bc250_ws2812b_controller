@@ -42,6 +42,13 @@ int read(uint8_t* buf, size_t maxlen, TickType_t wait)
 void setBaud(uint32_t baud) { uart_set_baudrate(PORT, baud); }
 void flushInput() { uart_flush_input(PORT); }
 
+void write(const uint8_t* buf, size_t len)
+{
+    // no TX ring was installed (see begin); this blocks only until the bytes
+    // are in the FIFO, which for a short log frame is trivial
+    uart_write_bytes(PORT, buf, len);
+}
+
 #else // USB Serial/JTAG (C3/C6/H2/S3 native USB)
 
 void begin(uint32_t /*baud*/)
@@ -65,6 +72,13 @@ void flushInput()
     while (usb_serial_jtag_read_bytes(sink, sizeof sink, 0) > 0)
     {
     }
+}
+
+void write(const uint8_t* buf, size_t len)
+{
+    // bounded: if no host is draining and the TX buffer fills, drop the rest
+    // rather than stall the caller (the log line is debug, not load-bearing)
+    usb_serial_jtag_write_bytes(buf, len, pdMS_TO_TICKS(20));
 }
 #endif
 

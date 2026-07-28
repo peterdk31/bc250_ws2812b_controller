@@ -9,6 +9,16 @@
 // deep frame:    SYNC0 SYNC1_16 pin lo hi anim_lo anim_hi xms_lo xms_hi <RR GG BB>*count checksum
 // command frame: SYNC0 CMD_SYNC cmd len_lo len_hi <payload[len]> checksum
 //
+// log frame:     SYNC0 LOG_SYNC seq(4) ms(4) len <text[len]> checksum
+//   The one receiver→host frame, and the only traffic in that direction. It's
+//   a debug backchannel: when the daemon has "sinks.serial.debug_log" set it
+//   periodically sends CMD_LOG_DRAIN with the highest seq it has seen, and the
+//   receiver replies with one of these per buffered log line newer than that
+//   (see firmware/main/dbglog.*). All little-endian; checksum is the XOR of the
+//   seq, ms, len bytes and the text. With the feature off the daemon never
+//   drains, the receiver never transmits, and the link stays host→receiver as
+//   before — an older peer on either end simply never exchanges these.
+//
 // the deep pixel frame is what the daemon sends: each channel is a
 // little-endian 8.8 fixed-point value (the 8-bit strip code × 256, so
 // 0..0xFF00) straight out of the host's correction LUT. The extra 8
@@ -39,6 +49,7 @@ static const uint8_t SYNC0 = 0xAA;    // every frame type starts here
 static const uint8_t SYNC1 = 0x55;    // ...then this for an 8-bit pixel frame
 static const uint8_t CMD_SYNC = 0x56; // ...or this for a command frame
 static const uint8_t SYNC1_16 = 0x57; // ...or this for an 8.8 deep pixel frame
+static const uint8_t LOG_SYNC = 0x58; // ...or this for a receiver→host log frame
 
 // bytes a pixel frame (either depth) carries before the pixel data: SYNC0
 // SYNC1/SYNC1_16 pin count(2) anim(2) xms(2). Use this rather than a literal
@@ -88,6 +99,13 @@ static const uint8_t CMD_REC_END = 0x04;
 
 static const uint8_t SLOT_POWER_ON = 0x00;
 static const uint8_t SLOT_SHUTDOWN = 0x01;
+
+// CMD_LOG_DRAIN: "send me every buffered log line newer than this". Payload is
+// 4 bytes, the highest seq the host has already received (little-endian, 0 =
+// everything the receiver still holds). The receiver answers with a log frame
+// (LOG_SYNC, above) per matching line. Only sent when the daemon's debug
+// backchannel is enabled; unknown to older firmware, which ignores it.
+static const uint8_t CMD_LOG_DRAIN = 0x05;
 
 // reserved anim ids the receiver stamps on the recording frames it replays (it
 // knows which slot is playing). This makes the boot→live and live→shutdown
