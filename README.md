@@ -377,7 +377,7 @@ minus its WiFi/BLE):
 
 - **Tap** the button while off → PS_ON# is sunk to ground, the PSU starts, the
   board boots.
-- **Hold** for 5 s while on → PS_ON# is released — a hard power-off for a
+- **Hold** for 2 s while on → PS_ON# is released — a hard power-off for a
   wedged machine.
 - With the **sense** wire (BC-250: TPMS1 pin 9, ~2.9 V while the board is
   up): a graceful OS shutdown is followed down (the sense line drops, the
@@ -463,7 +463,7 @@ Button (momentary; N = common, NO = normally-open)
 ──────────────────────────────────────────────────────────────────────────────
    Pressing shorts N→NO. GPIO1 idles high on its internal pull-up; GPIO21 is
    driven low as the button's local ground, so a press pulls GPIO1 low.
-   Tap = power on, 5 s hold = force off.  (Wire N and NO — NOT the NC terminal.)
+   Tap = power on, 2 s hold = force off.  (Wire N and NO — NOT the NC terminal.)
 
 
 LED strip (WS2812B)
@@ -518,7 +518,7 @@ sudo make flash-pwr PWR=off                   # disable the feature
 # defaults — name only the ones you change)
 sudo make flash PWR=on \
     PWR_PS_ON=3 PWR_BUTTON=1 PWR_BUTTON_GND=21 PWR_SENSE=2 PWR_LED=8 \
-    PWR_HOLD=5 PWR_BOOT_TIMEOUT=10 \
+    PWR_HOLD=2 PWR_BOOT_TIMEOUT=10 \
     PWR_SENSE_LOW=800 PWR_SENSE_HIGH=2000
 ```
 

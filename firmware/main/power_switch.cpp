@@ -92,7 +92,7 @@ struct Config
     int8_t buttonGndPin = -1;
     int8_t sensePin = -1;
     int8_t ledPin = -1;             // feedback LED: blinks while the button reads pressed
-    uint16_t holdMs = 5000;         // hold the button this long to force off
+    uint16_t holdMs = 2000;         // hold the button this long to force off
     uint16_t bootTimeoutMs = 10000; // sense never came up after power-on -> release
     uint16_t senseLowMv = 800;      // hysteresis: below = board down...
     uint16_t senseHighMv = 2000;    // ...above = board up, between = hold state

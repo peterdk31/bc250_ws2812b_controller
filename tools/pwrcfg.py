@@ -86,7 +86,7 @@ p.add_argument('--led', type=int, default=8,
                help='feedback LED pin, blinks while the button reads pressed '
                     '(8 = the plain onboard LED on common C3 dev boards), '
                     '-1 = none')
-p.add_argument('--hold', type=float, default=5,
+p.add_argument('--hold', type=float, default=2,
                help='seconds to hold the button to force off')
 p.add_argument('--boot-timeout', type=float, default=10,
                help='seconds to wait for sense after power-on (sense only)')
