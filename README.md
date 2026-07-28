@@ -477,21 +477,21 @@ LED strip (WS2812B)
    default `TARGET` (esp32c3); a plain ESP32 wants something like 13.
 ```
 
-Three pin caveats. First, **the sense pin is GPIO0 and must not be GPIO2** —
-earlier revisions of this hookup used GPIO2, and that was a latent way to
-brick the switch. GPIO2 is a C3 strapping pin that must read HIGH at reset to
-select SPI boot, and TPMS1 pin 9 is a *dead rail sitting at 0 V* whenever the
-machine is off — not a floating line that might drift high. So any C3 reset
-while the machine is off (a crash, a watchdog, a PSU unplug at the wall) can
-strap an invalid boot mode and leave the chip dead, button and all, with no
-way back in except restoring power to the board you can't switch on. Flashing
-never tripped it: that runs over USB with the host up, so pin 9 is at 3.3 V
-and GPIO2 reads high. GPIO0 is ADC1-capable and is *not* a C3 strapping pin
-(boot mode is GPIO9 here, unlike the classic ESP32 where GPIO0 is the boot
-pin), and it is the only remaining ADC pin: GPIO1 is the button, GPIO3 is
-PS_ON#, and **GPIO4 is the strip's DIN**. If you are moving from an older
-GPIO2 hookup, move the wire before re-pinning. `tools/pwrcfg.py` warns
-whenever the sense pin is a strapping pin. Second, if the sense wire isn't
+Three pin caveats. First, the sense pin defaults to **GPIO0** rather than the
+GPIO2 this hookup originally used, because GPIO2 is one of the C3's strapping
+pins (latched at reset) while TPMS1 pin 9 sits at 0 V whenever the machine is
+off. This is hygiene, not a boot failure — Espressif's design guidelines are
+explicit that on the C3 GPIO2 *"does not determine SPI Boot and Joint Download
+Boot mode"* (that's GPIO9, with GPIO8 supporting), and GPIO2 was verified
+booting fine on real hardware with pin 9 grounded. But the same guidelines
+recommend pulling GPIO2 up for glitch immunity, which a line that is grounded
+half the time plainly doesn't do, so GPIO0 simply avoids the question: it's
+ADC1-capable, not a strapping pin, and otherwise idle. It is also the only ADC
+pin left — GPIO1 is the button, GPIO3 is PS_ON#, and **GPIO4 is the strip's
+DIN**. Severity is chip-specific: on a plain ESP32 the strapping pins *do*
+select boot mode outright (GPIO0 low = download boot), so there a grounded
+strap pin really can stop the chip booting. `tools/pwrcfg.py` warns whenever
+the sense pin is a strapping pin. Second, if the sense wire isn't
 connected, set `PWR_SENSE=-1` rather than leaving the input floating: a
 floating ADC pin reads noise, and the boot timeout may cut the PSU seconds
 after every power-on. Third, the defaults are C3-specific: on a plain ESP32, GPIO1/3 are

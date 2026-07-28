@@ -34,10 +34,12 @@ import sys
 #               unreliable per errata — deliberately excluded
 #   hold:       pins where gpio_hold_en can latch PS_ON# through a reset; on
 #               the plain ESP32 only the RTC-capable ones. None = every pin
-#   strap:      strapping pins, sampled for boot mode at reset. Only checked
-#               for the sense wire: that line is driven low whenever the
-#               machine is off, so a cold standby power-up can strap a
-#               wrong/invalid boot mode (the button idles high and is fine)
+#   strap:      strapping pins, latched at reset. Only checked for the sense
+#               wire: that line is driven low whenever the machine is off (the
+#               button idles high and is fine). Severity differs by chip — the
+#               ESP32's strap pins select boot mode outright, while the C3's
+#               GPIO2 does not determine boot mode and is only a
+#               pull-up-for-glitch-immunity recommendation. Warning, not error
 #   reserved:   pins this project already talks to the host on
 CHIPS = {
     'esp32c3': dict(
@@ -170,12 +172,14 @@ if not a.disabled and not errors:
                           'timeout)')
         elif flag == '--sense' and v in chip['strap']:
             warnings.append(
-                f'--sense {v}: GPIO{v} is a strapping pin on {a.target}, and '
-                'the sense line is held low whenever the machine is off (on '
-                'the BC-250 it is a dead 3.3 V rail, not a floating line that '
-                'might drift high) — any reset with the machine off can strap '
-                'a wrong boot mode and leave the chip, and the button, dead. '
-                'On the C3 use --sense 0 instead')
+                f'--sense {v}: GPIO{v} is a strapping pin on {a.target} '
+                '(latched at reset), and the sense line is held low whenever '
+                'the machine is off (on the BC-250 it is a dead 3.3 V rail). '
+                'On the ESP32 the strap pins select boot mode outright, so a '
+                'grounded one can stop the chip booting; on the C3, GPIO2 does '
+                'not determine boot mode, but Espressif still recommends '
+                'pulling it up for glitch immunity. Prefer a non-strapping ADC '
+                'pin (on the C3: --sense 0)')
         if flag == '--ps-on' and chip['hold'] is not None \
                 and v not in chip['hold']:
             warnings.append(

@@ -38,11 +38,13 @@ STRIP_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),4)
 # an ESP32-C3: button across GPIO1/21, TPMS1 sense on GPIO0, PS_ON# on GPIO3.
 # (GPIO21 is the C3's U0TXD — free while the host link is USB, but it's a
 # J5-UART candidate pin; move the button to a real GND if that link lands.)
-# Sense is GPIO0, deliberately not GPIO2: GPIO2 is a C3 strapping pin that must
-# read high at reset, and TPMS1 pin 9 is a dead 3.3 V rail at 0 V while the
-# machine is off, so any reset with the machine off could strap an invalid boot
-# mode and leave the chip dead. GPIO0 is ADC-capable and not strapping. (GPIO4
-# is not a candidate either — it's the strip's DIN on the C3 build.) A
+# Sense defaults to GPIO0, not the GPIO2 this hookup started on: GPIO2 is a C3
+# strapping pin (latched at reset) and TPMS1 pin 9 is a rail at 0 V while the
+# machine is off. Not a boot failure — per Espressif, C3 boot mode is GPIO9/8
+# and GPIO2 "does not determine" it, and GPIO2 booted fine on real hardware —
+# but they recommend pulling GPIO2 up for glitch immunity, so GPIO0 (ADC-capable,
+# not strapping, otherwise idle) avoids the question. GPIO4 is the strip's DIN.
+# On a plain ESP32 strap pins DO select boot mode, so it matters more there. A
 # plain ESP32 needs different pins — GPIO1/3 are its UART0, 0/2 strapping.
 # PWR_LED blinks the board's own LED while the button reads pressed (wiring
 # feedback; a blink shows on active-high and active-low LEDs alike) — GPIO8
