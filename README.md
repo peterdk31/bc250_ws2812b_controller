@@ -395,7 +395,7 @@ Wiring (ESP32-C3 defaults shown; every pin is a `PWR_*` make variable):
 | GPIO3 (`PWR_PS_ON`) | gate of an N-channel MOSFET that sinks PS_ON# to ground (see note below) — **not** PS_ON# directly |
 | GPIO1 (`PWR_BUTTON`) | momentary switch terminal A (internal pull-up, pressed = low) |
 | GPIO21 (`PWR_BUTTON_GND`, -1 if the switch is wired to a real GND) | switch terminal B — driven low as a local ground, so the button needs no run to a real GND. (U0TXD: free while the host link is USB) |
-| GPIO2 (`PWR_SENSE`, -1 = not wired) | optional board-power sense, e.g. BC-250 TPMS1 pin 9 — read as an averaged ADC voltage with hysteresis (`PWR_SENSE_LOW`/`PWR_SENSE_HIGH` mV), the line is too soft for a digital read |
+| GPIO0 (`PWR_SENSE`, -1 = not wired) | optional board-power sense, e.g. BC-250 TPMS1 pin 9, which is the board's main **3.3 V rail**. Emphatically *not* pin 15 (`3VSB`): that stays up whenever PS_ON# is held, so it reads like a working sense wire and then never fires follow-down or the boot timeout. Read as an averaged ADC voltage with hysteresis (`PWR_SENSE_LOW`/`PWR_SENSE_HIGH` mV); the ADC saturates near 3.1 V, so a healthy rail logs ~2.9–3.1 V |
 | GPIO8 (`PWR_LED`, -1 = none) | optional feedback: the board's own little LED *blinks* while the button reads pressed, so button wiring can be eyeballed without a PSU. GPIO8 is the plain onboard LED on common C3 dev boards; a blink shows regardless of the LED's polarity |
 | 5VSB + GND | PSU standby rail, so the receiver runs while the machine is off — **read the warning below before also plugging in USB** |
 
@@ -438,7 +438,7 @@ ESP32-C3  (running on the PSU's 5VSB standby rail — see the USB warning above)
   GPIO3   ──  2N7000 gate         (PWR_PS_ON)        ── PS_ON# via MOSFET, below
   GPIO1   ──  button  N (common)  (PWR_BUTTON)
   GPIO21  ──  button  NO          (PWR_BUTTON_GND)
-  GPIO2   ──  BC-250 TPMS1 pin 9  (PWR_SENSE)        ── optional board sense
+  GPIO0   ──  BC-250 TPMS1 pin 9  (PWR_SENSE)        ── board sense (3.3 V rail)
   GPIO8   ──  onboard LED         (PWR_LED)          ── feedback, no wiring
 
 
@@ -473,18 +473,28 @@ LED strip (WS2812B)
    with the ESP32-C3. GPIO4 is the C3 build's value — the strip pin is the
    daemon's `strip.pin` (pushed at runtime, cached in NVS), NOT a flash-time
    PWR_* setting, so it just must not collide with the pins above or the C3's
-   flash pins (GPIO12–17). The repo's default strip.pin 13 is an ESP32 value.
+   flash pins (GPIO12–17). The repo's default `strip.pin` is 4 to match the
+   default `TARGET` (esp32c3); a plain ESP32 wants something like 13.
 ```
 
-Three pin caveats. First, the default sense pin GPIO2 is a C3 *strapping
-pin*, and the sense line sits low exactly when the machine is off: after a
-standby power loss the chip can come up in an invalid boot mode and stay dead
-— button and all — until the line drifts high. This project's hookup accepts
-that risk (`tools/pwrcfg.py` warns about it at flash time); GPIO4 is the
-ADC-capable pin free of it. Second, if the sense wire isn't connected, set
-`PWR_SENSE=-1` rather than leaving the input floating: a floating ADC pin
-reads noise, and the boot timeout may cut the PSU seconds after every
-power-on. Third, the defaults are C3-specific: on a plain ESP32, GPIO1/3 are
+Three pin caveats. First, **the sense pin is GPIO0 and must not be GPIO2** —
+earlier revisions of this hookup used GPIO2, and that was a latent way to
+brick the switch. GPIO2 is a C3 strapping pin that must read HIGH at reset to
+select SPI boot, and TPMS1 pin 9 is a *dead rail sitting at 0 V* whenever the
+machine is off — not a floating line that might drift high. So any C3 reset
+while the machine is off (a crash, a watchdog, a PSU unplug at the wall) can
+strap an invalid boot mode and leave the chip dead, button and all, with no
+way back in except restoring power to the board you can't switch on. Flashing
+never tripped it: that runs over USB with the host up, so pin 9 is at 3.3 V
+and GPIO2 reads high. GPIO0 is ADC1-capable and is *not* a C3 strapping pin
+(boot mode is GPIO9 here, unlike the classic ESP32 where GPIO0 is the boot
+pin), and it is the only remaining ADC pin: GPIO1 is the button, GPIO3 is
+PS_ON#, and **GPIO4 is the strip's DIN**. If you are moving from an older
+GPIO2 hookup, move the wire before re-pinning. `tools/pwrcfg.py` warns
+whenever the sense pin is a strapping pin. Second, if the sense wire isn't
+connected, set `PWR_SENSE=-1` rather than leaving the input floating: a
+floating ADC pin reads noise, and the boot timeout may cut the PSU seconds
+after every power-on. Third, the defaults are C3-specific: on a plain ESP32, GPIO1/3 are
 its UART0 console and 0/2 are strapping pins — pick different ones.
 
 The feature is **off until opted into at flash time**: the settings live in a
@@ -517,7 +527,7 @@ sudo make flash-pwr PWR=off                   # disable the feature
 # the prebuilt image with every setting spelled out (values shown are the
 # defaults — name only the ones you change)
 sudo make flash PWR=on \
-    PWR_PS_ON=3 PWR_BUTTON=1 PWR_BUTTON_GND=21 PWR_SENSE=2 PWR_LED=8 \
+    PWR_PS_ON=3 PWR_BUTTON=1 PWR_BUTTON_GND=21 PWR_SENSE=0 PWR_LED=8 \
     PWR_HOLD=2 PWR_BOOT_TIMEOUT=10 \
     PWR_SENSE_LOW=800 PWR_SENSE_HIGH=2000
 ```

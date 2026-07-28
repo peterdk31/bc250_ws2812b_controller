@@ -27,7 +27,7 @@ CONFIG ?= $(firstword $(wildcard /etc/led-controller/config.json config.json))
 CONFIG_GET = ./led --config-get $(CONFIG)
 BAUD ?= $(or $(shell $(CONFIG_GET) sinks.serial.baud 2>/dev/null),921600)
 TIMEOUT_MS ?= $(or $(shell $(CONFIG_GET) esp32.host_timeout_ms 2>/dev/null),5000)
-STRIP_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),13)
+STRIP_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),4)
 
 # ATX power switch (README "Power switch"): the wiring lives in the receiver's
 # small `pwrcfg` flash partition, not in the firmware image, so it's chosen at
@@ -35,12 +35,14 @@ STRIP_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),13)
 # `flash-source` (PWR=off writes it disabled); unset leaves whatever is on the
 # chip. `make flash-pwr` writes only that partition — change pins in seconds
 # without touching the app. The defaults are this project's BC-250 hookup on
-# an ESP32-C3: button across GPIO1/21, TPMS1 sense on GPIO2, PS_ON# on GPIO3.
+# an ESP32-C3: button across GPIO1/21, TPMS1 sense on GPIO0, PS_ON# on GPIO3.
 # (GPIO21 is the C3's U0TXD — free while the host link is USB, but it's a
 # J5-UART candidate pin; move the button to a real GND if that link lands.)
-# Accepted caveat: GPIO2 is a C3 strapping pin and the sense line sits low
-# while the machine is off, so a cold 5VSB power-up can strap the chip into
-# an invalid boot mode until the line drifts high (GPIO4 avoids this). A
+# Sense is GPIO0, deliberately not GPIO2: GPIO2 is a C3 strapping pin that must
+# read high at reset, and TPMS1 pin 9 is a dead 3.3 V rail at 0 V while the
+# machine is off, so any reset with the machine off could strap an invalid boot
+# mode and leave the chip dead. GPIO0 is ADC-capable and not strapping. (GPIO4
+# is not a candidate either — it's the strip's DIN on the C3 build.) A
 # plain ESP32 needs different pins — GPIO1/3 are its UART0, 0/2 strapping.
 # PWR_LED blinks the board's own LED while the button reads pressed (wiring
 # feedback; a blink shows on active-high and active-low LEDs alike) — GPIO8
@@ -49,7 +51,7 @@ PWR ?=
 PWR_PS_ON ?= 3
 PWR_BUTTON ?= 1
 PWR_BUTTON_GND ?= 21
-PWR_SENSE ?= 2
+PWR_SENSE ?= 0
 PWR_LED ?= 8
 PWR_HOLD ?= 2
 PWR_BOOT_TIMEOUT ?= 10

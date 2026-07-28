@@ -80,7 +80,7 @@ p.add_argument('--ps-on', type=int, default=3,
 p.add_argument('--button', type=int, default=1, help='momentary button pin')
 p.add_argument('--button-gnd', type=int, default=21,
                help="local ground for the button's second terminal, -1 = real GND")
-p.add_argument('--sense', type=int, default=2,
+p.add_argument('--sense', type=int, default=0,
                help='board-power sense pin (ADC), -1 = not wired')
 p.add_argument('--led', type=int, default=8,
                help='feedback LED pin, blinks while the button reads pressed '
@@ -171,9 +171,11 @@ if not a.disabled and not errors:
         elif flag == '--sense' and v in chip['strap']:
             warnings.append(
                 f'--sense {v}: GPIO{v} is a strapping pin on {a.target}, and '
-                'the sense line is low whenever the machine is off — a cold '
-                'standby power-up can strap a wrong boot mode and keep the '
-                'chip (and the button) dead until the line drifts high')
+                'the sense line is held low whenever the machine is off (on '
+                'the BC-250 it is a dead 3.3 V rail, not a floating line that '
+                'might drift high) — any reset with the machine off can strap '
+                'a wrong boot mode and leave the chip, and the button, dead. '
+                'On the C3 use --sense 0 instead')
         if flag == '--ps-on' and chip['hold'] is not None \
                 and v not in chip['hold']:
             warnings.append(

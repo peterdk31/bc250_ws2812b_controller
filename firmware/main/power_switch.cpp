@@ -33,10 +33,19 @@
 //   * The button reads with an internal pull-up (pressed = LOW); an optional
 //     second pin is driven LOW as the button's local ground, so a two-wire
 //     switch needs no run to a real GND pin.
-//   * The sense wire (TPMS1 pin 9 on the BC-250) sits near ~2.9 V when the
-//     board is up — high-impedance and hovering close to the digital logic
-//     threshold, so it's read as an averaged ADC voltage with hysteresis
-//     instead of a flaky digitalRead.
+//   * The sense wire (TPMS1 pin 9 on the BC-250) is the board's main 3.3 V
+//     rail — a stiff, well-decoupled node, NOT a soft signal line. It is the
+//     right thing to sense because the BC-250 runs on 12 V alone and derives
+//     both its 3.3 V rails on board: while we hold PS_ON# the 12 V input and
+//     TPMS1's 3VSB (pin 15) stay up, and only this rail collapses when the OS
+//     powers itself down. Read as an averaged ADC voltage with hysteresis
+//     rather than digitally — a rail would read fine digitally, but the mV
+//     window also catches a half-collapsed rail and makes the level visible
+//     in the debug log. Note the ADC saturates near 3.1 V at 12 dB
+//     attenuation, so a healthy 3.3 V rail logs as ~2.9-3.1 V, not 3300.
+//   * Do NOT sense TPMS1 pin 15 (3VSB): it stays up whenever PS_ON# is held,
+//     so it reads exactly like a working sense wire and then silently never
+//     fires the follow-down or the boot timeout.
 //   * "Off" here means cutting the PSU — a hard power-off, not a graceful OS
 //     shutdown; hence the hold-to-fire threshold. A graceful shutdown is the
 //     board's own: it turns itself off, the sense line drops, and we release

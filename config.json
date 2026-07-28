@@ -7,7 +7,7 @@
     },
     "strip": {
         "leds": 26,
-        "pin": 13,
+        "pin": 4,
         "reverse": false,
         "brightness": 1.0,
         "gamma": "2.2",
