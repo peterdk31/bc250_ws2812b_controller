@@ -130,6 +130,37 @@ sudo make flash-source              # build (container/native) + flash
 make receiver                       # build only, no flash
 ```
 
+**Clearing the board's saved state** — the reset switch when the receiver acts
+as if it remembers something wrong. Each erases one partition region; the app
+and the power-switch wiring (`pwrcfg`) are untouched:
+
+```sh
+sudo make clear-nvs                 # remembered baud + strip geometry
+sudo make clear-recordings          # stored boot/shutdown animations
+```
+
+The daemon re-uploads the recordings on its next start (and the receiver
+re-formats the partition), so `clear-recordings` is also how you get past a
+stale or half-written slot that the skip-unchanged hash check would otherwise
+keep. As with flashing, esptool resets the chip — see the caveat under
+[Power switch](#power-switch).
+
+### Receiver debug log
+
+The receiver has no console (the link is the daemon's), so it keeps a small log
+ring in RAM and hands it back over the link on request. Set
+
+```jsonc
+"sinks": { "serial": { "debug_log": true } }
+```
+
+and its lines appear in `journalctl -u led-controller` — the recording uploads
+and where they went, boot/shutdown replays, host-gone/host-back transitions, the
+strip blanking on timeout, and the power switch's own decisions. The ring is in
+RAM on a board running from 5VSB, so events logged while the host was down (a
+follow-down, a boot replay) drain once the daemon is back. With the flag off the
+daemon never asks and the receiver never transmits.
+
 ## Configuration
 
 `/etc/led-controller/config.json`:

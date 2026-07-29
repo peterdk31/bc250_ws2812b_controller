@@ -231,8 +231,26 @@ ESPTOOL_RESOLVE = tool="$(ESPTOOL)"; \
 	[ -n "$$tool" ] || { python3 -c 'import esptool' >/dev/null 2>&1 && tool="python3 -m esptool"; }; \
 	[ -n "$$tool" ] || { echo "esptool not found on host (it's tiny — 'pipx install esptool' or 'pip install --user esptool')"; exit 1; }
 
-# the pwrcfg partition's offset, read from the table itself so it can't drift
-PWRCFG_OFF = $(shell awk -F, '$$1=="pwrcfg" {gsub(/ /,""); print $$4}' firmware/partitions.csv)
+# The daemon holds the serial port open, so free it around anything esptool
+# does and put it back afterwards. The port isn't opened exclusively — a daemon
+# still streaming frames collides with esptool ("Invalid head of packet").
+# Stopping the unit covers the normal case; fuser -k clears a hand-started
+# daemon. PORT_FREE remembers in $$active whether the service was running;
+# PORT_RESTORE (paired with it, after the esptool run) starts it again if so.
+PORT_FREE = active=0; systemctl is-active --quiet led-controller && active=1; \
+	[ $$active = 1 ] && systemctl stop led-controller; \
+	if command -v fuser >/dev/null 2>&1 && fuser $(PORT) >/dev/null 2>&1; then \
+		echo "$(PORT) still held after stopping the service; freeing it:"; \
+		fuser -v $(PORT) || true; fuser -k $(PORT) || true; sleep 1; \
+	fi
+PORT_RESTORE = [ $$active = 1 ] && systemctl start led-controller
+
+# partition geometry, read from the table itself so no offset can drift out of
+# sync with it (columns: Name,Type,SubType,Offset,Size,Flags)
+part_off = $(shell awk -F, '$$1=="$(1)" {gsub(/ /,""); print $$4}' firmware/partitions.csv)
+part_size = $(shell awk -F, '$$1=="$(1)" {gsub(/ /,""); print $$5}' firmware/partitions.csv)
+
+PWRCFG_OFF = $(call part_off,pwrcfg)
 PWRCFG_BIN = firmware/dist/pwrcfg.bin
 # shell snippet (companion to ESPTOOL_RESOLVE): when PWR is set, encode the
 # PWR_* vars into $(PWRCFG_BIN) and set $$pwr to the extra offset+file pair for
@@ -292,11 +310,6 @@ receiver: led receiver-toolchain
 # 0x0. Needs no ESP-IDF/container — just esptool and curl/wget. The image is
 # generic (built with default HOST_BAUD; the receiver auto-hunts the baud), so
 # it fits any config. Build-from-source instead with `make flash-source`.
-#
-# The daemon holds the serial port open, so free it around the flash and restart
-# only if it was running (the port isn't opened exclusively — a daemon still
-# streaming frames collides with esptool, "Invalid head of packet"). Stopping
-# the unit covers the normal case; fuser -k clears a hand-started daemon.
 flash:
 	-@$(MAKE) --no-print-directory serial-perms
 	@$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); \
@@ -309,16 +322,11 @@ flash:
 		if [ -f "$$img" ]; then echo "download failed; using cached $$img"; \
 		else echo "no prebuilt image for $(TARGET) — has a 'v*' release been published? otherwise build locally: make flash-source"; rm -f "$$img"; exit 1; fi; \
 	fi; \
-	active=0; systemctl is-active --quiet led-controller && active=1; \
-	[ $$active = 1 ] && systemctl stop led-controller; \
-	if command -v fuser >/dev/null 2>&1 && fuser $(PORT) >/dev/null 2>&1; then \
-		echo "$(PORT) still held after stopping the service; freeing it:"; \
-		fuser -v $(PORT) || true; fuser -k $(PORT) || true; sleep 1; \
-	fi; \
+	$(PORT_FREE); \
 	echo "flashing $(TARGET) via $$tool on $(PORT)"; \
 	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash 0x0 "$$img" $$pwr; \
 	rc=$$?; \
-	[ $$active = 1 ] && systemctl start led-controller; \
+	$(PORT_RESTORE); \
 	exit $$rc
 
 # build the firmware from source (container or native, see `receiver`) and flash
@@ -330,16 +338,11 @@ flash-source: receiver
 	-@$(MAKE) --no-print-directory serial-perms
 	@[ -f "$(RECEIVER_BUILD)/flash_args" ] || { echo "flash_args missing in $(RECEIVER_BUILD) (did the build run?)"; exit 1; }; \
 	$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); \
-	active=0; systemctl is-active --quiet led-controller && active=1; \
-	[ $$active = 1 ] && systemctl stop led-controller; \
-	if command -v fuser >/dev/null 2>&1 && fuser $(PORT) >/dev/null 2>&1; then \
-		echo "$(PORT) still held after stopping the service; freeing it:"; \
-		fuser -v $(PORT) || true; fuser -k $(PORT) || true; sleep 1; \
-	fi; \
+	$(PORT_FREE); \
 	echo "flashing $(TARGET) via $$tool on $(PORT)"; \
 	( cd "$(RECEIVER_BUILD)" && $$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash @flash_args $$pwr ); \
 	rc=$$?; \
-	[ $$active = 1 ] && systemctl start led-controller; \
+	$(PORT_RESTORE); \
 	exit $$rc
 
 # write only the 4 KB pwrcfg partition: enable, re-pin or disable the power
@@ -350,16 +353,47 @@ flash-pwr:
 	-@$(MAKE) --no-print-directory serial-perms
 	@[ -n "$(PWR)" ] || { echo 'set PWR=on (write the wiring, PWR_* vars override defaults) or PWR=off (disable)'; exit 1; }; \
 	$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); \
-	active=0; systemctl is-active --quiet led-controller && active=1; \
-	[ $$active = 1 ] && systemctl stop led-controller; \
-	if command -v fuser >/dev/null 2>&1 && fuser $(PORT) >/dev/null 2>&1; then \
-		echo "$(PORT) still held after stopping the service; freeing it:"; \
-		fuser -v $(PORT) || true; fuser -k $(PORT) || true; sleep 1; \
-	fi; \
+	$(PORT_FREE); \
 	echo "writing power-switch config ($(PWR)) via $$tool on $(PORT)"; \
 	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash $$pwr; \
 	rc=$$?; \
-	[ $$active = 1 ] && systemctl start led-controller; \
+	$(PORT_RESTORE); \
+	exit $$rc
+
+# Wipe the receiver's saved state without reflashing the app — the reset switch
+# for "it behaves as if it remembers something wrong":
+#
+#   make clear-nvs          the NVS key store: remembered baud + strip geometry
+#                           (prefs.*) and the power switch's own namespace. The
+#                           firmware re-learns all of it from the next frames.
+#   make clear-recordings   the LittleFS partition holding the boot/shutdown
+#                           animations. The daemon re-uploads them (and the
+#                           receiver re-formats the partition) on its next start,
+#                           so this also clears a stale or half-written slot that
+#                           the skip-unchanged hash check would otherwise keep.
+#
+# Both are plain erases of one partition region, offsets read from
+# partitions.csv — the app, and pwrcfg (the power-switch wiring), are untouched.
+# Note esptool resets the chip: the reflashing caveat in the README's "Power
+# switch" section applies here too.
+clear-nvs:
+	@$(call erase_part,nvs,saved baud + strip geometry)
+	@echo "(the boot/shutdown recordings are not in NVS — they live on the" \
+	      "'storage' partition: make clear-recordings)"
+
+clear-recordings:
+	@$(call erase_part,storage,boot + shutdown recordings)
+
+# erase one named partition region: $(1) = partition name, $(2) = what it holds
+erase_part = \
+	off="$(call part_off,$(1))"; size="$(call part_size,$(1))"; \
+	[ -n "$$off" ] && [ -n "$$size" ] || { echo "no '$(1)' partition in firmware/partitions.csv"; exit 1; }; \
+	$(ESPTOOL_RESOLVE); \
+	$(PORT_FREE); \
+	echo "erasing $(1) ($(2)) at $$off, $$size bytes, via $$tool on $(PORT)"; \
+	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) erase_region $$off $$size; \
+	rc=$$?; \
+	$(PORT_RESTORE); \
 	exit $$rc
 
 # reclaim the space: build dirs, downloaded prebuilt images, and the cached
@@ -368,4 +402,4 @@ receiver-clean:
 	rm -rf firmware/build firmware/build-* firmware/dist $(IDF_GENERATED)
 	-@[ -n "$(CONTAINER)" ] && $(CONTAINER) rmi $(IDF_IMAGE) 2>/dev/null || true
 
-.PHONY: all install install-config uninstall clean udev-rule serial-perms receiver-toolchain receiver receiver-clean flash flash-source flash-pwr
+.PHONY: all install install-config uninstall clean udev-rule serial-perms receiver-toolchain receiver receiver-clean flash flash-source flash-pwr clear-nvs clear-recordings
