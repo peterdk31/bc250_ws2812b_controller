@@ -4,7 +4,10 @@
 // standby rail, it stands in for the jumper the BC-250 otherwise needs on the
 // FSP unit's PS_ON# line. Pressing a momentary button sinks PS_ON# to ground
 // (via an N-channel MOSFET the pin gates — PSU on, board boots); holding it
-// for HOLD_MS while the machine is up forces the PSU off. An
+// for HOLD_MS while the machine is up forces the PSU off; and a short press
+// while the machine is up asks the host, over the link, to shut its OS down
+// gracefully (hostreq.hpp — the receiver cannot do that itself, and does
+// nothing to the PSU either way). An
 // optional analog sense wire (BC-250 TPMS1 pin 9, the board's main 3.3 V rail
 // — not pin 15, which is 3VSB) tells it when the board is
 // actually up, which adds: follow a graceful OS shutdown down (release PS_ON#

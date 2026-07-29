@@ -159,7 +159,9 @@ and where they went, boot/shutdown replays, host-gone/host-back transitions, the
 strip blanking on timeout, and the power switch's own decisions. The ring is in
 RAM on a board running from 5VSB, so events logged while the host was down (a
 follow-down, a boot replay) drain once the daemon is back. With the flag off the
-daemon never asks and the receiver never transmits.
+daemon never asks and the receiver never sends a log line — the only thing it
+ever says unprompted is a power-button request (see
+[Power switch](#power-switch)).
 
 ## Configuration
 
@@ -168,7 +170,14 @@ daemon never asks and the receiver never transmits.
 ```jsonc
 {
     "sinks": {
-        "serial": { "port": "/dev/ttyUSB0", "baud": 921600 }
+        "serial": {
+            "port": "/dev/ttyUSB0",
+            "baud": 921600,
+            "debug_log": false,     // drain the receiver's log to journalctl
+            "power_button": false,  // honor a short press on the receiver's power
+                                    // button (see Power switch) — off by default
+            "power_button_command": "systemctl poweroff"
+        }
     },                          // port "none" or "" (or LED_PORT=none) runs headless;
                                 // omitting the key defaults to /dev/ttyUSB0
     "strip": {
@@ -409,10 +418,23 @@ minus its WiFi/BLE):
 - **Press** the button while off → PS_ON# is sunk to ground, the PSU starts,
   the board boots. It fires on the press itself, not on the release, so that
   keeping it held afterwards is free to mean the failsafe below.
+- **Short press** while the machine is up → the ordinary PC power-button
+  gesture: the OS is asked to shut itself down gracefully. The receiver can't
+  do that itself, so it asks over the link and the daemon runs
+  `sinks.serial.power_button_command` (default `systemctl poweroff`); the
+  machine then powers itself off and the sense wire's follow-down releases
+  PS_ON#. **This needs `"sinks": { "serial": { "power_button": true } }` in the
+  daemon's config** — it is off by default, so a box that hasn't opted in
+  ignores the press (and says so in the journal). If nobody answers within 3 s
+  — daemon down, no OS yet, feature off — the request is dropped and the
+  feedback LED blinks fast for a moment, because otherwise an unheard press
+  looks exactly like a broken button. Nothing about this path touches PS_ON#:
+  the worst case is a machine that stays on.
 - **Hold** for 2 s while on → PS_ON# is released — a hard power-off for a
-  wedged machine. (Only a press that began while the machine was already up
-  can do this: the press that powered it on never turns it back off, however
-  long it's held.)
+  wedged machine, and the answer to an OS that accepts the graceful request and
+  then hangs. (Only a press that began while the machine was already up can do
+  this: the press that powered it on never turns it back off, however long it's
+  held.)
 - With the **sense** wire (BC-250: TPMS1 pin 9, ~2.9 V while the board is
   up): a graceful OS shutdown is followed down (the sense line drops, the
   receiver releases PS_ON# so the PSU turns off too), and a board that never

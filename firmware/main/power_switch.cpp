@@ -14,7 +14,10 @@
 #include "esp_system.h"
 #include "nvs.h"
 
+#include "protocol.hpp"
+
 #include "dbglog.hpp"
+#include "hostreq.hpp"
 #include "util.hpp"
 
 // Diagnostics go to the in-RAM debug log (dbglog.hpp), which the daemon drains
@@ -49,10 +52,19 @@
 //   * Do NOT sense TPMS1 pin 15 (3VSB): it stays up whenever PS_ON# is held,
 //     so it reads exactly like a working sense wire and then silently never
 //     fires the follow-down or the boot timeout.
+//   * A SHORT press while the machine is up is the ordinary PC power-button
+//     gesture: shut the OS down gracefully. Nothing here can do that — only the
+//     OS can — so it asks, over the link, and the daemon runs its poweroff
+//     command (hostreq.hpp, and "sinks.serial.power_button" on the host). We
+//     then do nothing at all: the board powers itself off, the sense line drops,
+//     and the follow-down below cuts the PSU. If nobody answers within
+//     REQ_ACK_MS — no daemon, no OS, the host feature left off — the request is
+//     dropped and the feedback LED says so, because otherwise an unheard press
+//     is indistinguishable from a dead button.
 //   * "Off" here means cutting the PSU — a hard power-off, not a graceful OS
-//     shutdown; hence the hold-to-fire threshold. A graceful shutdown is the
-//     board's own: it turns itself off, the sense line drops, and we release
-//     PS_ON# so the PSU follows it down.
+//     shutdown; hence the hold-to-fire threshold, and why a press that ends
+//     early is the graceful one. Holding stays the only hard cut, which is also
+//     the answer to an OS that accepts the request and then wedges.
 //   * FAILSAFE: while the button is physically held, the sense line cannot
 //     release PS_ON# — no follow-down, and the boot timeout counts from the
 //     release rather than from the power-on. A sense wire that reads low while
@@ -81,6 +93,9 @@ static const uint32_t DEBOUNCE_MS = 30;         // button, and sense going UP
 static const uint32_t LED_BLINK_MS = 100;       // feedback LED half-period while pressed
 static const uint32_t BOARD_OFF_DEBOUNCE_MS = 1500; // sense must stay down this long
                                                     // (filters dips during boot/reset)
+static const uint32_t REQ_ACK_MS = 3000;      // host must answer a shutdown request within this
+static const uint32_t NAK_BLINK_MS = 1500;    // ...or the LED blinks this long to report it
+static const uint32_t NAK_BLINK_HALF_MS = 60; // fast, so it can't be read as a press blink
 static const int SENSE_OVERSAMPLE = 16; // ADC reads averaged per sample: TPMS1 is
                                         // high-impedance and one-shot reads spike, and a
                                         // single spike past the hysteresis would restart
@@ -198,6 +213,11 @@ static bool btnLongFired = false; // this press can no longer force off: either
                                   // powered on / was already held when the
                                   // chip came up (holding to keep the failsafe
                                   // alive must never cut the power it protects)
+
+// graceful-shutdown request in flight: millis() when we asked the host (0 =
+// nothing outstanding), and when the "nobody answered" LED burst began
+static uint32_t g_reqStart = 0;
+static uint32_t g_nakBlink = 0;
 
 // sense debounce (on the hysteresis output, not the raw voltage)
 static adc_oneshot_unit_handle_t g_adc = nullptr;
@@ -373,6 +393,16 @@ static void powerOff()
     g_state = OFF;
 }
 
+// ask the host to shut itself down (see the short-press note at the top). Asking
+// again while one is outstanding is deliberate — the user pressing a second time
+// wants another try, and the daemon acts on the first request only.
+static void requestShutdown(uint32_t now)
+{
+    g_reqStart = now ? now : 1;
+    hostreq::request(proto::REQ_HOST_SHUTDOWN);
+    PLOG("short press: asked the host for a graceful shutdown");
+}
+
 // ---- the task ----
 
 static void loop()
@@ -407,6 +437,18 @@ static void loop()
                     btnLongFired = true;
                 }
             }
+            else if (!btnLongFired)
+            {
+                // released early, and this press neither powered anything on nor
+                // forced anything off (both set btnLongFired): the short press.
+                if (g_state == ON)
+                    requestShutdown(now);
+                else
+                    // BOOTING: the OS isn't up, so there's nobody to ask yet.
+                    // Logged because from the outside this looks like a dead
+                    // button.
+                    PLOG("short press ignored: board is still BOOTING");
+            }
         }
 
         // hold-to-force-off fires while still held (no release needed — the
@@ -420,14 +462,55 @@ static void loop()
             powerOff();
         }
 
-        // feedback LED: blink while the debounced button reads pressed. A
-        // blink is visible on active-high and active-low LEDs alike, so the
-        // board's polarity never needs configuring; idle drives HIGH, which
-        // is dark on the common active-low onboard LEDs.
+        // feedback LED: blink while the debounced button reads pressed, and
+        // again — faster, for NAK_BLINK_MS — when a shutdown request went
+        // unanswered, which is the one outcome that leaves no other trace (the
+        // machine simply stays on). A blink is visible on active-high and
+        // active-low LEDs alike, so the board's polarity never needs
+        // configuring; idle drives HIGH, which is dark on the common active-low
+        // onboard LEDs.
         if (g_cfg.ledPin >= 0)
         {
-            bool low = btnStable && (now - btnPressStart) / LED_BLINK_MS % 2 == 0;
+            bool low = false;
+
+            if (btnStable)
+                low = (now - btnPressStart) / LED_BLINK_MS % 2 == 0;
+            else if (g_nakBlink && now - g_nakBlink < NAK_BLINK_MS)
+                low = (now - g_nakBlink) / NAK_BLINK_HALF_MS % 2 == 0;
+            else
+                g_nakBlink = 0;
+
             gpio_set_level((gpio_num_t)g_cfg.ledPin, low ? 0 : 1);
+        }
+    }
+
+    // an outstanding graceful-shutdown request. Note what this does NOT do: it
+    // never touches PS_ON# on any outcome. Answered means the OS is going down
+    // and the follow-down will cut the PSU; unanswered means nobody could hear
+    // us and the machine stays up, which is the safe end of the two.
+    if (g_reqStart)
+    {
+        if (hostreq::acked())
+        {
+            PLOG("host accepted the shutdown; waiting for it to go down");
+            hostreq::cancel();
+            g_reqStart = 0;
+        }
+        else if (g_state == OFF)
+        {
+            // the power went away under us (a hold, or a shutdown already in
+            // flight); nothing left to ask
+            hostreq::cancel();
+            g_reqStart = 0;
+        }
+        else if (now - g_reqStart >= REQ_ACK_MS)
+        {
+            PLOG("no answer in %ums: daemon down, or its "
+                 "sinks.serial.power_button is off",
+                 (unsigned)REQ_ACK_MS);
+            hostreq::cancel();
+            g_reqStart = 0;
+            g_nakBlink = now ? now : 1;
         }
     }
 

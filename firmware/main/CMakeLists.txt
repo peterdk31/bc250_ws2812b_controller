@@ -7,7 +7,7 @@
 # requirements automatically, so they don't need listing here.
 idf_component_register(
     SRCS "main.cpp" "link.cpp" "prefs.cpp" "render.cpp" "rec_store.cpp"
-         "led_service.cpp" "power_switch.cpp" "dbglog.cpp"
+         "led_service.cpp" "power_switch.cpp" "dbglog.cpp" "hostreq.cpp"
     INCLUDE_DIRS "." "${CMAKE_CURRENT_LIST_DIR}/../../common"
     REQUIRES driver nvs_flash esp_timer esp_adc esp_partition
 )

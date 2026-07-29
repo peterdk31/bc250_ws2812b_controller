@@ -15,6 +15,7 @@
 #include "recording.hpp"
 
 #include "dbglog.hpp"
+#include "hostreq.hpp"
 #include "link.hpp"
 #include "prefs.hpp"
 #include "rec_store.hpp"
@@ -150,6 +151,12 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
         hostSeen = true;
         shuttingDown = true;
 
+        // if the power switch asked for this shutdown, it just got its answer:
+        // the host is going down, which is the whole of what it asked. Stops the
+        // repeat (and the "nobody answered" report) even if the explicit ack was
+        // lost or never made it out before systemd stopped the daemon.
+        hostreq::satisfy(proto::REQ_HOST_SHUTDOWN);
+
         // optional 2-byte payload: how long to dissolve from the last live
         // frame into the shutdown recording (see protocol.hpp). The replay path
         // stamps proto::ANIM_SHUTDOWN on those frames, so the dissolve happens
@@ -221,6 +228,12 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
               | ((uint32_t)payload[2] << 16) | ((uint32_t)payload[3] << 24)
             : 0;
         dbglog::onDrain(since);
+    }
+    else if (cmd == proto::CMD_REQ_ACK)
+    {
+        // the host heard a request of ours (hostreq.hpp) — payload echoes the
+        // req code and nonce
+        hostreq::onAck(payload, len);
     }
 }
 
@@ -378,6 +391,12 @@ static void loop()
     } while (n == (int)sizeof chunk);
 
     unsigned long now = millis();
+
+    // the receiver→host request channel (hostreq.hpp). This task owns link
+    // writes, so an outstanding request — the power switch asking the host to
+    // shut itself down — is transmitted from here and nowhere else. A no-op
+    // unless one is pending, which is approximately always.
+    hostreq::tick((uint32_t)now);
 
     // notice the host going away and coming back (USB links; see HOST_GONE_MS).
     // When it returns after a real absence, re-arm the power-on replay exactly

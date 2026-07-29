@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -51,6 +52,18 @@ public:
         // behavior exactly (write-only, no reads, nothing polled).
         bool debug = cfg.getBool("sinks.serial.debug_log", false);
 
+        // opt-in power button: the receiver's power switch (firmware/main/
+        // power_switch.cpp) sends a REQ_HOST_SHUTDOWN when its button gets a
+        // short press while the machine is up — the ordinary PC power-button
+        // gesture, which only the OS can honor. With this set we honor it by
+        // running `command`. Deliberately off by default: a byte sequence on a
+        // serial port that powers the machine down deserves an explicit yes,
+        // and a box without the button wired should never grow the behavior
+        // just by updating the daemon.
+        bool button = cfg.getBool("sinks.serial.power_button", false);
+        std::string buttonCmd = cfg.get("sinks.serial.power_button_command",
+                                        "systemctl poweroff");
+
         if (isHeadless(port))
         {
             fprintf(stderr, "serial: headless (port \"%s\"); no hardware output\n",
@@ -58,11 +71,14 @@ public:
             return nullptr;
         }
 
-        return std::unique_ptr<SerialSink>(new SerialSink(port.c_str(), baud, debug));
+        return std::unique_ptr<SerialSink>(
+            new SerialSink(port.c_str(), baud, debug, button, buttonCmd));
     }
 
-    SerialSink(const char* port, int baud = 921600, bool debug = false)
-        : debug_(debug)
+    SerialSink(const char* port, int baud = 921600, bool debug = false,
+               bool powerButton = false,
+               const std::string& powerCmd = "systemctl poweroff")
+        : debug_(debug), powerButton_(powerButton), powerCmd_(powerCmd)
     {
         speed_t speed = baudToSpeed(baud);
 
@@ -72,9 +88,10 @@ public:
             exit(1);
         }
 
-        // the debug backchannel needs to read replies, so open read/write;
-        // otherwise keep the port write-only as before
-        fd = open(port, (debug_ ? O_RDWR : O_WRONLY) | O_NOCTTY);
+        // both backchannel features need the return direction, so open
+        // read/write for them; with neither on, keep the port write-only and
+        // nothing is ever read or parsed
+        fd = open(port, (reading() ? O_RDWR : O_WRONLY) | O_NOCTTY);
 
         if (fd < 0)
         {
@@ -105,10 +122,14 @@ public:
         }
 
         if (debug_)
-        {
             fprintf(stderr, "serial: debug log backchannel on (%s)\n", port);
+
+        if (powerButton_)
+            fprintf(stderr, "serial: receiver power button on, will run \"%s\"\n",
+                    powerCmd_.c_str());
+
+        if (reading())
             reader_ = std::thread(&SerialSink::readerLoop, this);
-        }
     }
 
     SerialSink(const SerialSink&) = delete;
@@ -128,6 +149,19 @@ public:
         // sole writer thread, so it can't interleave with a pixel frame.
         if (debug_)
             maybeDrain();
+
+        // and, for the same reason, the reader thread hands its acks here rather
+        // than writing them itself — two threads writing a tty can interleave
+        // mid-frame. Frames go out every few tens of ms, so this is prompt.
+        if (uint64_t ack = ackPending_.exchange(0, std::memory_order_relaxed))
+        {
+            uint8_t p[5];
+            p[0] = (uint8_t)(ack >> 32); // req
+            for (int i = 0; i < 4; i++)
+                p[1 + i] = (uint8_t)(ack >> (8 * i)); // nonce, little-endian
+
+            sendCommand(proto::CMD_REQ_ACK, p, sizeof p);
+        }
 
         if (frame.empty())
             return true;
@@ -205,17 +239,87 @@ private:
         writeAll(f, sizeof f); // best-effort; a real fault stops us via send()
     }
 
-    // read the return direction and forward each valid LOG frame (protocol.hpp)
-    // to stderr -> journald. Runs only when the debug backchannel is on.
+    bool reading() const { return debug_ || powerButton_; }
+
+    // Act on a request frame from the receiver. Reader thread only.
+    void onRequest(uint8_t req, uint32_t nonce)
+    {
+        if (req != proto::REQ_HOST_SHUTDOWN)
+            return; // a newer receiver asking for something we don't know
+
+        if (!powerButton_)
+        {
+            // we parse the return direction whenever we read at all (i.e. for
+            // debug_log alone too), but acting is opt-in. Say so once: from the
+            // button's end an ignored press is indistinguishable from a broken
+            // wire, and this line is the difference.
+            if (!warnedOff_)
+            {
+                warnedOff_ = true;
+                fprintf(stderr, "serial: receiver asked for a graceful shutdown, "
+                                "but sinks.serial.power_button is off — ignoring\n");
+            }
+            return;
+        }
+
+        // Ack every request, repeats included: the receiver re-asks until it
+        // hears one and reports the silence on its LED. Queue the ack before
+        // starting the shutdown, so it still goes out on a frame or two before
+        // systemd stops us.
+        ackPending_.store(((uint64_t)req << 32) | nonce, std::memory_order_relaxed);
+
+        if (poweringOff_.exchange(true))
+            return; // already running; the repeats are just asking again
+
+        fprintf(stderr, "serial: receiver power button — running \"%s\"\n",
+                powerCmd_.c_str());
+        spawnDetached(powerCmd_);
+    }
+
+    // Run a command without waiting on it. Double-forked so the grandchild is
+    // reparented to init and can't sit as a zombie in a daemon that is, after
+    // all, about to be told to exit; exec'd through sh so the config can hold a
+    // plain command line. It inherits our privileges — root, under the shipped
+    // unit, which is what makes a bare `systemctl poweroff` work.
+    static void spawnDetached(const std::string& cmd)
+    {
+        pid_t mid = fork();
+
+        if (mid < 0)
+        {
+            perror("serial: fork");
+            return;
+        }
+
+        if (mid > 0)
+        {
+            waitpid(mid, nullptr, 0); // exits immediately, see below
+            return;
+        }
+
+        if (fork() == 0)
+        {
+            execl("/bin/sh", "sh", "-c", cmd.c_str(), (char*)nullptr);
+            _exit(127);
+        }
+
+        _exit(0);
+    }
+
+    // read the return direction and dispatch each valid receiver→host frame
+    // (protocol.hpp): LOG frames to stderr -> journald, request frames to
+    // onRequest. Runs only when one of the two backchannel features is on.
     void readerLoop()
     {
-        enum { SCAN, TYPE, HDR, DATA, SUM } st = SCAN;
+        enum { SCAN, TYPE, LOG_HDR, LOG_DATA, LOG_SUM, REQ_BODY } st = SCAN;
         uint8_t hdr[9];
         int hn = 0, len = 0, have = 0;
         uint32_t seq = 0, ms = 0;
         uint8_t sum = 0;
         char text[256];
         uint8_t buf[256];
+        uint8_t rq[6];
+        int rn = 0;
 
         while (!stop_.load(std::memory_order_relaxed))
         {
@@ -242,10 +346,28 @@ private:
                     if (b == proto::SYNC0) st = TYPE;
                     break;
                 case TYPE:
-                    if (b == proto::LOG_SYNC) { st = HDR; hn = 0; }
+                    if (b == proto::LOG_SYNC) { st = LOG_HDR; hn = 0; }
+                    else if (b == proto::REQ_SYNC) { st = REQ_BODY; rn = 0; }
                     else if (b != proto::SYNC0) st = SCAN;
                     break;
-                case HDR:
+                case REQ_BODY:
+                    // req(1) nonce(4) checksum
+                    rq[rn++] = b;
+                    if (rn == 6)
+                    {
+                        uint8_t s = 0;
+                        for (int k = 0; k < 5; k++) s ^= rq[k];
+
+                        if (s == rq[5])
+                            onRequest(rq[0],
+                                      (uint32_t)rq[1] | ((uint32_t)rq[2] << 8)
+                                          | ((uint32_t)rq[3] << 16)
+                                          | ((uint32_t)rq[4] << 24));
+
+                        st = SCAN;
+                    }
+                    break;
+                case LOG_HDR:
                     hdr[hn++] = b;
                     if (hn == 9)
                     {
@@ -257,15 +379,15 @@ private:
                         sum = 0;
                         for (int k = 0; k < 9; k++) sum ^= hdr[k];
                         have = 0;
-                        st = (len == 0) ? SUM : DATA;
+                        st = (len == 0) ? LOG_SUM : LOG_DATA;
                     }
                     break;
-                case DATA:
+                case LOG_DATA:
                     text[have++] = (char)b;
                     sum ^= b;
-                    if (have == len) st = SUM;
+                    if (have == len) st = LOG_SUM;
                     break;
-                case SUM:
+                case LOG_SUM:
                     if (b == sum)
                     {
                         text[len] = 0;
@@ -326,8 +448,19 @@ private:
 
     // debug backchannel (see fromConfig); all inert when debug_ is false
     bool debug_ = false;
-    std::thread reader_;
-    std::atomic<bool> stop_{false};
     std::atomic<uint32_t> lastSeq_{0}; // highest log seq received so far
     std::chrono::steady_clock::time_point lastDrain_{};
+
+    // receiver power button (see fromConfig); inert when powerButton_ is false
+    bool powerButton_ = false;
+    std::string powerCmd_;
+    std::atomic<bool> poweringOff_{false}; // the command has been run once
+    bool warnedOff_ = false;               // reader thread only
+
+    // the reader thread's return direction, in both senses: it reads frames,
+    // and hands acks back to the writer (see send())
+    std::thread reader_;
+    std::atomic<bool> stop_{false};
+    std::atomic<uint64_t> ackPending_{0}; // (req<<32)|nonce; 0 = none pending
+                                          // (the receiver never sends nonce 0)
 };

@@ -10,14 +10,19 @@
 // command frame: SYNC0 CMD_SYNC cmd len_lo len_hi <payload[len]> checksum
 //
 // log frame:     SYNC0 LOG_SYNC seq(4) ms(4) len <text[len]> checksum
-//   The one receiver→host frame, and the only traffic in that direction. It's
-//   a debug backchannel: when the daemon has "sinks.serial.debug_log" set it
-//   periodically sends CMD_LOG_DRAIN with the highest seq it has seen, and the
-//   receiver replies with one of these per buffered log line newer than that
-//   (see firmware/main/dbglog.*). All little-endian; checksum is the XOR of the
-//   seq, ms, len bytes and the text. With the feature off the daemon never
-//   drains, the receiver never transmits, and the link stays host→receiver as
-//   before — an older peer on either end simply never exchanges these.
+//   A receiver→host frame — a debug backchannel: when the daemon has
+//   "sinks.serial.debug_log" set it periodically sends CMD_LOG_DRAIN with the
+//   highest seq it has seen, and the receiver replies with one of these per
+//   buffered log line newer than that (see firmware/main/dbglog.*). All
+//   little-endian; checksum is the XOR of the seq, ms, len bytes and the text.
+//   With the feature off the daemon never asks and the receiver never sends —
+//   an older peer on either end simply never exchanges these.
+//
+// req frame:     SYNC0 REQ_SYNC req(1) nonce(4) checksum
+//   The other receiver→host frame, and the only one the receiver sends
+//   unsolicited: something only the host can do (see REQ_HOST_SHUTDOWN). The
+//   daemon answers with CMD_REQ_ACK echoing req and nonce. Little-endian
+//   nonce, checksum is the XOR of req and the four nonce bytes.
 //
 // the deep pixel frame is what the daemon sends: each channel is a
 // little-endian 8.8 fixed-point value (the 8-bit strip code × 256, so
@@ -50,6 +55,7 @@ static const uint8_t SYNC1 = 0x55;    // ...then this for an 8-bit pixel frame
 static const uint8_t CMD_SYNC = 0x56; // ...or this for a command frame
 static const uint8_t SYNC1_16 = 0x57; // ...or this for an 8.8 deep pixel frame
 static const uint8_t LOG_SYNC = 0x58; // ...or this for a receiver→host log frame
+static const uint8_t REQ_SYNC = 0x59; // ...or this for a receiver→host request
 
 // bytes a pixel frame (either depth) carries before the pixel data: SYNC0
 // SYNC1/SYNC1_16 pin count(2) anim(2) xms(2). Use this rather than a literal
@@ -106,6 +112,23 @@ static const uint8_t SLOT_SHUTDOWN = 0x01;
 // (LOG_SYNC, above) per matching line. Only sent when the daemon's debug
 // backchannel is enabled; unknown to older firmware, which ignores it.
 static const uint8_t CMD_LOG_DRAIN = 0x05;
+
+// CMD_REQ_ACK: "heard you" for a req frame (REQ_SYNC, above). Payload is 5
+// bytes, the req code and nonce echoed back, so an ack for a request the
+// receiver has already abandoned can't retire the next one. The receiver
+// repeats its request until this arrives; a daemon without the feature enabled
+// never sends it, and the receiver reports the silence rather than assuming.
+static const uint8_t CMD_REQ_ACK = 0x06;
+
+// REQ_HOST_SHUTDOWN: "power yourself down, gracefully." The receiver's power
+// switch sends this on a short button press while the machine is up — the
+// ordinary PC power-button gesture, which nothing but the OS can honor. The
+// daemon runs its configured poweroff command
+// ("sinks.serial.power_button_command"); the receiver then just waits, and its
+// existing sense-line follow-down releases PS_ON# when the board's rail
+// collapses. So this asks the host to do something and never itself decides
+// anything about the PSU — holding the button remains the only hard cut.
+static const uint8_t REQ_HOST_SHUTDOWN = 0x01;
 
 // reserved anim ids the receiver stamps on the recording frames it replays (it
 // knows which slot is playing). This makes the boot→live and live→shutdown
