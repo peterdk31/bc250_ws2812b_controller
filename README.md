@@ -375,18 +375,34 @@ drive that line instead and act as the machine's power button
 (after [Thunkar/bc250-esp32-switch](https://github.com/Thunkar/bc250-esp32-switch),
 minus its WiFi/BLE):
 
-- **Tap** the button while off → PS_ON# is sunk to ground, the PSU starts, the
-  board boots.
+- **Press** the button while off → PS_ON# is sunk to ground, the PSU starts,
+  the board boots. It fires on the press itself, not on the release, so that
+  keeping it held afterwards is free to mean the failsafe below.
 - **Hold** for 2 s while on → PS_ON# is released — a hard power-off for a
-  wedged machine.
+  wedged machine. (Only a press that began while the machine was already up
+  can do this: the press that powered it on never turns it back off, however
+  long it's held.)
 - With the **sense** wire (BC-250: TPMS1 pin 9, ~2.9 V while the board is
   up): a graceful OS shutdown is followed down (the sense line drops, the
   receiver releases PS_ON# so the PSU turns off too), and a board that never
   comes up within 10 s releases the PSU instead of leaving it energized.
   The wire is optional but strongly recommended — without it both are
   skipped, and after every OS shutdown the PSU stays energized, holding
-  PS_ON#, until a 5 s long-press; what's left is less a power button than a
+  PS_ON#, until a 2 s long-press; what's left is less a power button than a
   toggle that sticks on.
+- **Keep holding the button** → the failsafe: while it is physically held the
+  sense line cannot power anything off. Follow-down is suppressed, and the boot
+  timeout is parked, counting its 10 s from the release instead of from the
+  power-on. This is the way out of a mis-wired sense line, which is otherwise
+  self-sealing: a sense pin that reads low while the board is really up (wrong
+  pin, wire fallen off, thresholds wrong) makes the boot timeout cut the PSU
+  ~10 s into every boot, so the machine can never stay up long enough to
+  reflash the config that would fix it. Press to power on, keep your finger
+  down, and the machine stays up while you reflash — including *through* the
+  reflash: a receiver that comes up with the button already held adopts that
+  press as the failsafe, and won't read it as a fresh 2 s force-off either.
+  The sense line is still sampled and logged while held (see the debug log
+  below) — that log is how the right pin and thresholds get found.
 
 Wiring (ESP32-C3 defaults shown; every pin is a `PWR_*` make variable):
 
@@ -395,7 +411,7 @@ Wiring (ESP32-C3 defaults shown; every pin is a `PWR_*` make variable):
 | GPIO3 (`PWR_PS_ON`) | gate of an N-channel MOSFET that sinks PS_ON# to ground (see note below) — **not** PS_ON# directly |
 | GPIO1 (`PWR_BUTTON`) | momentary switch terminal A (internal pull-up, pressed = low) |
 | GPIO21 (`PWR_BUTTON_GND`, -1 if the switch is wired to a real GND) | switch terminal B — driven low as a local ground, so the button needs no run to a real GND. (U0TXD: free while the host link is USB) |
-| GPIO0 (`PWR_SENSE`, -1 = not wired) | optional board-power sense, e.g. BC-250 TPMS1 pin 9, which is the board's main **3.3 V rail**. Emphatically *not* pin 15 (`3VSB`): that stays up whenever PS_ON# is held, so it reads like a working sense wire and then never fires follow-down or the boot timeout. Read as an averaged ADC voltage with hysteresis (`PWR_SENSE_LOW`/`PWR_SENSE_HIGH` mV); the ADC saturates near 3.1 V, so a healthy rail logs ~2.9–3.1 V |
+| GPIO2 (`PWR_SENSE`, -1 = not wired) | optional board-power sense, e.g. BC-250 TPMS1 pin 9, which is the board's main **3.3 V rail**. Emphatically *not* pin 15 (`3VSB`): that stays up whenever PS_ON# is held, so it reads like a working sense wire and then never fires follow-down or the boot timeout. Read as an averaged ADC voltage with hysteresis (`PWR_SENSE_LOW`/`PWR_SENSE_HIGH` mV); the ADC saturates near 3.1 V, so a healthy rail logs ~2.9–3.1 V |
 | GPIO8 (`PWR_LED`, -1 = none) | optional feedback: the board's own little LED *blinks* while the button reads pressed, so button wiring can be eyeballed without a PSU. GPIO8 is the plain onboard LED on common C3 dev boards; a blink shows regardless of the LED's polarity |
 | 5VSB + GND | PSU standby rail, so the receiver runs while the machine is off — **read the warning below before also plugging in USB** |
 
@@ -438,7 +454,7 @@ ESP32-C3  (running on the PSU's 5VSB standby rail — see the USB warning above)
   GPIO3   ──  2N7000 gate         (PWR_PS_ON)        ── PS_ON# via MOSFET, below
   GPIO1   ──  button  N (common)  (PWR_BUTTON)
   GPIO21  ──  button  NO          (PWR_BUTTON_GND)
-  GPIO0   ──  BC-250 TPMS1 pin 9  (PWR_SENSE)        ── board sense (3.3 V rail)
+  GPIO2   ──  BC-250 TPMS1 pin 9  (PWR_SENSE)        ── board sense (3.3 V rail)
   GPIO8   ──  onboard LED         (PWR_LED)          ── feedback, no wiring
 
 
@@ -463,7 +479,8 @@ Button (momentary; N = common, NO = normally-open)
 ──────────────────────────────────────────────────────────────────────────────
    Pressing shorts N→NO. GPIO1 idles high on its internal pull-up; GPIO21 is
    driven low as the button's local ground, so a press pulls GPIO1 low.
-   Tap = power on, 2 s hold = force off.  (Wire N and NO — NOT the NC terminal.)
+   Press = power on (on the press edge), 2 s hold while up = force off, and
+   held = sense failsafe.  (Wire N and NO — NOT the NC terminal.)
 
 
 LED strip (WS2812B)
@@ -477,25 +494,26 @@ LED strip (WS2812B)
    default `TARGET` (esp32c3); a plain ESP32 wants something like 13.
 ```
 
-Three pin caveats. First, the sense pin defaults to **GPIO0** rather than the
-GPIO2 this hookup originally used, because GPIO2 is one of the C3's strapping
-pins (latched at reset) while TPMS1 pin 9 sits at 0 V whenever the machine is
-off. This is hygiene, not a boot failure — Espressif's design guidelines are
-explicit that on the C3 GPIO2 *"does not determine SPI Boot and Joint Download
-Boot mode"* (that's GPIO9, with GPIO8 supporting), and GPIO2 was verified
-booting fine on real hardware with pin 9 grounded. But the same guidelines
-recommend pulling GPIO2 up for glitch immunity, which a line that is grounded
-half the time plainly doesn't do, so GPIO0 simply avoids the question: it's
-ADC1-capable, not a strapping pin, and otherwise idle. It is also the only ADC
-pin left — GPIO1 is the button, GPIO3 is PS_ON#, and **GPIO4 is the strip's
-DIN**. Severity is chip-specific: on a plain ESP32 the strapping pins *do*
-select boot mode outright (GPIO0 low = download boot), so there a grounded
-strap pin really can stop the chip booting. `tools/pwrcfg.py` warns whenever
-the sense pin is a strapping pin. Second, if the sense wire isn't
-connected, set `PWR_SENSE=-1` rather than leaving the input floating: a
-floating ADC pin reads noise, and the boot timeout may cut the PSU seconds
-after every power-on. Third, the defaults are C3-specific: on a plain ESP32, GPIO1/3 are
-its UART0 console and 0/2 are strapping pins — pick different ones.
+Three pin caveats. First, the sense pin is **GPIO2** — one of the C3's
+strapping pins, and that's fine. It was briefly moved to GPIO0 on hygiene
+grounds (TPMS1 pin 9 sits at 0 V whenever the machine is off, and Espressif
+recommend pulling GPIO2 up for glitch immunity), which turned out to be a bad
+trade: the theory was thin — the same design guidelines are explicit that on
+the C3 GPIO2 *"does not determine SPI Boot and Joint Download Boot mode"*
+(that's GPIO9, with GPIO8 supporting), and GPIO2 was verified booting fine on
+real hardware with pin 9 grounded — while the cost of a default that doesn't
+match the wire in the machine is severe, because a sense pin reading a rail
+that isn't there means the boot timeout cuts the PSU 10 s into every boot (this
+happened; the failsafe above exists because of it). So GPIO2 it is, and
+`tools/pwrcfg.py` no longer warns about it. Severity *is* chip-specific,
+though: on a plain ESP32 the strapping pins select boot mode outright (GPIO0
+low = download boot), so there a sense line grounded half the time really can
+stop the chip booting — the encoder still warns for those. Second, if the sense
+wire isn't connected, set `PWR_SENSE=-1` rather than leaving the input
+floating: a floating ADC pin reads noise, and the boot timeout may cut the PSU
+seconds after every power-on. Third, the defaults are C3-specific: on a plain
+ESP32, GPIO1/3 are its UART0 console and 0/2 are strapping pins — pick
+different ones.
 
 The feature is **off until opted into at flash time**: the settings live in a
 small dedicated flash partition (`pwrcfg`), not in the firmware image, so the
@@ -527,7 +545,7 @@ sudo make flash-pwr PWR=off                   # disable the feature
 # the prebuilt image with every setting spelled out (values shown are the
 # defaults — name only the ones you change)
 sudo make flash PWR=on \
-    PWR_PS_ON=3 PWR_BUTTON=1 PWR_BUTTON_GND=21 PWR_SENSE=0 PWR_LED=8 \
+    PWR_PS_ON=3 PWR_BUTTON=1 PWR_BUTTON_GND=21 PWR_SENSE=2 PWR_LED=8 \
     PWR_HOLD=2 PWR_BOOT_TIMEOUT=10 \
     PWR_SENSE_LOW=800 PWR_SENSE_HIGH=2000
 ```

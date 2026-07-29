@@ -32,7 +32,10 @@
 //     keeps the MOSFET off whenever the pad isn't driving.
 //   * The button reads with an internal pull-up (pressed = LOW); an optional
 //     second pin is driven LOW as the button's local ground, so a two-wire
-//     switch needs no run to a real GND pin.
+//     switch needs no run to a real GND pin. It powers on the *rising* edge of
+//     the press (as soon as the press debounces, not on release) so that
+//     keeping it held afterwards is free to mean something else — see the
+//     failsafe below.
 //   * The sense wire (TPMS1 pin 9 on the BC-250) is the board's main 3.3 V
 //     rail — a stiff, well-decoupled node, NOT a soft signal line. It is the
 //     right thing to sense because the BC-250 runs on 12 V alone and derives
@@ -50,6 +53,16 @@
 //     shutdown; hence the hold-to-fire threshold. A graceful shutdown is the
 //     board's own: it turns itself off, the sense line drops, and we release
 //     PS_ON# so the PSU follows it down.
+//   * FAILSAFE: while the button is physically held, the sense line cannot
+//     release PS_ON# — no follow-down, and the boot timeout counts from the
+//     release rather than from the power-on. A sense wire that reads low while
+//     the board is really up (wrong pin, wire off, thresholds off) is
+//     otherwise self-sealing: the boot timeout cuts the PSU ~10 s after every
+//     power-on, so the machine can never stay up long enough to reflash the
+//     config that would fix it. Press to power on and just keep holding — the
+//     machine stays up for as long as your finger does, which is long enough
+//     to reflash. Sense is still sampled and logged while held; that log is
+//     how the right pin and thresholds get found.
 //
 // One deliberate difference from a plain switch: the intended PSU state is
 // persisted, and any reset that isn't a true power-on (crash, watchdog, a
@@ -174,14 +187,17 @@ static bool g_asserted = false;  // PS_ON# currently sunk low
 static uint8_t g_savedOn = 0;    // NVS mirror of the intended PSU state
 static uint32_t g_bootStart = 0; // millis() of the last power-on (BOOTING timeout)
 
-// button debounce / press tracking
+// button debounce / press tracking. btnStable doubles as the failsafe flag:
+// while it is set the sense line cannot power anything off.
 static bool btnStable = false; // debounced "pressed"
 static bool btnLastRaw = false;
 static uint32_t btnLastChange = 0;
 static uint32_t btnPressStart = 0;
-static bool btnPressStartedOff = false; // press began while OFF (that press may
-                                        // power on at release, never force off)
-static bool btnLongFired = false;       // this press already forced off
+static bool btnLongFired = false; // this press can no longer force off: either
+                                  // it already did, or it is the press that
+                                  // powered on / was already held when the
+                                  // chip came up (holding to keep the failsafe
+                                  // alive must never cut the power it protects)
 
 // sense debounce (on the hysteresis output, not the raw voltage)
 static adc_oneshot_unit_handle_t g_adc = nullptr;
@@ -380,15 +396,16 @@ static void loop()
             if (btnStable)
             {
                 btnPressStart = now;
-                btnPressStartedOff = (g_state == OFF);
                 btnLongFired = false;
-            }
-            else if (btnPressStartedOff && g_state == OFF &&
-                     now - btnPressStart < g_cfg.holdMs)
-            {
-                // tap while off -> on. A press held past holdMs from OFF does
-                // nothing at all (that gesture is reserved for forcing off).
-                powerOn(now);
+
+                if (g_state == OFF)
+                {
+                    // press while off -> on, right here on the press edge, so
+                    // that holding it afterwards means "failsafe" and not
+                    // "power back off" — hence btnLongFired on the way in.
+                    powerOn(now);
+                    btnLongFired = true;
+                }
             }
         }
 
@@ -424,8 +441,9 @@ static void loop()
         if (dbglog::active() && now - g_lastSampleMs >= SAMPLE_LOG_MS)
         {
             g_lastSampleMs = now;
-            PLOG("sense mv=%u state=%s level=%d stable=%d", (unsigned)mv,
-                 stateName(g_state), senseLevel, senseStable);
+            PLOG("sense mv=%u state=%s level=%d stable=%d%s", (unsigned)mv,
+                 stateName(g_state), senseLevel, senseStable,
+                 btnStable ? " HELD(failsafe)" : "");
         }
 
         // hysteresis on the averaged voltage...
@@ -445,31 +463,48 @@ static void loop()
                  g_cfg.senseHighMv);
         }
 
-        uint32_t need = senseLevel ? DEBOUNCE_MS : BOARD_OFF_DEBOUNCE_MS;
-
-        if (senseLevel != senseStable && now - senseChange >= need)
+        // FAILSAFE: while the button is physically held, nothing the sense line
+        // says may release PS_ON#. Both timers are parked rather than their
+        // actions merely skipped, so the failsafe leaves no residue: a level
+        // that changed under the finger is still *pending* when it lifts and
+        // gets a full debounce from there, and the boot timeout gets its full
+        // window from the release instead of having expired mid-hold and
+        // firing the instant contact breaks. The voltage above keeps tracking
+        // and logging throughout — that log is the point of holding.
+        if (btnStable)
         {
-            senseStable = senseLevel;
-            PLOG("sense STABLE %s (state=%s)", senseStable ? "up" : "down",
-                 stateName(g_state));
-
-            if (g_state == BOOTING && senseStable)
-            {
-                g_state = ON;
-                PLOG("boot confirmed: sense up -> state=ON");
-            }
-            else if (g_state == ON && !senseStable)
-            {
-                PLOG("power OFF: follow-down, board went away, releasing PS_ON#");
-                powerOff(); // the board shut itself down; the PSU follows it
-            }
+            senseChange = now;
+            g_bootStart = now;
         }
-
-        if (g_state == BOOTING && now - g_bootStart >= g_cfg.bootTimeoutMs)
+        else
         {
-            PLOG("power OFF: boot-timeout, sense never came up in %ums",
-                 g_cfg.bootTimeoutMs);
-            powerOff(); // never came up; don't leave the PSU energized
+            uint32_t need = senseLevel ? DEBOUNCE_MS : BOARD_OFF_DEBOUNCE_MS;
+
+            if (senseLevel != senseStable && now - senseChange >= need)
+            {
+                senseStable = senseLevel;
+                PLOG("sense STABLE %s (state=%s)", senseStable ? "up" : "down",
+                     stateName(g_state));
+
+                if (g_state == BOOTING && senseStable)
+                {
+                    g_state = ON;
+                    PLOG("boot confirmed: sense up -> state=ON");
+                }
+                else if (g_state == ON && !senseStable)
+                {
+                    PLOG("power OFF: follow-down, board went away, releasing "
+                         "PS_ON#");
+                    powerOff(); // the board shut itself down; PSU follows it
+                }
+            }
+
+            if (g_state == BOOTING && now - g_bootStart >= g_cfg.bootTimeoutMs)
+            {
+                PLOG("power OFF: boot-timeout, sense never came up in %ums",
+                     g_cfg.bootTimeoutMs);
+                powerOff(); // never came up; don't leave the PSU energized
+            }
         }
     }
 }
@@ -540,6 +575,21 @@ void start()
         io.pull_up_en = GPIO_PULLUP_ENABLE; // pressed = LOW
         gpio_config(&io);
         btnLastChange = millis();
+
+        // A button that already reads pressed here is a press in progress
+        // across the reset — the recovery case this feature exists for is
+        // reflashing while holding the failsafe down, and the reset in the
+        // middle of it must not turn that hold into a fresh press that forces
+        // the power off holdMs later. Adopt it as an already-fired press: the
+        // failsafe keeps applying (btnStable), forcing off does not. A false
+        // read from a pull-up that hasn't settled is harmless — it only ever
+        // errs towards keeping the power on, and clears within one debounce.
+        if (gpio_get_level((gpio_num_t)g_cfg.buttonPin) == 0)
+        {
+            btnStable = btnLastRaw = btnLongFired = true;
+            btnPressStart = btnLastChange;
+            PLOG("start: button already held -> failsafe, no force-off");
+        }
     }
 
     if (g_cfg.buttonGndPin >= 0)

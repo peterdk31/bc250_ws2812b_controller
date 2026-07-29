@@ -35,17 +35,19 @@ STRIP_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),4)
 # `flash-source` (PWR=off writes it disabled); unset leaves whatever is on the
 # chip. `make flash-pwr` writes only that partition — change pins in seconds
 # without touching the app. The defaults are this project's BC-250 hookup on
-# an ESP32-C3: button across GPIO1/21, TPMS1 sense on GPIO0, PS_ON# on GPIO3.
+# an ESP32-C3: button across GPIO1/21, TPMS1 sense on GPIO2, PS_ON# on GPIO3.
 # (GPIO21 is the C3's U0TXD — free while the host link is USB, but it's a
 # J5-UART candidate pin; move the button to a real GND if that link lands.)
-# Sense defaults to GPIO0, not the GPIO2 this hookup started on: GPIO2 is a C3
-# strapping pin (latched at reset) and TPMS1 pin 9 is a rail at 0 V while the
-# machine is off. Not a boot failure — per Espressif, C3 boot mode is GPIO9/8
-# and GPIO2 "does not determine" it, and GPIO2 booted fine on real hardware —
-# but they recommend pulling GPIO2 up for glitch immunity, so GPIO0 (ADC-capable,
-# not strapping, otherwise idle) avoids the question. GPIO4 is the strip's DIN.
-# On a plain ESP32 strap pins DO select boot mode, so it matters more there. A
-# plain ESP32 needs different pins — GPIO1/3 are its UART0, 0/2 strapping.
+# Sense is GPIO2 — the pin this hookup is actually wired to, and proven on the
+# hardware. It briefly defaulted to GPIO0 on the theory that GPIO2 being a C3
+# strapping pin was worth avoiding; that cost a machine an evening (a config
+# flashed with the wire still on GPIO2 reads a dead pin, so the boot timeout cut
+# the PSU 10 s into every boot), and the theory was thin anyway: per Espressif
+# the C3's boot mode is GPIO9/8 and GPIO2 "does not determine" it — the only
+# GPIO2 caveat is a pull-up recommendation for glitch immunity. GPIO4 is the
+# strip's DIN. On a plain ESP32 strap pins DO select boot mode, so the choice
+# matters more there; that chip needs different pins anyway — GPIO1/3 are its
+# UART0, 0/2 strapping.
 # PWR_LED blinks the board's own LED while the button reads pressed (wiring
 # feedback; a blink shows on active-high and active-low LEDs alike) — GPIO8
 # is the plain LED on common C3 dev boards, -1 = none.
@@ -53,7 +55,7 @@ PWR ?=
 PWR_PS_ON ?= 3
 PWR_BUTTON ?= 1
 PWR_BUTTON_GND ?= 21
-PWR_SENSE ?= 0
+PWR_SENSE ?= 2
 PWR_LED ?= 8
 PWR_HOLD ?= 2
 PWR_BOOT_TIMEOUT ?= 10

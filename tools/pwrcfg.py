@@ -34,12 +34,15 @@ import sys
 #               unreliable per errata — deliberately excluded
 #   hold:       pins where gpio_hold_en can latch PS_ON# through a reset; on
 #               the plain ESP32 only the RTC-capable ones. None = every pin
-#   strap:      strapping pins, latched at reset. Only checked for the sense
-#               wire: that line is driven low whenever the machine is off (the
-#               button idles high and is fine). Severity differs by chip — the
-#               ESP32's strap pins select boot mode outright, while the C3's
-#               GPIO2 does not determine boot mode and is only a
-#               pull-up-for-glitch-immunity recommendation. Warning, not error
+#   strap:      pins whose level at reset selects the BOOT MODE, and so are a
+#               real hazard for the sense wire: that line sits at 0 V whenever
+#               the machine is off (the button idles high and is fine). Warning,
+#               not error. The C3's GPIO2 is deliberately NOT listed: it is a
+#               strapping pin, but per Espressif boot mode is GPIO9/8 and GPIO2
+#               "does not determine" it — its only caveat is a pull-up
+#               recommendation for glitch immunity, it is this project's sense
+#               pin, and it boots fine on the real hardware. Warning on it just
+#               teaches people to ignore warnings
 #   reserved:   pins this project already talks to the host on
 CHIPS = {
     'esp32c3': dict(
@@ -48,7 +51,7 @@ CHIPS = {
         input_only=set(),
         adc={0, 1, 2, 3, 4},
         hold=None,
-        strap={2, 8, 9},
+        strap={8, 9},
         reserved={18: 'USB D- (the host link)', 19: 'USB D+ (the host link)'},
     ),
     'esp32': dict(
@@ -82,7 +85,7 @@ p.add_argument('--ps-on', type=int, default=3,
 p.add_argument('--button', type=int, default=1, help='momentary button pin')
 p.add_argument('--button-gnd', type=int, default=21,
                help="local ground for the button's second terminal, -1 = real GND")
-p.add_argument('--sense', type=int, default=0,
+p.add_argument('--sense', type=int, default=2,
                help='board-power sense pin (ADC), -1 = not wired')
 p.add_argument('--led', type=int, default=8,
                help='feedback LED pin, blinks while the button reads pressed '
@@ -172,14 +175,11 @@ if not a.disabled and not errors:
                           'timeout)')
         elif flag == '--sense' and v in chip['strap']:
             warnings.append(
-                f'--sense {v}: GPIO{v} is a strapping pin on {a.target} '
-                '(latched at reset), and the sense line is held low whenever '
-                'the machine is off (on the BC-250 it is a dead 3.3 V rail). '
-                'On the ESP32 the strap pins select boot mode outright, so a '
-                'grounded one can stop the chip booting; on the C3, GPIO2 does '
-                'not determine boot mode, but Espressif still recommends '
-                'pulling it up for glitch immunity. Prefer a non-strapping ADC '
-                'pin (on the C3: --sense 0)')
+                f'--sense {v}: GPIO{v} selects the boot mode on {a.target} at '
+                'reset, and the sense line sits at 0 V whenever the machine is '
+                'off (on the BC-250 it is a dead 3.3 V rail) — so a reset while '
+                'the machine is down can drop the chip into the wrong boot '
+                'mode. Prefer an ADC pin that is not a boot-mode strap')
         if flag == '--ps-on' and chip['hold'] is not None \
                 and v not in chip['hold']:
             warnings.append(

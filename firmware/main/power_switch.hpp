@@ -2,14 +2,16 @@
 
 // ATX power-switch service: with the receiver powered from the PSU's 5VSB
 // standby rail, it stands in for the jumper the BC-250 otherwise needs on the
-// FSP unit's PS_ON# line. A tap on a momentary button sinks PS_ON# to ground
+// FSP unit's PS_ON# line. Pressing a momentary button sinks PS_ON# to ground
 // (via an N-channel MOSFET the pin gates — PSU on, board boots); holding it
-// for HOLD_MS forces the PSU off. An
+// for HOLD_MS while the machine is up forces the PSU off. An
 // optional analog sense wire (BC-250 TPMS1 pin 9, the board's main 3.3 V rail
 // — not pin 15, which is 3VSB) tells it when the board is
 // actually up, which adds: follow a graceful OS shutdown down (release PS_ON#
 // when the board turns itself off), and release if the board never comes up
-// after a power-on (BOOT_TIMEOUT_MS).
+// after a power-on (BOOT_TIMEOUT_MS). Both of those are suspended while the
+// button is held — the failsafe for a mis-wired sense line, whose boot timeout
+// would otherwise cut the power every 10 s and leave no window to reflash.
 //
 // Runs as its own task and owns its own NVS namespace; it knows nothing of
 // the LED service. The wiring and tuning live in the small `pwrcfg` flash
