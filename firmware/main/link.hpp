@@ -21,6 +21,13 @@ int read(uint8_t* buf, size_t maxlen, TickType_t wait);
 void setBaud(uint32_t baud);
 void flushInput();
 
+// whether the line rate is ours to choose — true for the UART build, false
+// over USB CDC, where the host sets it and setBaud() is a no-op. The baud hunt
+// (led_service.cpp) skips itself entirely on a USB link: there is no wrong rate
+// to escape, and hunting is not free — it flushes the input and drops the
+// half-parsed frame, which over USB would corrupt a perfectly good stream.
+bool rateSelectable();
+
 // send bytes back to the host. The link is host→receiver for everything else;
 // this exists only for the debug log backchannel (dbglog.cpp / protocol.hpp's
 // LOG_SYNC frame). Best-effort and briefly bounded so a stalled or absent host

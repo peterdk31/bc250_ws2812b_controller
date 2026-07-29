@@ -33,6 +33,7 @@
 #include "esp_littlefs.h"
 #include "nvs_flash.h"
 
+#include "dbglog.hpp"
 #include "led_service.hpp"
 #include "power_switch.hpp"
 #include "rec_store.hpp" // LFS_BASE
@@ -59,7 +60,15 @@ extern "C" void app_main(void)
     lc.partition_label = "storage";
     lc.format_if_mount_failed = true;
     lc.dont_mount = false;
-    esp_vfs_littlefs_register(&lc);
+
+    // a failed mount is not fatal (the receiver still replays live frames), but
+    // every recording read and write silently no-ops after it — so say so on
+    // the debug log rather than leaving "the boot animation never plays" with
+    // no explanation
+    esp_err_t ferr = esp_vfs_littlefs_register(&lc);
+    if (ferr != ESP_OK)
+        dbglog::line("fs: mount of \"storage\" failed (%s) — no recordings",
+                     esp_err_to_name(ferr));
 
     led::start();
 

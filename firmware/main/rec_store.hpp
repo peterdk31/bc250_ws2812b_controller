@@ -17,7 +17,12 @@
 namespace rec_store
 {
 bool load(uint8_t slot, rec::Recording& out);
-void save(uint8_t slot, const rec::Recording& r);
+
+// write the slot's file (atomically — see the implementation); false if the
+// filesystem refused it (not mounted, full, ...), in which case the slot keeps
+// whatever it had. The caller logs the failure — a silent one looks exactly
+// like an animation that was never configured.
+bool save(uint8_t slot, const rec::Recording& r);
 
 // the hash stored in a slot's file, or 0 if missing/invalid; lets an upload's
 // BEGIN decide whether it's unchanged without reading the whole file. The

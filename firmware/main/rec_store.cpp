@@ -50,7 +50,7 @@ bool load(uint8_t slot, rec::Recording& out)
     return true;
 }
 
-void save(uint8_t slot, const rec::Recording& r)
+bool save(uint8_t slot, const rec::Recording& r)
 {
     // write to a temp file and rename over the slot only if every byte
     // landed: LittleFS's rename is atomic, so an interrupted write (power
@@ -61,7 +61,7 @@ void save(uint8_t slot, const rec::Recording& r)
 
     FILE* f = fopen(tmp, "wb");
     if (!f)
-        return;
+        return false; // filesystem not mounted, or out of space
 
     uint8_t hdr[rec::Recording::kHeaderLen];
     r.encodeHeader(hdr);
@@ -73,9 +73,11 @@ void save(uint8_t slot, const rec::Recording& r)
     ok = (fclose(f) == 0) && ok;
 
     if (ok)
-        rename(tmp, recPath(slot));
+        ok = rename(tmp, recPath(slot)) == 0;
     else
         remove(tmp);
+
+    return ok;
 }
 
 uint32_t storedHash(uint8_t slot)

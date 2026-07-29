@@ -82,6 +82,15 @@ void write(const uint8_t* buf, size_t len)
 }
 #endif
 
+bool rateSelectable()
+{
+#if LINK_UART
+    return true;
+#else
+    return false;
+#endif
+}
+
 bool hostPresent()
 {
 #if LINK_UART

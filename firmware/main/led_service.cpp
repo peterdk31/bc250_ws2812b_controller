@@ -62,8 +62,22 @@
 // shows a frame well inside 500 ms, so that's enough per candidate to
 // recognize a lock. A silent line never hunts, so a host that merely stopped
 // finds the receiver where it left it.
+//
+// "valid frame" means any decoded frame — a command counts as much as a pixel
+// frame, since both are checksummed and so both prove the rate. That matters
+// because the daemon's first traffic after it starts is a recording upload
+// (hundreds of CMD_REC_FRAMEs, no pixels yet): when only pixel frames counted,
+// a receiver that hadn't seen one yet hunted every HUNT_AFTER_MS straight
+// through the upload, and each hunt flushes the input and drops the frame being
+// parsed — so the recording never arrived complete and no boot or shutdown
+// animation was ever stored.
 #define HUNT_AFTER_MS 500
 #define HUNT_MIN_BYTES 64
+
+// receiver-side debug log (drained to journalctl when the daemon has
+// "sinks.serial.debug_log" on; see dbglog.hpp). Event lines only — nothing
+// per-frame — so an unwatched board costs a bounded vsnprintf per event.
+#define LLOG(fmt, ...) dbglog::line("led: " fmt, ##__VA_ARGS__)
 
 namespace led
 {
@@ -94,7 +108,8 @@ static rec::Player player;
 static rec::RecordingReceiver recRx;
 static uint8_t recSlot = 0;
 
-static unsigned long lastFrameMs = 0;
+static unsigned long lastFrameMs = 0; // last live *pixel* frame (host liveness)
+static unsigned long lastValidMs = 0; // last decoded frame of any kind (baud lock)
 static unsigned long lastHuntMs = 0;
 static size_t baudIdx = 0;
 static bool blanked = false;
@@ -143,9 +158,16 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
         replayXms = len >= 2 ? (uint16_t)(payload[0] | (payload[1] << 8)) : 0;
 
         if (rec_store::load(proto::SLOT_SHUTDOWN, active))
+        {
+            LLOG("shutdown: replaying %u frames, xfade %u ms",
+                 (unsigned)active.frameCount, (unsigned)replayXms);
             beginReplay();
+        }
         else
+        {
+            LLOG("shutdown: no recording stored, blanking");
             render::blank(); // nothing recorded yet
+        }
     }
     else if (cmd == proto::CMD_REC_BEGIN)
     {
@@ -155,7 +177,12 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
             recSlot = bi.slot;
             // unchanged upload (hash matches the stored file): drop it instead
             // of rewriting flash
-            recRx.begin(bi, bi.hash == rec_store::storedHash(bi.slot));
+            bool skip = bi.hash == rec_store::storedHash(bi.slot);
+            recRx.begin(bi, skip);
+
+            LLOG("upload slot %u: %u frames x %u leds%s", (unsigned)bi.slot,
+                 (unsigned)bi.frameCount, (unsigned)bi.count,
+                 skip ? " (unchanged, skipped)" : "");
         }
     }
     else if (cmd == proto::CMD_REC_FRAME)
@@ -167,7 +194,21 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
         // commit the buffered recording in one write (no mid-stream stalls); a
         // skipped/short/mismatched upload just clears state
         if (recRx.complete() && len >= 1 && payload[0] == recSlot)
-            rec_store::save(recSlot, recRx.rec);
+        {
+            bool ok = rec_store::save(recSlot, recRx.rec);
+            LLOG("upload slot %u: %s", (unsigned)recSlot,
+                 ok ? "stored" : "FLASH WRITE FAILED");
+        }
+        else if (recRx.storing)
+        {
+            // bytes went missing between BEGIN and END — the stream was
+            // interrupted (see the baud-hunt note above) or the frames were
+            // malformed. The slot keeps whatever it had.
+            LLOG("upload slot %u: INCOMPLETE, %u/%u bytes — not stored",
+                 (unsigned)recSlot, (unsigned)recRx.rec.data.size(),
+                 (unsigned)((size_t)recRx.rec.frameCount
+                            * recRx.rec.frameBytes()));
+        }
 
         recRx.reset();
     }
@@ -207,7 +248,7 @@ struct StripHandler : proto::FrameHandler
         // since show() only fades when the held frame's count still matches
         render::show(anim, count, xms, rgb);
 
-        lastFrameMs = millis();
+        lastFrameMs = lastValidMs = millis();
         blanked = false;
         hostSeen = true;
 
@@ -247,6 +288,11 @@ struct StripHandler : proto::FrameHandler
 
     void onCommand(uint8_t cmd, const uint8_t* payload, uint16_t len) override
     {
+        // a checksummed command decoded, so the rate is right — this is the
+        // only proof of that during a recording upload, which is all the host
+        // sends before its first pixel frame (see HUNT_AFTER_MS)
+        lastValidMs = millis();
+
         handleCommand(cmd, payload, len);
     }
 };
@@ -287,9 +333,26 @@ static void init()
     // bring the strip up blank on the last known geometry so a never-recorded
     // board isn't undefined.
     if (rec_store::load(proto::SLOT_POWER_ON, active))
+    {
+        LLOG("boot: replaying %u frames x %u leds on pin %u",
+             (unsigned)active.frameCount, (unsigned)active.count,
+             (unsigned)active.pin);
         beginReplay();
+    }
     else if (savedCount > 0 && savedCount <= MAX_LEDS)
+    {
+        LLOG("boot: no recording stored; strip up blank (%u leds, pin %u)",
+             (unsigned)savedCount, (unsigned)savedPin);
+
         render::init(savedCount, savedPin);
+
+        // and actually latch the zeros out: a WS2812 holds its last frame
+        // through a reset of *this* chip, so without this the strip would sit
+        // lit with whatever the previous session left — and nothing would ever
+        // clear it (the host timeout below only arms once a host has been
+        // seen, and there's no recording to play over it)
+        render::blank();
+    }
 }
 
 static void loop()
@@ -327,7 +390,11 @@ static void loop()
         if (usbSilentSince == 0)
             usbSilentSince = now ? now : 1;
         else if (!usbHostLost && now - usbSilentSince > HOST_GONE_MS)
+        {
             usbHostLost = true;
+            LLOG("host bus quiet %u ms — host is off or rebooting",
+                 (unsigned)(now - usbSilentSince));
+        }
     }
     else
     {
@@ -349,7 +416,18 @@ static void loop()
                 link::flushInput();
 
                 if (rec_store::load(proto::SLOT_POWER_ON, active))
+                {
+                    LLOG("host back — replaying boot recording");
                     beginReplay();
+                }
+                else
+                {
+                    // as after a reset with no recording: dark until the daemon
+                    // takes over, never a stale frame left hanging (the timeout
+                    // above is disarmed now that hostSeen is false again)
+                    LLOG("host back — no boot recording stored, blanking");
+                    render::blank();
+                }
             }
         }
     }
@@ -361,22 +439,27 @@ static void loop()
     if (hostSeen && render::up() && !blanked && !shuttingDown &&
         now - lastFrameMs > HOST_TIMEOUT_MS)
     {
+        LLOG("host silent %u ms, blanking", (unsigned)(now - lastFrameMs));
         render::blank();
         blanked = true;
     }
 
     unsigned long sinceGood =
-        now - (lastHuntMs > lastFrameMs ? lastHuntMs : lastFrameMs);
+        now - (lastHuntMs > lastValidMs ? lastHuntMs : lastValidMs);
 
     // hunt for the host's baud until it's found (including all through the
     // power-on replay — that's exactly when we want to lock on). Don't hunt
     // once the host has intentionally gone (shutdown): there's nothing to lock
-    // onto and we'd disturb the animation.
-    if (!shuttingDown && receiver.bytesSinceValid() >= HUNT_MIN_BYTES &&
+    // onto and we'd disturb the animation. And never over USB, where the rate
+    // isn't ours (link::rateSelectable) — there the hunt could only ever
+    // corrupt a stream that was already decoding fine.
+    if (link::rateSelectable() && !shuttingDown &&
+        receiver.bytesSinceValid() >= HUNT_MIN_BYTES &&
         sinceGood > HUNT_AFTER_MS)
     {
         baudIdx = (baudIdx + 1) % NUM_BAUDS;
         currentBaud = BAUDS[baudIdx];
+        LLOG("baud hunt: trying %u", (unsigned)currentBaud);
         link::setBaud(currentBaud);
         link::flushInput();
 
