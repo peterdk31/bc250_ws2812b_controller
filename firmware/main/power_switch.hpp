@@ -27,4 +27,14 @@ namespace pwr
 // watchdog, reflash) while it was holding PS_ON# low, that line is the
 // board's power — re-assert with as small a gap as possible.
 void start();
+
+// what the board-power sense wire currently reads, for sibling features (the
+// fan controller keys its pump boost off the host rail coming up):
+//   -1  no sense available: feature off, sense unwired, or its ADC failed
+//    0  rail down — including state OFF, where sense isn't sampled (PS_ON#
+//       released means the rail is down by construction)
+//    1  rail up (the debounced senseStable)
+// Lock-free aligned reads of values only the pwr task writes, same
+// justification as hostreq::acked(); callers poll, they don't get an edge.
+int senseState();
 } // namespace pwr

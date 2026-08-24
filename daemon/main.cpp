@@ -97,6 +97,45 @@ static void recordAndUpload(const Config& cfg, const Strip& strip,
     }
 }
 
+// push the configured fan speeds ("fans.duty", an array of duty percents,
+// one per fan channel wired on the receiver — see common/protocol.hpp and
+// README "Fans") to the receiver, which applies them to its PWM outputs and
+// persists them in NVS, so they keep applying on daemon-less boots. Sent once
+// at startup like the recordings: there is no re-send because there is
+// nothing to re-send to — a receiver that rebooted restores the same values
+// from NVS. No "fans" key = nothing sent = the receiver keeps what it has
+// (its flash-time defaults, or an earlier push).
+static void uploadFanDuty(const Config& cfg,
+                          std::vector<std::unique_ptr<Sink>>& sinks)
+{
+    const json::Value* d = cfg.find("fans.duty");
+
+    if (!d || !d->isArray())
+        return;
+
+    // count(1) then count u8 percents, clamped here so a config typo can't
+    // ride the wire (the receiver clamps again regardless)
+    uint8_t p[1 + 6];
+    uint8_t n = 0;
+
+    for (auto& v : d->items)
+    {
+        if (n >= 6) // the receiver drives at most 6 channels (LEDC on the C3)
+        {
+            fprintf(stderr, "fans.duty: more than 6 values, extra ignored\n");
+            break;
+        }
+
+        int pct = json::toInt(v);
+        p[1 + n++] = (uint8_t)(pct < 0 ? 0 : pct > 100 ? 100 : pct);
+    }
+
+    p[0] = n;
+
+    for (auto& s : sinks)
+        s->sendCommand(proto::CMD_FAN_DUTY, p, (uint16_t)(1 + n));
+}
+
 // ./led <config> --preview <slot>: record an esp32 slot and play it back to
 // the sinks exactly as the receiver will, so the viewer previews the real
 // recording — its one-shot intro, then the looping tail (or a held last frame)
@@ -242,8 +281,10 @@ int main(int argc, char** argv)
         return runPreview(cfg, strip, sinks, argv[3]);
 
     // record the power-on/shutdown effects and stream them for the receiver
-    // to replay (the receiver renders nothing itself)
+    // to replay (the receiver renders nothing itself), and push the
+    // configured fan speeds
     recordAndUpload(cfg, strip, sinks);
+    uploadFanDuty(cfg, sinks);
 
     std::unique_ptr<Effect> effect;
     std::string active;

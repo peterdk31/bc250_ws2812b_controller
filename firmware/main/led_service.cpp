@@ -15,6 +15,7 @@
 #include "recording.hpp"
 
 #include "dbglog.hpp"
+#include "fan.hpp"
 #include "hostreq.hpp"
 #include "link.hpp"
 #include "prefs.hpp"
@@ -234,6 +235,12 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
         // the host heard a request of ours (hostreq.hpp) — payload echoes the
         // req code and nonce
         hostreq::onAck(payload, len);
+    }
+    else if (cmd == proto::CMD_FAN_DUTY)
+    {
+        // fan speeds from the daemon config ("fans.duty") — hand them to the
+        // fan task (fan.hpp); a no-op when the feature is off
+        fan::setDuty(payload, len);
     }
 }
 

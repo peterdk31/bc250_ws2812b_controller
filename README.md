@@ -197,6 +197,12 @@ ever says unprompted is a power-button request (see
         "power_on": { ... },    // boot/shutdown animations the receiver replays
         "shutdown": { ... }     // (standalone effects only)
     },
+    "fans": {
+        "duty": [100, 60, 60, 40] // optional: percent per receiver fan channel
+                                  // (see Fans). Pushed once at startup and
+                                  // persisted on the receiver; omit the key to
+                                  // leave the receiver's stored values alone
+    },
     "rules": [ ... ]
 }
 ```
@@ -623,6 +629,85 @@ place. (Crashes/watchdog resets are still ridden out there too, provided
 the PS_ON pin is one of its RTC-capable pins: 0, 2, 4, 12–15, 25–27, 32, 33.)
 After a genuine 5VSB power loss the machine always stays off until the button
 is pressed.
+
+## Fans
+
+The receiver also drives up to six 4-pin PWM fans at the fan spec's 25 kHz —
+built for an AIO liquid cooler, whose pump is just another 4-pin channel. Like
+the power switch it runs **standalone**: no daemon needed, wiring chosen at
+flash time in its own small partition (`fancfg`), off until opted into with
+`FAN=on`. The fans are powered from the PSU directly (they draw far more than
+a GPIO ever could); only their PWM input wires connect to the receiver, with
+all grounds common. The receiver's 3.3 V push-pull output is comfortably above
+the spec's ~2.8 V logic-high threshold, so standard 4-pin fans read it fine;
+the fans' tach (sense) wires stay unconnected.
+
+Each channel's duty comes from three places, strongest first:
+
+- **The boot boost**: every channel runs at `FAN_BOOST_DUTY` (default 100 %)
+  for `FAN_BOOST_SECS` (default 5 s) when the host powers on, so an AIO pump
+  always spins up cleanly and primes. "Host powers on" is read from the power
+  switch's sense wire when it's configured — the truest signal, alive before
+  any OS — else from USB host presence (SOF keepalives, debounced 3 s so a bus
+  reset doesn't re-fire it), else once at receiver boot. A reflash or crash of
+  the receiver while the machine is up re-fires the boost: ten seconds of full
+  fans, and a re-primed pump, is the right side to err on. `FAN_BOOST_SECS=0`
+  disables it.
+- **The daemon config**: a `"fans": { "duty": [100, 60, 60, 40] }` array —
+  percent per channel, in `FAN_PINS` order — is pushed once at daemon startup
+  (restart the daemon to apply a change, as with everything else in the
+  config). The receiver **persists these in NVS**, so they keep applying on
+  boots where the daemon never runs. Omit the key and nothing is sent.
+- **The flash-time defaults**: `FAN_DUTY`, percent per channel (one value =
+  all channels), default 100 — full speed is the safe answer for cooling
+  until something says otherwise. Re-flashing the config with *different*
+  duties outranks an older daemon push (the stale NVS values are dropped);
+  `make clear-nvs` also reverts to these.
+
+Keep the **pump** channel high: AIO pumps want a constant 100 % (or 70–80 %
+for quiet — this one is ~30 dBA at full tilt), never below ~30 %, with the
+radiator fans doing the dynamic cooling. The boost is a spin-up prime, not the
+pump's protection.
+
+Wiring (ESP32-C3 defaults; channel order = `FAN_PINS` order = `fans.duty`
+order):
+
+| receiver pin | connects to |
+|---|---|
+| GPIO5, 6, 7, 10 (`FAN_PINS`) | one fan's PWM input each (pin 4 on the 4-pin connector) |
+| — | fan +12 V and GND come from the PSU, **sharing a common ground** with the receiver; tach (pin 3) unconnected |
+
+GPIO0 and 20 remain free for two more channels (20 is U0RXD, a J5-UART
+candidate — prefer 0 first). `tools/fancfg.py` validates the pins like the
+power switch's encoder does — nonexistent on `TARGET`, flash/host-link pads,
+collisions with `strip.pin`, the power switch's pins (a warning normally, an
+error when `PWR=on` is written in the same run), or each other — because the
+firmware has no console and a bad pin just looks like a fan that never spins.
+
+```sh
+sudo make flash FAN=on                          # firmware + default fan wiring
+sudo make flash-fan FAN=on FAN_PINS=5,6         # re-pin only: 2 fans, seconds
+sudo make flash-fan FAN=on FAN_DUTY=100,60,60,40 # per-channel resting duty
+sudo make flash-fan FAN=off                     # disable (outputs go away on reboot)
+
+# every setting spelled out (values shown are the defaults)
+sudo make flash FAN=on \
+    FAN_PINS=5,6,7,10 FAN_DUTY=100 \
+    FAN_BOOST_DUTY=100 FAN_BOOST_SECS=5
+```
+
+Two guardrails, mirroring the power switch's:
+
+- **The chip must run a firmware whose partition table has the `fancfg`
+  entry** (v1.13.0 or newer). `make flash-fan` against an older layout
+  writes a sector that firmware never reads — a silent no-op, except the
+  receiver's debug log says `no fancfg partition` at boot. Reflash the
+  firmware itself first.
+- A full `make flash` / `make flash-source` **wipes NVS** (the merged image
+  pads over it), which includes a daemon-pushed duty — the fans revert to the
+  `FAN_DUTY` flash defaults until the daemon next starts and re-pushes. Same
+  story as the receiver's saved baud and strip geometry. `flash-fan` /
+  `flash-pwr` touch only their own partitions and keep NVS.
 
 ## Previewing without hardware
 

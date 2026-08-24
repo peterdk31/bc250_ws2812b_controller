@@ -120,6 +120,17 @@ static const uint8_t CMD_LOG_DRAIN = 0x05;
 // never sends it, and the receiver reports the silence rather than assuming.
 static const uint8_t CMD_REQ_ACK = 0x06;
 
+// CMD_FAN_DUTY: set the PWM fan duty cycles. Payload: count(1), then `count`
+// u8 duty percents (0-100; >100 clamps to 100). Duty i applies to the i-th
+// WIRED fan channel — the fan pins themselves live in the receiver's `fancfg`
+// flash partition (firmware/main/fan.cpp), chosen at flash time like the power
+// switch's wiring; this command only adjusts speeds. The receiver persists the
+// values in NVS so they survive reboots and daemon-less operation, which is
+// also why the daemon sends this once at startup and never repeats it. Unknown
+// to older firmware, which ignores it; a receiver without the fan feature
+// enabled drops it silently.
+static const uint8_t CMD_FAN_DUTY = 0x07;
+
 // REQ_HOST_SHUTDOWN: "power yourself down, gracefully." The receiver's power
 // switch sends this on a short button press while the machine is up — the
 // ordinary PC power-button gesture, which nothing but the OS can honor. The

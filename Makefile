@@ -62,6 +62,42 @@ PWR_BOOT_TIMEOUT ?= 10
 PWR_SENSE_LOW ?= 800
 PWR_SENSE_HIGH ?= 2000
 
+# PWM fans (README "Fans"): same scheme as the power switch — the wiring lives
+# in the receiver's `fancfg` flash partition, written at flash time. FAN=on
+# writes it alongside `flash` / `flash-source` (FAN=off writes it disabled);
+# unset leaves whatever is on the chip. `make flash-fan` writes only that
+# partition. FAN_PINS is one GPIO per fan PWM wire, in channel order (the
+# daemon's "fans.duty" percents map to that order); the defaults are the free
+# pins on the BC-250 hookup — 0 and 20 remain spare (20 is U0RXD, a J5-UART
+# candidate). FAN_DUTY is percent per channel (one value = all channels);
+# 100 is the safe cooling default, and the daemon config can lower it at
+# runtime without reflashing. FAN_BOOST_* run every channel at a fixed duty
+# for a few seconds after the host powers on, so an AIO pump primes reliably
+# (100%/5s; boost 0 s = off). Keep an AIO pump's resting duty high — 100
+# ideal, never below ~30.
+FAN ?=
+FAN_PINS ?= 5,6,7,10
+FAN_DUTY ?= 100
+FAN_BOOST_DUTY ?= 100
+FAN_BOOST_SECS ?= 5
+
+# cross-feature pin collision feeds: each encoder is told which pins the
+# *other* feature claims. Known-true (a hard error) when that feature is being
+# written "on" in the same run; skipped entirely on "off" (its pins are being
+# freed); otherwise a soft warning, since what's actually on the chip is
+# unknowable from here and these are just this Makefile's defaults.
+comma := ,
+FAN_AVOID = $(if $(filter off,$(PWR)),,\
+	$(if $(filter -1,$(PWR_PS_ON)),,--avoid "$(PWR_PS_ON):--ps-on (power switch)") \
+	$(if $(filter -1,$(PWR_BUTTON)),,--avoid "$(PWR_BUTTON):--button (power switch)") \
+	$(if $(filter -1,$(PWR_BUTTON_GND)),,--avoid "$(PWR_BUTTON_GND):--button-gnd (power switch)") \
+	$(if $(filter -1,$(PWR_SENSE)),,--avoid "$(PWR_SENSE):--sense (power switch)") \
+	$(if $(filter -1,$(PWR_LED)),,--avoid "$(PWR_LED):--led (power switch)") \
+	$(if $(filter on,$(PWR)),--avoid-hard))
+PWR_AVOID = $(if $(filter off,$(FAN)),,\
+	$(foreach p,$(subst $(comma), ,$(FAN_PINS)),--avoid "$(p):--pins (fans)") \
+	$(if $(filter on,$(FAN)),--avoid-hard))
+
 # PORT: config (or a command-line override) is authoritative; detection only
 # fills a gap. Resolution order: command-line override > configured
 # sinks.serial.port > first likely device node > default. Config wins over
@@ -269,8 +305,29 @@ PWRCFG_RESOLVE = pwr=""; \
 			--ps-on $(PWR_PS_ON) --button $(PWR_BUTTON) --button-gnd $(PWR_BUTTON_GND) \
 			--sense $(PWR_SENSE) --led $(PWR_LED) \
 			--hold $(PWR_HOLD) --boot-timeout $(PWR_BOOT_TIMEOUT) \
-			--sense-low $(PWR_SENSE_LOW) --sense-high $(PWR_SENSE_HIGH) || exit 1; \
+			--sense-low $(PWR_SENSE_LOW) --sense-high $(PWR_SENSE_HIGH) \
+			$(PWR_AVOID) || exit 1; \
 		pwr="$(PWRCFG_OFF) $(CURDIR)/$(PWRCFG_BIN)"; \
+	fi
+
+FANCFG_OFF = $(call part_off,fancfg)
+FANCFG_BIN = firmware/dist/fancfg.bin
+# companion to PWRCFG_RESOLVE for the fan controller: when FAN is set, encode
+# the FAN_* vars into $(FANCFG_BIN) and set $$fan to the extra offset+file pair
+# for esptool write_flash; empty otherwise. As with pwrcfg.py, fancfg.py is
+# the only place a wiring mistake can be caught — the firmware silently treats
+# a bad pin as "not wired" and that fan just never spins.
+FANCFG_RESOLVE = fan=""; \
+	if [ -n "$(FAN)" ]; then \
+		case "$(FAN)" in on|off) ;; *) echo 'FAN must be "on" or "off" (see README, Fans)'; exit 1;; esac; \
+		[ -n "$(FANCFG_OFF)" ] || { echo "no fancfg offset found in firmware/partitions.csv"; exit 1; }; \
+		mkdir -p firmware/dist; \
+		python3 tools/fancfg.py --out "$(FANCFG_BIN)" $(if $(filter off,$(FAN)),--disabled) \
+			--target $(TARGET) --strip-pin $(STRIP_PIN) \
+			--pins "$(FAN_PINS)" --duty "$(FAN_DUTY)" \
+			--boost-duty $(FAN_BOOST_DUTY) --boost-secs $(FAN_BOOST_SECS) \
+			$(FAN_AVOID) || exit 1; \
+		fan="$(FANCFG_OFF) $(CURDIR)/$(FANCFG_BIN)"; \
 	fi
 
 # prebuilt firmware images published to GitHub Releases by .github/workflows/
@@ -312,7 +369,7 @@ receiver: led receiver-toolchain
 # it fits any config. Build-from-source instead with `make flash-source`.
 flash:
 	-@$(MAKE) --no-print-directory serial-perms
-	@$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); \
+	@$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); $(FANCFG_RESOLVE); \
 	mkdir -p firmware/dist; img="firmware/dist/$(FW_BIN)"; \
 	echo "fetching $(FW_URL)"; \
 	if command -v curl >/dev/null 2>&1; then fetch="curl -fSL -o $$img $(FW_URL)"; \
@@ -324,7 +381,7 @@ flash:
 	fi; \
 	$(PORT_FREE); \
 	echo "flashing $(TARGET) via $$tool on $(PORT)"; \
-	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash 0x0 "$$img" $$pwr; \
+	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash 0x0 "$$img" $$pwr $$fan; \
 	rc=$$?; \
 	$(PORT_RESTORE); \
 	exit $$rc
@@ -337,10 +394,10 @@ flash:
 flash-source: receiver
 	-@$(MAKE) --no-print-directory serial-perms
 	@[ -f "$(RECEIVER_BUILD)/flash_args" ] || { echo "flash_args missing in $(RECEIVER_BUILD) (did the build run?)"; exit 1; }; \
-	$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); \
+	$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); $(FANCFG_RESOLVE); \
 	$(PORT_FREE); \
 	echo "flashing $(TARGET) via $$tool on $(PORT)"; \
-	( cd "$(RECEIVER_BUILD)" && $$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash @flash_args $$pwr ); \
+	( cd "$(RECEIVER_BUILD)" && $$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash @flash_args $$pwr $$fan ); \
 	rc=$$?; \
 	$(PORT_RESTORE); \
 	exit $$rc
@@ -356,6 +413,22 @@ flash-pwr:
 	$(PORT_FREE); \
 	echo "writing power-switch config ($(PWR)) via $$tool on $(PORT)"; \
 	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash $$pwr; \
+	rc=$$?; \
+	$(PORT_RESTORE); \
+	exit $$rc
+
+# write only the 4 KB fancfg partition: enable, re-pin, re-speed or disable
+# the fans without reflashing the firmware. Requires FAN=on or FAN=off. Only
+# useful once the chip runs a firmware whose partition table has the fancfg
+# entry — against an older layout the write lands in the (unused) factory
+# tail and the firmware never sees it; the debug log says so at boot.
+flash-fan:
+	-@$(MAKE) --no-print-directory serial-perms
+	@[ -n "$(FAN)" ] || { echo 'set FAN=on (write the wiring, FAN_* vars override defaults) or FAN=off (disable)'; exit 1; }; \
+	$(ESPTOOL_RESOLVE); $(FANCFG_RESOLVE); \
+	$(PORT_FREE); \
+	echo "writing fan config ($(FAN)) via $$tool on $(PORT)"; \
+	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash $$fan; \
 	rc=$$?; \
 	$(PORT_RESTORE); \
 	exit $$rc
@@ -402,4 +475,4 @@ receiver-clean:
 	rm -rf firmware/build firmware/build-* firmware/dist $(IDF_GENERATED)
 	-@[ -n "$(CONTAINER)" ] && $(CONTAINER) rmi $(IDF_IMAGE) 2>/dev/null || true
 
-.PHONY: all install install-config uninstall clean udev-rule serial-perms receiver-toolchain receiver receiver-clean flash flash-source flash-pwr clear-nvs clear-recordings
+.PHONY: all install install-config uninstall clean udev-rule serial-perms receiver-toolchain receiver receiver-clean flash flash-source flash-pwr flash-fan clear-nvs clear-recordings

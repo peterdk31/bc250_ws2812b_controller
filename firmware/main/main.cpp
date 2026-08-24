@@ -18,7 +18,9 @@
 //
 // power_switch.* is the first such sibling feature: the ATX PS_ON# power
 // button, its own task with its own NVS namespace, wiring read from the
-// `pwrcfg` flash partition — the two services never touch.
+// `pwrcfg` flash partition — the two services never touch. fan.* is the
+// second: the PWM fan controller, same shape (own task, own NVS namespace,
+// wiring in the `fancfg` partition), fed CMD_FAN_DUTY by the LED task.
 // The wire protocol, framing, recording format/replay and crossfading are the
 // shared common/ code the daemon also compiles (on the include path — see
 // CMakeLists.txt).
@@ -34,6 +36,7 @@
 #include "nvs_flash.h"
 
 #include "dbglog.hpp"
+#include "fan.hpp"
 #include "led_service.hpp"
 #include "power_switch.hpp"
 #include "rec_store.hpp" // LFS_BASE
@@ -53,6 +56,10 @@ extern "C" void app_main(void)
     // a reset that interrupted an asserted PS_ON#, the board's power is
     // floating on the PSU's pull-up until start() re-asserts it
     pwr::start();
+
+    // then the fans (after pwr — the boost reads its sense line; before the
+    // mount, so an AIO pump is back at speed as early as possible on a reset)
+    fan::start();
 
     // LittleFS on the "storage" partition; format on first boot if unformatted
     esp_vfs_littlefs_conf_t lc = {};

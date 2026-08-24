@@ -603,6 +603,14 @@ static void taskMain(void*)
 
 // ---- public API ----
 
+int senseState()
+{
+    if (!g_adc)
+        return -1;
+
+    return g_state != OFF && senseStable ? 1 : 0;
+}
+
 void start()
 {
     bool loaded = loadConfig(g_cfg);

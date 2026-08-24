@@ -18,6 +18,9 @@ firmware/dist/
 # leftover from the old arduino-cli flow (common headers were mirrored here)
 firmware/src/
 
+# Python bytecode (tools/pincheck.py is imported by the config encoders)
+__pycache__/
+
 # Editor / IDE
 .idea/
 .vscode/
