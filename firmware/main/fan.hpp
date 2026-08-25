@@ -9,8 +9,10 @@
 // fan just ignores the signal.
 //
 // Duty comes from three places, strongest first: a boot boost (every channel
-// at boostDuty for boostSecs when the host's rail comes up — an AIO pump
-// primes reliably at full speed), the last CMD_FAN_DUTY the daemon pushed
+// at boostDuty for boostSecs when the host powers on — an AIO pump primes
+// reliably at full speed; armed by the power switch's power-on event and
+// fired when its sense wire confirms the rail, so a warm reset of this chip
+// never re-fires it — see boostCheck), the last CMD_FAN_DUTY the daemon pushed
 // (persisted in this module's own NVS namespace, so it applies on
 // daemon-less boots too), and the flash-time defaults in the `fancfg`
 // partition (`make flash FAN=on ...` / `make flash-fan`; erased = feature

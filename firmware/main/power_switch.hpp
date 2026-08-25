@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 // ATX power-switch service: with the receiver powered from the PSU's 5VSB
 // standby rail, it stands in for the jumper the BC-250 otherwise needs on the
 // FSP unit's PS_ON# line. Pressing a momentary button sinks PS_ON# to ground
@@ -37,4 +39,12 @@ void start();
 // Lock-free aligned reads of values only the pwr task writes, same
 // justification as hostreq::acked(); callers poll, they don't get an edge.
 int senseState();
+
+// count of power-on events — PS_ON# asserts from a button press — since this
+// chip booted. 0 until the first press. Deliberately NOT bumped by start()'s
+// warm-reset re-hold (the machine was already up; the chip merely restarted
+// under it), so a reader can tell "the machine was just switched on" from
+// "this chip reset mid-session". The fan controller arms its pump boost on
+// this. Lock-free aligned read, as senseState().
+uint32_t powerOnSeq();
 } // namespace pwr

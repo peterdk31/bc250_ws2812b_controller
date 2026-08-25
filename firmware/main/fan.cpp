@@ -122,12 +122,15 @@ static portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t g_pending[MAX_FANS];
 static uint8_t g_pendingCount = 0; // 0 = nothing pending
 
-// boost state: an edge detector on "the host rail is up" (best source wins —
-// the power switch's sense wire, else USB SOF presence, which the UART build
-// hardcodes true so the boost fires once at task start there)
+// boost state (see boostCheck): with the power switch present, an armed
+// one-shot keyed to its power-on events; without it, an edge detector on USB
+// SOF presence (which the UART build hardcodes true, so the boost fires once
+// at task start there)
 static bool g_boosting = false;
 static uint32_t g_boostStart = 0;
-static bool g_railWasUp = false;
+static uint32_t g_seenPowerOn = 0; // last pwr::powerOnSeq() acted on
+static bool g_armed = false;       // a power-on happened; boost once sense is up
+static bool g_railWasUp = false;   // USB path only
 static uint32_t g_usbSilentSince = 0; // millis() when SOF stopped (0 = present)
 
 // ---- LEDC ----
@@ -219,43 +222,71 @@ static void drainPending()
         applyAll();
 }
 
-// the boost edge detector: fire when the host rail comes up, from the best
-// source available. senseState() >= 0 means the power switch's ADC sense is
-// live — the truest signal, and one that exists before any OS. Without it,
-// USB SOF presence stands in, debounced HOST_GONE_MS on the way down so a
-// ~1 s re-enumeration blip can't read as a power cycle. g_railWasUp starts
-// false, so a rail that is already up when this task starts (cold boot with
-// the host running, a reflash mid-session) fires the boost on the first poll
-// — re-priming the pump after a crash/reflash is a feature, not a bug.
+// the boost trigger. With the power switch live (senseState() >= 0) the boost
+// is tied to an actual power-on: pwr::powerOnSeq() ticks when the switch
+// asserts PS_ON# from a button press — never when this chip merely restarts
+// under a running machine — which ARMS the boost, and it fires once the sense
+// wire confirms the rail up. Keying off the event instead of the rail's edge
+// is what keeps a warm reset of this chip (a crash, a reflash, whatever a
+// daemon reconnect provokes) from re-firing it: after any reset the sense
+// line reads down for one debounce before coming back up, and an edge
+// detector can't tell that settling from a real power-on — it boosted the
+// pump on every daemon restart. (A fan that loses its PWM during the reset
+// itself briefly runs full per the 4-pin spec, so the pump stays primed
+// through resets regardless — the deliberate crash-reprime this replaces was
+// redundant.)
+//
+// Without the power switch, USB SOF presence stands in as before: an edge
+// detector debounced HOST_GONE_MS on the way down so a ~1 s re-enumeration
+// blip can't read as a power cycle; it starts "down", so a cold boot with the
+// host already running boosts once at task start (and the UART build, which
+// hardcodes hostPresent() true, fires exactly once there).
 static void boostCheck(uint32_t now)
 {
-    bool up;
+    bool fire;
     int s = pwr::senseState();
 
     if (s >= 0)
-        up = s == 1;
-    else if (link::hostPresent())
     {
-        g_usbSilentSince = 0;
-        up = true;
+        uint32_t seq = pwr::powerOnSeq();
+        if (seq != g_seenPowerOn) // != not >: the counter may wrap, ours resets
+        {
+            g_seenPowerOn = seq;
+            g_armed = true;
+        }
+
+        fire = g_armed && s == 1;
+        if (fire)
+            g_armed = false;
     }
     else
     {
-        if (!g_usbSilentSince)
-            g_usbSilentSince = now ? now : 1;
-        // hold the previous reading through a short blip
-        up = now - g_usbSilentSince <= HOST_GONE_MS ? g_railWasUp : false;
+        bool up;
+        if (link::hostPresent())
+        {
+            g_usbSilentSince = 0;
+            up = true;
+        }
+        else
+        {
+            if (!g_usbSilentSince)
+                g_usbSilentSince = now ? now : 1;
+            // hold the previous reading through a short blip
+            up = now - g_usbSilentSince <= HOST_GONE_MS ? g_railWasUp : false;
+        }
+
+        fire = up && !g_railWasUp;
+        g_railWasUp = up;
     }
 
-    if (up && !g_railWasUp && g_cfg.boostSecs)
+    if (fire && g_cfg.boostSecs)
     {
         g_boosting = true;
         g_boostStart = now;
-        FLOG("boost: host rail up — all fans to %u%% for %us (source=%s)",
+        FLOG("boost: host powered on — all fans to %u%% for %us (source=%s)",
              g_cfg.boostDuty, g_cfg.boostSecs, s >= 0 ? "sense" : "usb");
         applyAll();
     }
-    g_railWasUp = up;
 
     if (g_boosting && now - g_boostStart >= (uint32_t)g_cfg.boostSecs * 1000)
     {

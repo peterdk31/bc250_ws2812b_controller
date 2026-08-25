@@ -404,11 +404,16 @@ static uint32_t readSenseMv()
 
 // ---- state transitions ----
 
+// bumped only here in powerOn() — the warm-reset re-hold in start() must NOT
+// count (see powerOnSeq() in the header)
+static volatile uint32_t g_powerOnSeq = 0;
+
 static void powerOn(uint32_t now)
 {
     psuAssert();
     g_bootStart = now;
     g_state = g_adc ? BOOTING : ON;
+    g_powerOnSeq = g_powerOnSeq + 1; // no volatile++: deprecated in C++20
     PLOG("power ON: asserting PS_ON#, state=%s", stateName(g_state));
 
     // fresh sense tracking for this power cycle
@@ -639,6 +644,8 @@ int senseState()
 
     return g_state != OFF && senseStable ? 1 : 0;
 }
+
+uint32_t powerOnSeq() { return g_powerOnSeq; }
 
 void start()
 {

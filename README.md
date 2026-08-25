@@ -652,12 +652,15 @@ Each channel's duty comes from three places, strongest first:
 
 - **The boot boost**: every channel runs at `FAN_BOOST_DUTY` (default 100 %)
   for `FAN_BOOST_SECS` (default 5 s) when the host powers on, so an AIO pump
-  always spins up cleanly and primes. "Host powers on" is read from the power
-  switch's sense wire when it's configured — the truest signal, alive before
-  any OS — else from USB host presence (SOF keepalives, debounced 3 s so a bus
-  reset doesn't re-fire it), else once at receiver boot. A reflash or crash of
-  the receiver while the machine is up re-fires the boost: ten seconds of full
-  fans, and a re-primed pump, is the right side to err on. `FAN_BOOST_SECS=0`
+  always spins up cleanly and primes. With the power switch configured, "host
+  powers on" means *its* power-on event — the button press asserting PS_ON# —
+  confirmed by the sense wire reading the rail up. A reset of the receiver
+  itself (a crash, a reflash, a daemon reconnect) never re-fires it: the
+  power-on counter it arms on survives nothing but a real press, where the
+  bare rail edge re-fired after every warm reset (the sense line always dips
+  through one debounce while re-settling). Without the power switch, USB host
+  presence stands in (SOF keepalives, debounced 3 s so a bus reset doesn't
+  re-fire it), else the boost fires once at receiver boot. `FAN_BOOST_SECS=0`
   disables it.
 - **The daemon config**: a `"fans": { "duty": [100, 60, 60, 40] }` array —
   percent per channel, in `FAN_PINS` order — is pushed once at daemon startup
