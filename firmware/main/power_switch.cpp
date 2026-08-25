@@ -7,6 +7,10 @@
 #include "freertos/task.h"
 
 #include "driver/gpio.h"
+#include "sdkconfig.h"
+#if CONFIG_IDF_TARGET_ESP32C3
+#include "soc/rtc_cntl_reg.h"
+#endif
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
@@ -81,7 +85,9 @@
 // reflash) re-asserts PS_ON# immediately in start() — the board's power hangs
 // on this pin, so a firmware hiccup must not drop it. gpio_hold_en() latches
 // the asserted level in the always-on domain as well, so on pins that support
-// it the line even rides through the reset itself. A true power-on reset
+// it the line even rides through the reset itself — and that latch doubles as
+// a second record of the intent that survives anything written to flash (see
+// psOnHeld). A true power-on reset
 // (5VSB was lost) clears the intent instead: everything genuinely lost power,
 // and the board should not boot just because standby came back.
 namespace pwr
@@ -271,6 +277,29 @@ static void applyPsOn(bool assert_)
     gpio_hold_dis((gpio_num_t)g_cfg.psOnPin);
     if (assert_)
         gpio_hold_en((gpio_num_t)g_cfg.psOnPin);
+}
+
+// Is the pad hold on PS_ON# still latched from a previous life? The hold bit
+// is only ever set while asserted (applyPsOn), lives in the always-on domain,
+// and a true power-on reset clears it — so it is a second, NVS-independent
+// record of "the PSU is meant to be on", one that nothing writing the flash
+// can erase. It matters because NVS can be legitimately empty at the very
+// moment the machine's power hangs on this pin: `make clear-nvs`, or a `make
+// flash` whose merged image paved over the nvs region (it did, before the
+// Makefile learned to skip it). Trusting savedOn alone then made start()
+// release PS_ON# and hard-cut the running host at the end of its own reflash.
+// Only the C3 can answer: its single RTC_CNTL_DIG_PAD_HOLD_REG covers every
+// pad (bit n = GPIO n). The plain ESP32's hold bits are scattered across the
+// RTC-IO registers — and moot for the flashing case anyway, since esptool
+// EN-resets that chip, which drops the hold and reads as ESP_RST_POWERON.
+static bool psOnHeld()
+{
+#if CONFIG_IDF_TARGET_ESP32C3
+    return g_cfg.psOnPin >= 0 &&
+           REG_GET_BIT(RTC_CNTL_DIG_PAD_HOLD_REG, BIT(g_cfg.psOnPin)) != 0;
+#else
+    return false;
+#endif
 }
 
 // remember the intended PSU state so start() can restore it after a reset;
@@ -624,8 +653,10 @@ void start()
         // PS_ON# was held low, that hold is still latched in the always-on
         // domain — release it (this cuts the board's power: turning the
         // feature off means the jumper goes back in) and clear the intent so
-        // a later PWR=on doesn't resurrect it.
-        if (g_savedOn)
+        // a later PWR=on doesn't resurrect it. Checked against the hold bit
+        // itself as well as NVS: a reflash that wiped NVS alongside must not
+        // leave the latch quietly energizing a PSU the config says to let go.
+        if (g_savedOn || psOnHeld())
         {
             if (loaded && g_cfg.psOnPin >= 0)
                 gpio_hold_dis((gpio_num_t)g_cfg.psOnPin);
@@ -637,16 +668,21 @@ void start()
     PLOG("cfg button=%d gnd=%d ps_on=%d sense=%d led=%d hold=%u boottmo=%u",
          g_cfg.buttonPin, g_cfg.buttonGndPin, g_cfg.psOnPin, g_cfg.sensePin,
          g_cfg.ledPin, g_cfg.holdMs, g_cfg.bootTimeoutMs);
-    PLOG("start: reset=%d savedOn=%d", (int)esp_reset_reason(), (int)g_savedOn);
+    bool held = psOnHeld();
+    PLOG("start: reset=%d savedOn=%d held=%d", (int)esp_reset_reason(),
+         (int)g_savedOn, (int)held);
 
-    if (g_savedOn && esp_reset_reason() != ESP_RST_POWERON)
+    if ((g_savedOn || held) && esp_reset_reason() != ESP_RST_POWERON)
     {
         // the chip reset while holding PS_ON# low (crash, watchdog, reflash):
         // put it back before anything slower runs. If the sense wire confirms
         // the board is (still) up, BOOTING collapses to ON within one debounce.
+        // A latched hold counts as intent even when NVS says nothing (see
+        // psOnHeld) — and setSavedOn rebuilds the NVS record it carried.
         g_asserted = true;
         g_state = g_cfg.sensePin >= 0 ? BOOTING : ON;
         g_bootStart = millis();
+        setSavedOn(1);
     }
     else if (g_savedOn)
     {

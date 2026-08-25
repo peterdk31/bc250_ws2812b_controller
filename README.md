@@ -619,9 +619,15 @@ that flashing the receiver *from that machine* resets the chip mid-write. On
 a **C3** the firmware defends itself: the asserted level is latched in the
 always-on pad domain (`gpio_hold_en`) so it rides through the chip's internal
 resets — including into the flashing ROM — and on any reboot that isn't a true
-loss of standby power the intent is also restored from flash first thing at
-boot. Still, verify a `make flash` on your wiring once — with a temporary
-PS_ON→GND jumper in place — before trusting it with unsaved work. On a
+loss of standby power the intent is restored first thing at boot, read from
+NVS *or from the still-latched hold itself*, so even a reflash or `make
+clear-nvs` that empties NVS can't talk the new firmware into releasing the
+pin. (That double-check matters: `make flash` used to overwrite the NVS
+region with the merged image's padding — it skips it now — and the freshly
+booted firmware, finding no saved intent, would cut the machine's own power
+at the end of the flash, hard enough to corrupt files on it.) Still, verify a
+`make flash` on your wiring once — with a temporary PS_ON→GND jumper in
+place — before trusting it with unsaved work. On a
 **plain ESP32 neither defense works for flashing**: esptool resets it by
 pulling the EN pin, a genuine chip power cycle that drops pad holds and reads
 as a power-on reset. Flash one from another machine or with the jumper in

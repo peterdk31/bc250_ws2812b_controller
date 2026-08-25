@@ -286,6 +286,32 @@ PORT_RESTORE = [ $$active = 1 ] && systemctl start led-controller
 part_off = $(shell awk -F, '$$1=="$(1)" {gsub(/ /,""); print $$4}' firmware/partitions.csv)
 part_size = $(shell awk -F, '$$1=="$(1)" {gsub(/ /,""); print $$5}' firmware/partitions.csv)
 
+NVS_OFF = $(call part_off,nvs)
+NVS_SIZE = $(call part_size,nvs)
+# The CI merged image spans bootloader → app in one file, with the gaps
+# 0xFF-padded — and the gap between the partition table and the app IS the nvs
+# partition. Written whole at 0x0 it therefore paved over NVS on every
+# reflash: the remembered baud and strip geometry (an annoyance), and the
+# power switch's "the PSU is meant to be on" intent (a disaster — the freshly
+# booted firmware read "off", released PS_ON#, and cut the very machine the
+# flash ran on, hard enough to corrupt its filesystem). This snippet slices
+# the downloaded image around the nvs hole into $$img.pre/$$img.post and sets
+# $$imgargs to the offset+file pairs for esptool write_flash, so NVS is never
+# touched by `make flash`.
+IMG_SPLIT_NVS = \
+	if [ -n "$(NVS_OFF)" ] && [ -n "$(NVS_SIZE)" ]; then \
+		python3 -c 'import sys; \
+p, o, e = sys.argv[1], int(sys.argv[2], 0), int(sys.argv[2], 0) + int(sys.argv[3], 0); \
+d = open(p, "rb").read(); \
+assert len(d) > e, "image ends inside the nvs region — layout changed?"; \
+open(p + ".pre", "wb").write(d[:o]); \
+open(p + ".post", "wb").write(d[e:])' "$$img" $(NVS_OFF) $(NVS_SIZE) || exit 1; \
+		imgargs="0x0 $$img.pre $$(( $(NVS_OFF) + $(NVS_SIZE) )) $$img.post"; \
+	else \
+		echo "warning: no nvs row in firmware/partitions.csv — writing the image whole (wipes NVS)"; \
+		imgargs="0x0 $$img"; \
+	fi
+
 PWRCFG_OFF = $(call part_off,pwrcfg)
 PWRCFG_BIN = firmware/dist/pwrcfg.bin
 # shell snippet (companion to ESPTOOL_RESOLVE): when PWR is set, encode the
@@ -363,10 +389,11 @@ receiver: led receiver-toolchain
 			bash -c 'ROOT=/project; git config --global --add safe.directory "*" >/dev/null 2>&1; $(IDF_BUILD_CMD)'; \
 	fi
 
-# default flash: download the prebuilt merged image for TARGET and write it at
-# 0x0. Needs no ESP-IDF/container — just esptool and curl/wget. The image is
-# generic (built with default HOST_BAUD; the receiver auto-hunts the baud), so
-# it fits any config. Build-from-source instead with `make flash-source`.
+# default flash: download the prebuilt merged image for TARGET and write it,
+# skipping the nvs region (see IMG_SPLIT_NVS). Needs no ESP-IDF/container —
+# just esptool and curl/wget. The image is generic (built with default
+# HOST_BAUD; the receiver auto-hunts the baud), so it fits any config.
+# Build-from-source instead with `make flash-source`.
 flash:
 	-@$(MAKE) --no-print-directory serial-perms
 	@$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); $(FANCFG_RESOLVE); \
@@ -379,9 +406,10 @@ flash:
 		if [ -f "$$img" ]; then echo "download failed; using cached $$img"; \
 		else echo "no prebuilt image for $(TARGET) — has a 'v*' release been published? otherwise build locally: make flash-source"; rm -f "$$img"; exit 1; fi; \
 	fi; \
+	$(IMG_SPLIT_NVS); \
 	$(PORT_FREE); \
 	echo "flashing $(TARGET) via $$tool on $(PORT)"; \
-	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash 0x0 "$$img" $$pwr $$fan; \
+	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash $$imgargs $$pwr $$fan; \
 	rc=$$?; \
 	$(PORT_RESTORE); \
 	exit $$rc
@@ -448,7 +476,11 @@ flash-fan:
 # Both are plain erases of one partition region, offsets read from
 # partitions.csv — the app, and pwrcfg (the power-switch wiring), are untouched.
 # Note esptool resets the chip: the reflashing caveat in the README's "Power
-# switch" section applies here too.
+# switch" section applies here too. Erasing nvs also erases the power switch's
+# saved "PSU is on" intent, but on a C3 the firmware re-derives it from the
+# still-latched PS_ON# pad hold and rewrites it (see psOnHeld in
+# power_switch.cpp), so this doesn't cut a machine whose power hangs on the
+# receiver.
 clear-nvs:
 	@$(call erase_part,nvs,saved baud + strip geometry)
 	@echo "(the boot/shutdown recordings are not in NVS — they live on the" \
