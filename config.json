@@ -103,11 +103,31 @@
         },
         {
             "if": "gpu_load>20 | cpu_load>20",
-            "effect": "load",
+            "effect": "cycle",
             "hold": 0,
             "settings": {
-                "smoothing_seconds": 0.7,
-                "palette": "00e0c0,2060ff,a040ff"
+                "period_seconds": 120,
+                "effects": [
+                    {
+                        "effect": "load",
+                        "settings": {
+                            "smoothing_seconds": 0.7,
+                            "palette": "00e0c0,2060ff,a040ff,ff4060,ff9000",
+                            "heat_span": 0.45,
+                            "color_drift": 0.3
+                        }
+                    },
+                    {
+                        "effect": "load_boil",
+                        "settings": {
+                            "smoothing_seconds": 0.7,
+                            "palette": "00e0c0,2060ff,a040ff,ff4060,ff9000",
+                            "blobs": 2,
+                            "radius": 0.3,
+                            "boil": 2.5
+                        }
+                    }
+                ]
             }
         },
         {
@@ -225,6 +245,72 @@
                             "tail_pixels": 8,
                             "turn_ease": 1.0,
                             "mirror": 1
+                        }
+                    },
+                    {
+                        "effect": "orbit",
+                        "settings": {
+                            "palette": "1030ff,00d0ff,c080ff,ff40a0",
+                            "pairs": 2,
+                            "radius": 0.12,
+                            "origin": 0.5
+                        }
+                    },
+                    {
+                        "effect": "silk",
+                        "settings": {
+                            "palette": "3a1078,c03080,ff9040,20b0c0,3a1078",
+                            "fold": 0.5,
+                            "sheen": 0.3
+                        }
+                    },
+                    {
+                        "effect": "ink",
+                        "settings": {
+                            "palette": "6a00ff,0080ff,00d0a0,ffb000,ff2060",
+                            "period_seconds": 10,
+                            "spread_seconds": 4
+                        }
+                    },
+                    {
+                        "effect": "caustics",
+                        "settings": {
+                            "palette": "020818,004060,00b0c0,a0fff0"
+                        }
+                    },
+                    {
+                        "effect": "shoreline",
+                        "settings": {
+                            "palette": "003048,00a090,60e0c0",
+                            "foam_color": "ffffff",
+                            "base_color": "000810",
+                            "period_seconds": 6
+                        }
+                    },
+                    {
+                        "effect": "lava",
+                        "settings": {
+                            "palette": "021420,00805a,00d0a0,60ffd0",
+                            "blobs": 4,
+                            "radius": 0.12,
+                            "speed": 3.0,
+                            "color_span": 0.6,
+                            "core": 1.5,
+                            "white_hot": 0.8
+                        }
+                    },
+                    {
+                        "effect": "lava",
+                        "settings": {
+                            "palette": "1a0040,6a00ff,c040ff,ff40a0,4060ff",
+                            "blobs": 6,
+                            "radius": 0.22,
+                            "speed": 3.5,
+                            "color_speed": 0.7,
+                            "color_span": 0.4,
+                            "core": 2.2,
+                            "white_hot": 1.2,
+                            "min_brightness": 0.04
                         }
                     }
                 ]

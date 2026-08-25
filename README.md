@@ -356,16 +356,22 @@ wins.
 | `breathe` | palette wash on a slow breath with a drifting bright band | `palette` (0d4a44,30e090), `period_seconds` (3.5) |
 | `button_off` | experimental: the lit strip collapses into the power button | `duration_seconds` (1.4), `color` (ffffff), `reverse` (true) |
 | `button_on` | experimental: light spills out of the power button, then pulses | `spread_seconds` (2.5), `period_seconds` (4), `color` (ffffff) |
+| `caustics` | underwater light caustics: two multiplied noise fields carve bright wandering filaments that merge and dissolve | `palette` (020818,004060,00b0c0,a0fff0), `sharp` (1.5), `gain` (3.2) |
 | `comet` | Larson scanner with a fading tail, optional mirror | `palette` (8040ff,30c0ff), `sweeps_per_second` (0.7), `tail_pixels` (8) |
 | `cycle` | rotates through a list of other effects | `period_seconds` (30), `effects` (list) |
 | `drift` | soft palette glows wandering over a dark base | `palette` (2858ff,30d0b0), `blobs` (3), `speed` (1.4) |
 | `ember` | slow warm aurora-style flow through an ember palette | `palette` (2a0a00,ff7d1e), `speed` (1.4) |
+| `ink` | drops of ink recolor the whole strip in slow sweeping fronts, a glistening rim on each leading edge | `palette` (6a00ff,0080ff,00d0a0,ffb000,ff2060), `period_seconds` (10), `spread_seconds` (4) |
 | `lava` | lava lamp: soft blobs drift, meet and merge into hotter spots | `palette` (ff0050,ff5a00,ffd000,00e5ff,7a00ff,ff00d0), `blobs` (4), `speed` (5.0) |
-| `load` | CPU/GPU bars from center over a palette wash, each with a heartbeat that quickens under load | `palette` (00e0c0,2060ff,a040ff), `smoothing_seconds` (0.7), `pulse` (0.5) |
+| `load` | CPU/GPU bars from center over a palette wash, each with a heartbeat that quickens under load; each side's palette window slides toward the hot end with its load | `palette` (00e0c0,2060ff,a040ff,ff4060,ff9000), `heat_span` (0.45), `color_drift` (0.3), `pulse` (0.5) |
+| `load_boil` | CPU/GPU load as a lava lamp: each half's blobs boil harder and shift toward the palette's hot end with that side's load | `palette` (00e0c0,2060ff,a040ff,ff4060,ff9000), `blobs` (2), `boil` (2.5) |
+| `orbit` | binary stars: glow pairs orbit a shared center, whipping through conjunctions that bloom white-hot | `palette` (1030ff,00d0ff,c080ff,ff40a0), `pairs` (2), `origin` (0.5) |
 | `plasma` | drifting sines + noise walking a palette | `palette` (0040ff,00d0a0,c040ff,0040ff), `speed` (1.4) |
 | `pulse` | soft palette rings expanding from the center | `palette` (5028ff,30d0ff), `period_seconds` (4) |
 | `rainbow` | scrolling hue cycle with shimmer | `cycles_per_second` (0.9) |
+| `shoreline` | waves roll in from both ends, decelerating and whitening into foam as they break at the center | `palette` (003048,00a090,60e0c0), `period_seconds` (6), `foam_color` (ffffff) |
 | `shutdown` | CRT-style collapse to a point, then a slow phosphor fade | `duration_seconds` (5.0), `color` (0028ff) |
+| `silk` | tide through a drifting warp field: color bands stretch, buckle and fold like fabric in a breeze | `palette` (3a1078,c03080,ff9040,20b0c0,3a1078), `fold` (0.5), `sheen` (0.3) |
 | `solid` | fixed color everywhere — the color-calibration test field, or a plain static light | `color` (ffffff), `level` (1.0) |
 | `steam_download` | live Steam download bar, green pulse at 100% | `palette` (d4009c,ff5a1e,ffd23c), `done_color` (00ff66) |
 | `tide` | a palette gradient sliding and breathing | `palette` (102060,1890d0,30d0a0,8040ff,102060), `speed` (1.4) |

@@ -60,5 +60,50 @@
                 "min_brightness": 0.0
             }
         }
+    },
+
+    "lava_preset_pack": {
+        "_comment": "Three ready-made lava moods, as entries for a cycle's \"effects\" array (or lift one's settings into a rule of its own). deep_sea: near-black water with cyan/teal/green bioluminescent blobs, blooms kept subtle. nebula: many big violet/magenta/blue clouds that overlap constantly, so the strip is a slowly churning nebula rather than separate blobs. candlelight: two lazy amber blobs over a warm dark base — the calmest of the three, close to candle glow without any flicker.",
+
+        "deep_sea": {
+            "effect": "lava",
+            "settings": {
+                "palette": "021420,00805a,00d0a0,60ffd0",
+                "blobs": 4,
+                "radius": 0.12,
+                "speed": 3.0,
+                "color_span": 0.6,
+                "core": 1.5,
+                "white_hot": 0.8,
+                "min_brightness": 0.0
+            }
+        },
+        "nebula": {
+            "effect": "lava",
+            "settings": {
+                "palette": "1a0040,6a00ff,c040ff,ff40a0,4060ff",
+                "blobs": 6,
+                "radius": 0.22,
+                "speed": 3.5,
+                "color_speed": 0.7,
+                "color_span": 0.4,
+                "core": 2.2,
+                "white_hot": 1.2,
+                "min_brightness": 0.04
+            }
+        },
+        "candlelight": {
+            "effect": "lava",
+            "settings": {
+                "palette": "1c0800,ff7d1e,ffd060",
+                "blobs": 2,
+                "radius": 0.18,
+                "speed": 2.0,
+                "color_span": 0.7,
+                "core": 1.3,
+                "white_hot": 0.6,
+                "min_brightness": 0.06
+            }
+        }
     }
 }

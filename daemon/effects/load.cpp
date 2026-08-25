@@ -21,10 +21,28 @@
 // the beat for a second or so (the surge), making launches and spikes
 // land as a felt kick rather than just a longer bar.
 //
+// The wash doesn't walk the whole palette: each side samples a sliding
+// *window* of it, and the window's position is that side's load — idle
+// bars wash in the palette's cool first stops, a pinned GPU burns in its
+// hot last ones while an idle CPU side stays cool, so the color says "how
+// hard" while the bar length says "how much". On top of the load, the
+// window wanders a little on a minutes-scale noise walk, so a long gaming
+// session drifts through neighbouring hues instead of sitting on the same
+// three forever. heat_span 1.0 opens the window to the whole palette and
+// restores the old fixed-wash behaviour.
+//
 // config:
 //   smoothing_seconds  load smoothing time constant (default 0.7)
-//   palette            comma-separated stops the wash walks
-//                      (default cool teal -> blue -> violet)
+//   palette            comma-separated stops, cool (idle) -> hot (full
+//                      load) (default "00e0c0,2060ff,a040ff,ff4060,ff9000",
+//                      teal -> blue -> violet -> magenta -> orange)
+//   heat_span          fraction of the palette the wash spans at any
+//                      moment (default 0.45); the rest is the travel the
+//                      window slides as load rises. 1.0 = whole palette,
+//                      no sliding
+//   color_drift        how far the window wanders off the pure load
+//                      position on a minutes-scale walk, in palette
+//                      fractions (default 0.3); 0 pins color to load
 //   speed              drift / shimmer rate multiplier (default 1.4)
 //   noise              flow/noise blend 0 (sine flow) .. 1 (noise) (default 0.3)
 //   pulse              heartbeat strength, 0 disables (default 0.5)
@@ -42,7 +60,13 @@ public:
         setFrameDelay(cfg, 16);
 
         smoothing = cfg.getFloat("smoothing_seconds", 0.7f);
-        palette = color::Gradient(cfg.get("palette", "00e0c0,2060ff,a040ff"));
+        palette = color::Gradient(cfg.get(
+            "palette", "00e0c0,2060ff,a040ff,ff4060,ff9000"));
+        heatSpan = cfg.getFloat("heat_span", 0.45f);
+        if (heatSpan < 0.05f) heatSpan = 0.05f;
+        if (heatSpan > 1.0f) heatSpan = 1.0f;
+        colorDrift = cfg.getFloat("color_drift", 0.3f);
+        if (colorDrift < 0.0f) colorDrift = 0.0f;
         speed = cfg.getFloat("speed", 1.4f);
         noiseMix = cfg.getFloat("noise", 0.3f);
 
@@ -99,6 +123,12 @@ public:
 
         float inv2w2 = 1.0f / (2.0f * pulseWidth * pulseWidth);
 
+        // each side's palette window: load slides it toward the hot end,
+        // a minutes-scale wander (a distinct noise track per side) keeps a
+        // long steady session drifting through neighbouring hues
+        float baseC = windowBase(cpu, 0.0f, t);
+        float baseG = windowBase(gpu, 40.0f, t);
+
         int leds = strip.size();
         float half = leds / 2.0f;
 
@@ -141,7 +171,7 @@ public:
             float v = 0.6f + 0.4f * motion::shimmer(x, t, speed);
 
             uint8_t r, g, b;
-            palette.at(w, r, g, b);
+            palette.at((cpuSide ? baseC : baseG) + w * heatSpan, r, g, b);
 
             // the heartbeat crest travelling out from the center along
             // this side's lit bar; `live` confines it to the bar and
@@ -189,8 +219,21 @@ private:
         return gpuLoad.readPercent() / 100;
     }
 
+    // start of a side's palette window, 0 .. 1-heatSpan: its load plus the
+    // slow wander, saturating at the palette's ends rather than wrapping.
+    // noise speed 0.08 puts a full wander cell at ~80 s — minutes-scale.
+    float windowBase(float load, float track, float t) const
+    {
+        float h = load + (motion::noise(track, t, 0.08f) - 0.5f) * colorDrift;
+        if (h < 0.0f) h = 0.0f;
+        if (h > 1.0f) h = 1.0f;
+        return h * (1.0f - heatSpan);
+    }
+
     float smoothing = 0.7f;
     color::Gradient palette;
+    float heatSpan = 0.45f;
+    float colorDrift = 0.3f;
     float speed = 1.4f;
     float noiseMix = 0.3f;
     float pulseStrength = 0.5f;
