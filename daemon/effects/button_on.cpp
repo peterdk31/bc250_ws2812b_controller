@@ -1,25 +1,34 @@
 #include <math.h>
 #include "effect.hpp"
+#include "color.hpp"
 #include "motion.hpp"
 
 // The default power-on animation (config esp32.power_on).
 //
 // The idea: the strip's light looks like it spills out of the physical power
-// button, which sits just past one end of the strip (the index-0 end by
-// default; see `reverse`). A bright white front bursts fast out of the button
+// button, which may sit past either end of the strip or anywhere along it
+// (see `origin`). A bright front bursts fast out of the button
 // and then spreads more slowly along the strip — an ease-out front: high speed
 // at the button, decelerating as it reaches the far end — led by a soft glowing
 // head so it reads as light being pushed in rather than a wipe. Once the strip
-// is full it settles into a slow white pulse that travels outward from the
+// is full it settles into a slow pulse that travels outward from the
 // button end, and never ends: it holds until the host daemon's first frame
 // takes over.
 //
 // config:
-//   reverse         which end the button is at: false spreads from the index-0
-//                   end, true from the last-index end. A plain direction swap —
-//                   the strip may be mounted either orientation, horizontal or
-//                   vertical (default true)
-//   color           RRGGBB (default ffffff)
+//   origin          where the button sits along the strip, 0..1 (0 = index-0
+//                   end, 1 = last-index end, 0.5 = center). The light radiates
+//                   outward from here — from the center that's two symmetric
+//                   fronts. Defaults to the end picked by `reverse`
+//   reverse         legacy end-picker, used only when `origin` is absent:
+//                   false = index-0 end, true = last-index end (default true)
+//   palette         comma-separated stops laid out by distance from the
+//                   button — first stop at the button, last at the farthest
+//                   pixel — so a rainbow palette expands as bands of colour
+//                   radiating out of the button. The glowing head stays
+//                   white-hot on top. Falls back to `color`
+//   color           legacy single colour, RRGGBB (default ffffff) — same as
+//                   a one-stop palette
 //   spread_seconds  time for the light to fill the strip (default 2.5)
 //   period_seconds  pulse period once filled (default 4)
 //   min_brightness  pulse floor 0..1 (default 0.25)
@@ -38,36 +47,42 @@ public:
 
         minLevel = cfg.getFloat("min_brightness", 0.25f);
 
-        reverse = cfg.getBool("reverse", true);
+        bool reverse = cfg.getBool("reverse", true);
+        origin = cfg.getFloat("origin", reverse ? 1.0f : 0.0f);
+        if (origin < 0) origin = 0;
+        if (origin > 1) origin = 1;
 
-        uint32_t color = cfg.getColor("color", 0xffffff);
-        r = (color >> 16) & 0xFF;
-        g = (color >> 8) & 0xFF;
-        b = color & 0xFF;
+        palette = color::Gradient(cfg.get("palette", cfg.get("color", "ffffff")));
     }
 
     void render(Strip& strip, float t) override
     {
         int leds = strip.size();
-        float feather = leds * 0.18f + 1.0f;
+
+        // everything below runs in button-distance space: p is a pixel's
+        // distance from the button, maxDist the farthest pixel's. With the
+        // button at an end that's the whole strip; from the center it's two
+        // symmetric halves filled by the same front. The feather scales with
+        // the travel distance so the front stays proportionally soft.
+        float originLed = origin * (leds - 1);
+        float maxDist = fmaxf(originLed, (leds - 1) - originLed);
+        float feather = (maxDist + 1.0f) * 0.18f + 1.0f;
 
         if (t < spread)
         {
             // ease-out front: fast out of the button, slowing as it spreads.
             // 1-(1-u)^p has its highest speed at u=0 and decelerates to a stop.
-            // The travel ends at (last index + half a feather), which is where
-            // the far pixel reaches full coverage — so the strip finishes
+            // The travel ends at (farthest pixel + half a feather), which is
+            // where that pixel reaches full coverage — so the strip finishes
             // filling exactly at t=spread, with no static hold before the pulse.
             float u = t / spread;
             float fp = 1.0f - powf(1.0f - u, 2.5f);
-            float front = fp * (leds - 1 + 0.5f * feather);
+            float front = fp * (maxDist + 0.5f * feather);
 
             for (int i = 0; i < leds; i++)
             {
-                // distance from the button end, so the same math spreads
-                // either direction depending on where the button sits
-                float p = reverse ? (leds - 1 - i) : i;
-                float x = leds > 1 ? p / (leds - 1) : 0.0f;
+                float p = fabsf(i - originLed);
+                float x = maxDist > 0 ? p / maxDist : 0.0f;
 
                 // white fill behind the feathered front
                 float cov = motion::ease((front - p) / feather + 0.5f);
@@ -77,11 +92,22 @@ public:
                 float dh = p - front;
                 float head = 0.55f * expf(-(dh * dh) / (2.0f * 1.6f * 1.6f));
 
-                float v = cov * (0.95f + 0.05f * motion::shimmer(x, t)) + head;
-                if (v > 1) v = 1;
+                float v = cov * (0.95f + 0.05f * motion::shimmer(x, t));
 
-                strip.setPixel(i, (uint8_t)(r * v), (uint8_t)(g * v),
-                               (uint8_t)(b * v));
+                // palette colour by distance from the button; the head adds
+                // white on top so the leading edge reads hot whatever the
+                // local colour (for a white palette this reduces to the
+                // plain brightness sum)
+                uint8_t cr, cg, cb;
+                palette.at(x, cr, cg, cb);
+
+                float pr = cr * v + 255.0f * head;
+                float pg = cg * v + 255.0f * head;
+                float pb = cb * v + 255.0f * head;
+
+                strip.setPixel(i, (uint8_t)(pr > 255 ? 255 : pr),
+                               (uint8_t)(pg > 255 ? 255 : pg),
+                               (uint8_t)(pb > 255 ? 255 : pb));
             }
         }
         else
@@ -100,15 +126,18 @@ public:
 
             for (int i = 0; i < leds; i++)
             {
-                float p = reverse ? (leds - 1 - i) : i;
-                float x = leds > 1 ? p / (leds - 1) : 0.0f;
+                float p = fabsf(i - originLed);
+                float x = maxDist > 0 ? p / maxDist : 0.0f;
                 float ripple = 0.5f + 0.5f * sinf((x * 1.2f - s / period)
                                                   * 2.0f * (float)M_PI);
                 float v = breath * (1.0f - amp + amp * ripple);
                 if (v > 1) v = 1;
 
-                strip.setPixel(i, (uint8_t)(r * v), (uint8_t)(g * v),
-                               (uint8_t)(b * v));
+                uint8_t cr, cg, cb;
+                palette.at(x, cr, cg, cb);
+
+                strip.setPixel(i, (uint8_t)(cr * v), (uint8_t)(cg * v),
+                               (uint8_t)(cb * v));
             }
         }
     }
@@ -117,11 +146,11 @@ public:
     bool finished() const override { return false; }
 
 private:
-    uint8_t r = 255, g = 255, b = 255;
+    color::Gradient palette;
     float spread = 2.5f;
     float period = 4.0f;
     float minLevel = 0.25f;
-    bool reverse = true;
+    float origin = 1.0f;
 };
 
 REGISTER_EFFECT("button_on", ButtonOn)

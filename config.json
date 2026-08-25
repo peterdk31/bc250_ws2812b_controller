@@ -6,7 +6,7 @@
         }
     },
     "strip": {
-        "leds": 26,
+        "leds": 33,
         "pin": 4,
         "reverse": false,
         "brightness": 1.0,
@@ -32,8 +32,8 @@
                     "effect": "button_on",
                     "record_seconds": 4.5,
                     "settings": {
-                        "reverse": true,
-                        "color": "ffffff",
+                        "origin": 0.5,
+                        "palette": "ff0000,ff8000,ffff00,00c000,0060ff,8000ff",
                         "spread_seconds": 2.5,
                         "period_seconds": 4,
                         "min_brightness": 0.05
@@ -54,8 +54,8 @@
         "shutdown": {
             "effect": "button_off",
             "settings": {
-                "reverse": true,
-                "color": "ffffff",
+                "origin": 0.5,
+                "palette": "ff0000,ff8000,ffff00,00c000,0060ff,8000ff",
                 "duration_seconds": 1.4
             }
         }

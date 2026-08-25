@@ -2,7 +2,7 @@
     "_comment": "Example config snippets to copy into config.json. Each entry's value is a drop-in replacement for the matching top-level key (e.g. the \"esp32\" block). After editing config.json, restart the daemon — it re-renders these, captures the frames and re-uploads the recordings to the ESP32 (no reflash; the device skips the write if nothing changed).",
 
     "button_spread_power_on_off": {
-        "_comment": "Experimental power-button light-spread effects. button_on bursts a white front out of the button end of the strip and spreads it in, then settles into a breathing pulse; button_off flies the lit strip back into the button. 'reverse' picks which end the button is on (default true) — a plain direction swap for either mount orientation. The button_on intro is recorded for spread_seconds + period_seconds/2 so it ends at the pulse's dim trough, and breathe opens at that same trough (matching period_seconds + min_brightness), so the handoff and the breathe loop are seamless. If the spread comes from the wrong end on the real strip, set reverse to false on both effects.",
+        "_comment": "Experimental power-button light-spread effects. button_on bursts a white front out of the button end of the strip and spreads it in, then settles into a breathing pulse; button_off flies the lit strip back into the button. 'origin' says where the button sits along the strip, 0..1 (0 = index-0 end, 1 = last-index end, 0.5 = center — the light radiates out of / collapses into the middle from both sides at once); when 'origin' is absent, 'reverse' picks an end (default true). 'palette' lays comma-separated colour stops out by distance from the button (first stop at the button, last at the farthest pixel), so e.g. a rainbow expands as bands radiating out of the button and gets gathered back in on shutdown; keep the two palettes identical so off mirrors on. A single colour ('color', legacy) is a one-stop palette. The button_on intro is recorded for spread_seconds + period_seconds/2 so it ends at the pulse's dim trough, and breathe opens at that same trough (matching period_seconds + min_brightness), so the handoff and the breathe loop are seamless. If the spread comes from the wrong place on the real strip, adjust origin on both effects (keep the two in sync so on and off share the same source point).",
 
         "esp32": {
             "host_timeout_ms": 5000,
@@ -12,8 +12,8 @@
                         "effect": "button_on",
                         "record_seconds": 4.5,
                         "settings": {
-                            "reverse": true,
-                            "color": "ffffff",
+                            "origin": 0.5,
+                            "palette": "ff0000,ff8000,ffff00,00c000,0060ff,8000ff",
                             "spread_seconds": 2.5,
                             "period_seconds": 4,
                             "min_brightness": 0.25
@@ -34,8 +34,8 @@
             "shutdown": {
                 "effect": "button_off",
                 "settings": {
-                    "reverse": true,
-                    "color": "ffffff",
+                    "origin": 0.5,
+                    "palette": "ff0000,ff8000,ffff00,00c000,0060ff,8000ff",
                     "duration_seconds": 1.4
                 }
             }
