@@ -18,6 +18,7 @@
 #include "fan.hpp"
 #include "hostreq.hpp"
 #include "link.hpp"
+#include "power_switch.hpp"
 #include "prefs.hpp"
 #include "rec_store.hpp"
 #include "render.hpp"
@@ -98,6 +99,14 @@ static bool shuttingDown = false; // replaying the shutdown recording (host has 
 // host-restart detection state (see HOST_GONE_MS; only moves on USB links)
 static uint32_t usbSilentSince = 0; // millis() when SOF keepalives stopped (0 = present)
 static bool usbHostLost = false;    // keepalives have been gone > HOST_GONE_MS
+
+// last pwr::powerOnSeq() acted on — the same seen-counter idiom as the fan
+// boost. On boards with the power switch wired, that counter ticking (a button
+// press while off, or the BLE remote's REMOTE_ON) is the earliest possible
+// "the machine was just switched on" signal, so the boot replay starts the
+// instant PS_ON# is asserted instead of seconds later when the freshly booting
+// host brings its USB controller up (the SOF path, kept as the fallback).
+static uint32_t seenPowerOn = 0;
 
 // the recording currently playing — header fields only; the pixel frames are
 // streamed from flash one per tick (rec_store::playRead), never held in RAM.
@@ -350,6 +359,39 @@ struct StripHandler : proto::FrameHandler
 static StripHandler handler;
 static proto::Receiver receiver(handler, MAX_LEDS);
 
+// forget the previous host session and start the boot replay from frame 0 —
+// shared by the two "the machine just powered (back) on" detectors in loop():
+// the power switch's own power-on event (instant) and, for boards without the
+// switch wired, the USB SOF keepalives returning after a real absence (late —
+// the OS has to bring the controller up first). `why` labels the log line.
+static void rearmBootReplay(const char* why)
+{
+    hostSeen = false;
+    shuttingDown = false;
+    blanked = false;
+    replayXms = 0;
+    usbHostLost = false;
+    usbSilentSince = 0;
+
+    // drop any half-parsed leftovers from the previous session
+    receiver.reset();
+    link::flushInput();
+
+    if (rec_store::playOpen(proto::SLOT_POWER_ON, active, MAX_LEDS))
+    {
+        LLOG("%s — replaying boot recording", why);
+        beginReplay();
+    }
+    else
+    {
+        // as after a reset with no recording: dark until the daemon takes
+        // over, never a stale frame left hanging (the host timeout is
+        // disarmed now that hostSeen is false again)
+        LLOG("%s — no boot recording stored, blanking", why);
+        render::blank();
+    }
+}
+
 static void init()
 {
 #ifdef LED_SELFTEST
@@ -377,6 +419,10 @@ static void init()
             baudIdx = i;
 
     recRx.maxBytes = REC_MAX_BYTES;
+
+    // any power-on that already happened is covered by the unconditional
+    // replay just below; only events after this point should re-arm
+    seenPowerOn = pwr::powerOnSeq();
 
     // start replaying the stored power-on recording immediately; the first host
     // frame drops it and takes over (see onPixels). With no recording yet,
@@ -435,6 +481,18 @@ static void loop()
     // unless one is pending, which is approximately always.
     hostreq::tick((uint32_t)now);
 
+    // the power switch just asserted PS_ON# (button press while off, or the
+    // BLE remote): show the boot animation immediately. The counter never
+    // ticks on a warm reset of this chip or on boards without the switch
+    // wired (it stays 0 there), so this can't misfire — those boards keep
+    // the USB fallback below. A lock-free read, like the fan boost's.
+    uint32_t pseq = pwr::powerOnSeq();
+    if (pseq != seenPowerOn) // != not >: the counter may wrap, ours resets
+    {
+        seenPowerOn = pseq;
+        rearmBootReplay("power-on");
+    }
+
     // notice the host going away and coming back (USB links; see HOST_GONE_MS).
     // When it returns after a real absence, re-arm the power-on replay exactly
     // as if this chip had been reset: a host restart shows the boot animation
@@ -460,31 +518,12 @@ static void loop()
         {
             usbHostLost = false;
 
+            // gated on hostSeen: if the power switch's event already re-armed
+            // the replay for this power cycle (which clears hostSeen), the
+            // boot animation is mid-play by the time USB comes up — don't
+            // restart it
             if (hostSeen)
-            {
-                hostSeen = false;
-                shuttingDown = false;
-                blanked = false;
-                replayXms = 0;
-
-                // drop any half-parsed leftovers from the previous session
-                receiver.reset();
-                link::flushInput();
-
-                if (rec_store::playOpen(proto::SLOT_POWER_ON, active, MAX_LEDS))
-                {
-                    LLOG("host back — replaying boot recording");
-                    beginReplay();
-                }
-                else
-                {
-                    // as after a reset with no recording: dark until the daemon
-                    // takes over, never a stale frame left hanging (the timeout
-                    // above is disarmed now that hostSeen is false again)
-                    LLOG("host back — no boot recording stored, blanking");
-                    render::blank();
-                }
-            }
+                rearmBootReplay("host back");
         }
     }
 
