@@ -61,6 +61,36 @@ sudo systemctl enable --now led-controller
 `sudo make flash PORT=/dev/ttyACM0 TARGET=esp32`. It stops the service during the
 write and restarts it after.
 
+### The full BC-250 flash
+
+Everything this repo can put on the receiver, in one command — the ATX power
+switch, the PWM fans, and the BLE phone remote, with every knob spelled out
+(the values shown are the defaults for the BC-250 hookup described in the
+sections below, so trim freely — an omitted `PWR_*`/`FAN_*` var just means
+its default):
+
+```sh
+sudo make flash \
+    PWR=on \
+        PWR_PS_ON=3 PWR_BUTTON=1 PWR_BUTTON_GND=21 \
+        PWR_SENSE=2 PWR_LED=8 \
+        PWR_HOLD=2 PWR_BOOT_TIMEOUT=10 \
+        PWR_SENSE_LOW=800 PWR_SENSE_HIGH=2000 \
+    FAN=on \
+        FAN_PINS=5,6,7,10 FAN_DUTY=100 \
+        FAN_BOOST_DUTY=100 FAN_BOOST_SECS=5 \
+    BLE=on \
+        BLE_TOKEN=$(openssl rand -hex 6) BLE_NAME=BC250
+```
+
+Set `BLE_TOKEN` to something you'll remember (8–16 characters) or note the
+generated one — the phone page asks for it once. Writing all three features
+"on" in one run also arms the encoders' strictest cross-checks: pin
+collisions between the features (and with `strip.pin`) become hard errors
+instead of warnings. Each feature has its own section below — what it does,
+the wiring, and the `flash-pwr`/`flash-fan`/`flash-ble` targets that rewrite
+just that feature's config in seconds.
+
 Finally, edit `/etc/led-controller/config.json` for your hardware — at least
 `strip.leds`, `strip.pin`, and `sinks.serial.port` — then `sudo systemctl
 restart led-controller`.
