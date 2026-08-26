@@ -58,7 +58,12 @@ struct Recording
     // metadata in (not just pixels) means a geometry, timing, loop or
     // loop-point change also changes the hash, so the receiver's skip-unchanged
     // check rewrites flash whenever anything that affects playback differs.
-    uint32_t hash() const
+    //
+    // Split into meta seed + byte folding so a device that never holds the
+    // pixels (it streams an upload straight to flash) can still compute the
+    // same hash incrementally, frame by frame (see RecordingReceiver).
+    static uint32_t hashMeta(uint16_t frameMs, uint16_t count,
+                             uint16_t loopStart, bool loop)
     {
         uint32_t h = 2166136261u;
         uint16_t meta[4] = {frameMs, count, loopStart,
@@ -68,9 +73,20 @@ struct Recording
             h = (h ^ (meta[m] & 0xFF)) * 16777619u;
             h = (h ^ (meta[m] >> 8)) * 16777619u;
         }
-        for (size_t i = 0; i < data.size(); i++)
-            h = (h ^ data[i]) * 16777619u;
         return h;
+    }
+
+    static uint32_t hashFold(uint32_t h, const uint8_t* p, size_t n)
+    {
+        for (size_t i = 0; i < n; i++)
+            h = (h ^ p[i]) * 16777619u;
+        return h;
+    }
+
+    uint32_t hash() const
+    {
+        return hashFold(hashMeta(frameMs, count, loopStart, loop),
+                        data.data(), data.size());
     }
 
     // CMD_REC_BEGIN payload (15 bytes, little-endian; see common/protocol.hpp):
@@ -89,10 +105,14 @@ struct Recording
     }
 
     // on-flash header (18 bytes): magic + version, then the fields, hash last,
-    // one byte reserved
-    void encodeHeader(uint8_t* out) const
+    // one byte reserved. The overload takes a caller-supplied hash — for a
+    // device streaming an upload to flash, which never holds the pixels and
+    // so can't recompute it here (it verifies the stream against this hash
+    // incrementally instead; see RecordingReceiver).
+    void encodeHeader(uint8_t* out) const { encodeHeader(out, hash()); }
+
+    void encodeHeader(uint8_t* out, uint32_t h) const
     {
-        uint32_t h = hash();
         out[0] = proto::REC_MAGIC0;
         out[1] = proto::REC_MAGIC1;
         out[2] = proto::REC_VERSION;
@@ -163,68 +183,101 @@ struct BeginInfo
     }
 };
 
-// Accumulates a streamed recording (CMD_REC_BEGIN/FRAME/END) into RAM, ready
-// to commit to flash on completion. The device decides `skip` (incoming hash
-// == the slot's stored hash) and passes it to begin(); a skipped upload is
-// dropped so no flash write happens. maxBytes bounds the buffer so a corrupt
-// header can't trigger a huge allocation.
+// Bookkeeping for a streamed recording (CMD_REC_BEGIN/FRAME/END): vets the
+// BEGIN geometry, size-checks and counts each FRAME, and says when every
+// declared frame has arrived intact. Where the bytes go is the caller's
+// business — the device appends each vetted frame straight to flash (see the
+// firmware's rec_store) rather than accumulating ~100 KB of pixels here,
+// which is exactly the allocation a small chip can't be trusted to make.
+//
+// Integrity is end-to-end even so: begin() seeds the shared FNV with the
+// stream's metadata and frame() folds every pixel byte in, so complete()
+// only reports true when the recomputed hash matches what the host declared
+// — a stream with the right byte count but wrong bytes is refused just as
+// the old buffer-then-recompute path refused it.
+//
+// The device decides `skip` (incoming hash == the slot's stored hash) and
+// passes it to begin(); a skipped upload is dropped so no flash write
+// happens. maxBytes bounds the total a corrupt header can declare.
 struct RecordingReceiver
 {
-    Recording rec;
+    Recording meta;       // geometry/timing from BEGIN; data stays empty
     bool storing = false;
+    uint16_t framesSeen = 0;
     size_t maxBytes = 512u * 1024u;
 
     void reset()
     {
         storing = false;
-        rec.clear();
+        framesSeen = 0;
+        hash_ = 0;
+        want_ = 0;
+        meta = Recording();
     }
 
-    void begin(const BeginInfo& bi, bool skip)
+    // true when the stream should be stored (the caller opens its sink)
+    bool begin(const BeginInfo& bi, bool skip)
     {
         reset();
 
         if (skip)
-            return;
+            return false;
 
         size_t bytes = (size_t)bi.frameCount * bi.count * 6;
         if (!bi.count || !bi.frameCount || bytes > maxBytes)
-            return; // bogus geometry/size; ignore the stream (storing stays false)
+            return false; // bogus geometry/size; ignore the stream
 
-        rec.frameMs = bi.frameMs;
-        rec.count = bi.count;
-        rec.pin = bi.pin;
-        rec.loop = bi.flags & proto::REC_FLAG_LOOP;
-        rec.frameCount = bi.frameCount;
-        rec.loopStart = bi.loopStart < bi.frameCount ? bi.loopStart : 0;
-        rec.data.clear();
-        rec.data.reserve(bytes);
+        meta.frameMs = bi.frameMs;
+        meta.count = bi.count;
+        meta.pin = bi.pin;
+        meta.loop = bi.flags & proto::REC_FLAG_LOOP;
+        meta.frameCount = bi.frameCount;
+        meta.loopStart = bi.loopStart < bi.frameCount ? bi.loopStart : 0;
+        hash_ = Recording::hashMeta(meta.frameMs, meta.count, meta.loopStart,
+                                    meta.loop);
+        want_ = bi.hash;
         storing = true;
+        return true;
     }
 
-    void frame(const uint8_t* p, uint16_t len)
+    // true when this FRAME payload belongs to the stream and should be stored
+    bool frame(const uint8_t* p, uint16_t len)
     {
-        if (!storing || len != rec.frameBytes())
-            return;
+        if (!storing || len != meta.frameBytes())
+            return false;
 
-        if (rec.data.size() + len > (size_t)rec.frameCount * rec.frameBytes())
-            return; // more frames than the header declared
+        if (framesSeen >= meta.frameCount)
+            return false; // more frames than the header declared
 
-        rec.data.insert(rec.data.end(), p, p + len);
+        hash_ = Recording::hashFold(hash_, p, len);
+        framesSeen++;
+        return true;
     }
 
-    // true once every declared frame has arrived and the buffer is consistent
-    bool complete() const { return storing && rec.valid(); }
+    // every declared frame arrived and the bytes hash to what BEGIN declared
+    bool complete() const
+    {
+        return storing && framesSeen == meta.frameCount && hash_ == want_;
+    }
+
+private:
+    uint32_t hash_ = 0; // FNV over meta + the frames seen so far
+    uint32_t want_ = 0; // the hash BEGIN declared for the whole recording
 };
 
-// Replays a Recording one frame per frameMs. tick(now) returns the pixels to
-// show this instant (frameBytes() of little-endian 8.8 data — the consumer
-// decodes, see Recording), or nullptr if it isn't time yet (or playback is
-// over). A
-// looping recording wraps; a finite one shows its last frame once and then
-// reports done() — the device holds that frame (and, for shutdown, blanks).
+// Replays a Recording one frame per frameMs, pacing off its header fields
+// alone. tickIndex(now) returns the frame to show this instant, or -1 if it
+// isn't time yet (or playback is over) — for a caller that fetches the frame
+// bytes itself (the device streams them from flash, one frame per tick,
+// instead of holding the whole recording in RAM). tick(now) is the in-RAM
+// convenience over it: same pacing, returning a pointer into data (the
+// daemon's --preview). A looping recording wraps; a finite one shows its
+// last frame once and then reports done() — the device holds that frame
+// (and, for shutdown, blanks).
 struct Player
 {
+    // r must stay alive while playing; only its header fields are read here,
+    // so a meta-only Recording (empty data) works with tickIndex()
     void start(const Recording* r)
     {
         rec_ = r;
@@ -240,21 +293,21 @@ struct Player
         done_ = false;
     }
 
-    bool active() const { return rec_ && rec_->valid(); }
+    bool active() const { return rec_ && rec_->count && rec_->frameCount; }
     bool done() const { return done_; }
 
-    const uint8_t* tick(uint32_t now)
+    int tickIndex(uint32_t now)
     {
         if (!active() || done_)
-            return nullptr;
+            return -1;
 
         if (started_ && now - lastMs_ < rec_->frameMs)
-            return nullptr;
+            return -1;
 
         started_ = true;
         lastMs_ = now;
 
-        const uint8_t* px = rec_->frame(frame_);
+        int idx = frame_;
 
         if (frame_ + 1 < rec_->frameCount)
             frame_++;
@@ -265,7 +318,16 @@ struct Player
         else
             done_ = true; // hold the last frame
 
-        return px;
+        return idx;
+    }
+
+    const uint8_t* tick(uint32_t now)
+    {
+        if (!rec_ || !rec_->valid())
+            return nullptr;
+
+        int idx = tickIndex(now);
+        return idx < 0 ? nullptr : rec_->frame((uint16_t)idx);
     }
 
 private:

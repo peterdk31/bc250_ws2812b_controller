@@ -99,14 +99,19 @@ static bool shuttingDown = false; // replaying the shutdown recording (host has 
 static uint32_t usbSilentSince = 0; // millis() when SOF keepalives stopped (0 = present)
 static bool usbHostLost = false;    // keepalives have been gone > HOST_GONE_MS
 
-// the recording currently playing (held in RAM so re-recording its on-flash
-// file can never race playback), and the shared stepper that paces it
+// the recording currently playing — header fields only; the pixel frames are
+// streamed from flash one per tick (rec_store::playRead), never held in RAM.
+// Re-recording the playing slot's file can't race playback: the upload lands
+// in a temp file, and the commit closes this replay before renaming over it
+// (see CMD_REC_END below).
 static rec::Recording active;
 static rec::Player player;
 
-// incoming recording being streamed from the host, accumulated in RAM by the
-// shared receiver and committed to flash on END (one write — so flash stalls
-// can't drop bytes mid-stream). recSlot is the slot its END must name.
+// incoming recording being streamed from the host: the shared receiver only
+// vets and counts the frames (and folds them into the integrity hash) while
+// rec_store appends each one to the slot's temp file, committed atomically
+// on END — so the recording never exists in RAM on this side either. recSlot
+// is the slot its END must name.
 static rec::RecordingReceiver recRx;
 static uint8_t recSlot = 0;
 
@@ -134,7 +139,7 @@ static uint8_t savedPin = 0;
 // recording's geometry differs from what's currently up
 static void beginReplay()
 {
-    if (active.valid() &&
+    if (active.count && active.frameCount &&
         (active.count != render::count() || active.pin != render::pin()))
         render::init(active.count, active.pin);
 
@@ -165,7 +170,7 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
         // here.
         replayXms = len >= 2 ? (uint16_t)(payload[0] | (payload[1] << 8)) : 0;
 
-        if (rec_store::load(proto::SLOT_SHUTDOWN, active))
+        if (rec_store::playOpen(proto::SLOT_SHUTDOWN, active, MAX_LEDS))
         {
             LLOG("shutdown: replaying %u frames, xfade %u ms",
                  (unsigned)active.frameCount, (unsigned)replayXms);
@@ -186,7 +191,15 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
             // unchanged upload (hash matches the stored file): drop it instead
             // of rewriting flash
             bool skip = bi.hash == rec_store::storedHash(bi.slot);
-            recRx.begin(bi, skip);
+
+            if (recRx.begin(bi, skip) &&
+                !rec_store::saveBegin(bi.slot, recRx.meta, bi.hash))
+            {
+                // no temp file, no stream: drop the frames and keep whatever
+                // the slot had, exactly like a failed commit
+                recRx.reset();
+                LLOG("upload slot %u: can't open temp file", (unsigned)bi.slot);
+            }
 
             LLOG("upload slot %u: %u frames x %u leds%s", (unsigned)bi.slot,
                  (unsigned)bi.frameCount, (unsigned)bi.count,
@@ -195,27 +208,42 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
     }
     else if (cmd == proto::CMD_REC_FRAME)
     {
-        recRx.frame(payload, len);
+        // each vetted frame goes straight to the slot's temp file; the
+        // recording never exists in RAM
+        if (recRx.frame(payload, len))
+            rec_store::saveFrame(payload, len);
     }
     else if (cmd == proto::CMD_REC_END)
     {
-        // commit the buffered recording in one write (no mid-stream stalls); a
-        // skipped/short/mismatched upload just clears state
+        // commit the streamed temp file over the slot; a skipped/short/
+        // corrupt upload just clears state and the slot keeps what it had
         if (recRx.complete() && len >= 1 && payload[0] == recSlot)
         {
-            bool ok = rec_store::save(recSlot, recRx.rec);
+            // LittleFS can't rename over an open file: if the slot being
+            // committed is the one replaying right now (boot replay while a
+            // changed power-on upload streams in), stop that replay first —
+            // the strip holds its last frame, and the host's live frames
+            // take over moments later anyway
+            if (rec_store::playSlot() == recSlot)
+            {
+                player.stop();
+                rec_store::playClose();
+                active = rec::Recording();
+            }
+
+            bool ok = rec_store::saveCommit();
             LLOG("upload slot %u: %s", (unsigned)recSlot,
                  ok ? "stored" : "FLASH WRITE FAILED");
         }
         else if (recRx.storing)
         {
-            // bytes went missing between BEGIN and END — the stream was
-            // interrupted (see the baud-hunt note above) or the frames were
-            // malformed. The slot keeps whatever it had.
-            LLOG("upload slot %u: INCOMPLETE, %u/%u bytes — not stored",
-                 (unsigned)recSlot, (unsigned)recRx.rec.data.size(),
-                 (unsigned)((size_t)recRx.rec.frameCount
-                            * recRx.rec.frameBytes()));
+            // frames went missing or arrived mangled between BEGIN and END —
+            // the stream was interrupted (see the baud-hunt note above) or
+            // the recomputed hash disagrees. The slot keeps whatever it had.
+            rec_store::saveAbort();
+            LLOG("upload slot %u: INCOMPLETE, %u/%u frames — not stored",
+                 (unsigned)recSlot, (unsigned)recRx.framesSeen,
+                 (unsigned)recRx.meta.frameCount);
         }
 
         recRx.reset();
@@ -277,12 +305,14 @@ struct StripHandler : proto::FrameHandler
         usbHostLost = false;
         usbSilentSince = 0;
 
-        // the host is (back) in control: drop any standalone replay and free
-        // its RAM, and clear the shutdown latch so a stop/start resumes cleanly
+        // the host is (back) in control: drop any standalone replay (closing
+        // its file), and clear the shutdown latch so a stop/start resumes
+        // cleanly
         shuttingDown = false;
         player.stop();
+        rec_store::playClose();
         if (active.frameCount)
-            active.clear();
+            active = rec::Recording();
 
         // a checksummed frame proves this rate works; writes happen only when
         // something actually changed, so NVS wear is one write per baud change
@@ -352,7 +382,7 @@ static void init()
     // frame drops it and takes over (see onPixels). With no recording yet,
     // bring the strip up blank on the last known geometry so a never-recorded
     // board isn't undefined.
-    if (rec_store::load(proto::SLOT_POWER_ON, active))
+    if (rec_store::playOpen(proto::SLOT_POWER_ON, active, MAX_LEDS))
     {
         LLOG("boot: replaying %u frames x %u leds on pin %u",
              (unsigned)active.frameCount, (unsigned)active.count,
@@ -441,7 +471,7 @@ static void loop()
                 receiver.reset();
                 link::flushInput();
 
-                if (rec_store::load(proto::SLOT_POWER_ON, active))
+                if (rec_store::playOpen(proto::SLOT_POWER_ON, active, MAX_LEDS))
                 {
                     LLOG("host back — replaying boot recording");
                     beginReplay();
@@ -499,31 +529,55 @@ static void loop()
     // during a shutdown after its last. Player::done() holds the final frame.
     if (((!hostSeen) || shuttingDown) && !player.done() && render::up())
     {
-        if (const uint8_t* px = player.tick(now))
-        {
-            // recordings store the wire's little-endian 8.8 pixels; decode
-            // into the render blend buffer (show() copies it on into its
-            // fade target)
-            uint16_t* dec = render::decodeBuf();
-            uint16_t n = active.count <= MAX_LEDS ? active.count : 0;
-            for (size_t i = 0; i < (size_t)n * 3; i++)
-                dec[i] = (uint16_t)(px[i * 2] | (px[i * 2 + 1] << 8));
+        int fi = player.tickIndex(now);
 
-            // stamp the slot's reserved id so the handoff is an ordinary id
-            // change: shutdown frames dissolve in over the last live frame
-            // (replayXms); boot frames carry no fade of their own (xms 0) — the
-            // first live frame dissolves over the boot recording's last frame,
-            // using that live frame's own crossfade duration
-            if (shuttingDown)
-                render::show(proto::ANIM_SHUTDOWN, n, replayXms, dec);
+        // one frame's worth of the file per tick — the whole recording never
+        // sits in RAM (a ~100 KB allocation this chip once aborted on)
+        static uint8_t raw[(size_t)MAX_LEDS * 6];
+
+        if (fi >= 0)
+        {
+            if (rec_store::playRead((uint16_t)fi, raw, active.frameBytes()))
+            {
+                // recordings store the wire's little-endian 8.8 pixels; decode
+                // into the render blend buffer (show() copies it on into its
+                // fade target)
+                uint16_t* dec = render::decodeBuf();
+                uint16_t n = active.count <= MAX_LEDS ? active.count : 0;
+                for (size_t i = 0; i < (size_t)n * 3; i++)
+                    dec[i] = (uint16_t)(raw[i * 2] | (raw[i * 2 + 1] << 8));
+
+                // stamp the slot's reserved id so the handoff is an ordinary id
+                // change: shutdown frames dissolve in over the last live frame
+                // (replayXms); boot frames carry no fade of their own (xms 0) — the
+                // first live frame dissolves over the boot recording's last frame,
+                // using that live frame's own crossfade duration
+                if (shuttingDown)
+                    render::show(proto::ANIM_SHUTDOWN, n, replayXms, dec);
+                else
+                    render::show(proto::ANIM_BOOT, n, 0, dec);
+            }
             else
-                render::show(proto::ANIM_BOOT, n, 0, dec);
+            {
+                // the file went unreadable under us (flash fault); drop the
+                // replay rather than looping on a dead read
+                LLOG("replay: read failed at frame %d, stopping", fi);
+                player.stop();
+                rec_store::playClose();
+            }
         }
 
-        // the shutdown recording ends on its own near-black frame; blank once
-        // it's done so the strip goes truly dark
-        if (player.done() && shuttingDown)
-            render::blank();
+        if (player.done())
+        {
+            // playback is over (the strip holds the final frame); release the
+            // file so a later upload can rename over it
+            rec_store::playClose();
+
+            // the shutdown recording ends on its own near-black frame; blank
+            // once it's done so the strip goes truly dark
+            if (shuttingDown)
+                render::blank();
+        }
     }
 
     // between frames, keep re-latching the newest (blended) frame with a fresh

@@ -3,8 +3,12 @@
 #include <cstdint>
 
 // upper bound on strip geometry; sizes the static 8.8 frame buffers in
-// render.cpp and bounds every count that arrives from the wire or a recording
-#define MAX_LEDS 2048
+// render.cpp and bounds every count that arrives from the wire or a
+// recording. Deliberately snug: every buffer it sizes is 6 bytes per LED and
+// there are several (three in render.cpp, two in the shared parser), so 2048
+// here cost ~60 KB of a C3's RAM for a 33-LED strip. Driving a longer strip
+// than this means raising it and reflashing.
+#define MAX_LEDS 100
 
 // The display path: owns the led_strip device and the 8.8 fixed-point frame
 // buffers, and is the only code that touches pixels.

@@ -4,8 +4,6 @@
 
 #include "protocol.hpp"
 
-#include "render.hpp" // MAX_LEDS bounds a loadable recording
-
 #define REC_PATH_POWER_ON LFS_BASE "/boot.rec"
 #define REC_PATH_SHUTDOWN LFS_BASE "/shutdown.rec"
 
@@ -16,72 +14,152 @@ static const char* recPath(uint8_t slot)
     return slot == proto::SLOT_SHUTDOWN ? REC_PATH_SHUTDOWN : REC_PATH_POWER_ON;
 }
 
-bool load(uint8_t slot, rec::Recording& out)
+// --- streamed upload ---
+// one at a time: the host sends its recordings back to back, never interleaved
+static FILE* wf = nullptr;
+static uint8_t wfSlot = 0;
+static bool wfOk = false;
+
+bool saveBegin(uint8_t slot, const rec::Recording& meta, uint32_t hash)
 {
-    FILE* f = fopen(recPath(slot), "rb");
-    if (!f)
-        return false;
+    saveAbort(); // a dangling earlier stream (interrupted mid-upload)
 
-    uint8_t hdr[rec::Recording::kHeaderLen];
-    if (fread(hdr, 1, sizeof hdr, f) != sizeof hdr || !out.decodeHeader(hdr))
-    {
-        fclose(f);
-        return false;
-    }
-
-    size_t bytes = (size_t)out.frameCount * out.frameBytes();
-    if (out.count == 0 || out.count > MAX_LEDS || out.frameCount == 0 ||
-        bytes > REC_MAX_BYTES)
-    {
-        fclose(f);
-        return false;
-    }
-
-    out.data.resize(bytes);
-    bool ok = fread(out.data.data(), 1, bytes, f) == bytes;
-    fclose(f);
-
-    if (!ok)
-    {
-        out.clear();
-        return false;
-    }
-
-    return true;
-}
-
-bool save(uint8_t slot, const rec::Recording& r)
-{
-    // write to a temp file and rename over the slot only if every byte
-    // landed: LittleFS's rename is atomic, so an interrupted write (power
-    // cut, esptool reset mid-upload) can never leave a valid-looking header
-    // over truncated data — the slot keeps its previous recording instead
     char tmp[40];
     snprintf(tmp, sizeof tmp, "%s.tmp", recPath(slot));
 
-    FILE* f = fopen(tmp, "wb");
-    if (!f)
+    wf = fopen(tmp, "wb");
+    if (!wf)
         return false; // filesystem not mounted, or out of space
 
     uint8_t hdr[rec::Recording::kHeaderLen];
-    r.encodeHeader(hdr);
-    bool ok = fwrite(hdr, 1, sizeof hdr, f) == sizeof hdr;
+    meta.encodeHeader(hdr, hash);
 
-    if (ok && !r.data.empty())
-        ok = fwrite(r.data.data(), 1, r.data.size(), f) == r.data.size();
+    wfSlot = slot;
+    wfOk = fwrite(hdr, 1, sizeof hdr, wf) == sizeof hdr;
+    return wfOk;
+}
 
-    ok = (fclose(f) == 0) && ok;
+void saveFrame(const uint8_t* px, size_t len)
+{
+    if (!wf || !wfOk)
+        return;
+
+    // a failed write latches wfOk so commit refuses the truncated file; keep
+    // consuming (and dropping) the rest of the stream rather than erroring
+    // per frame
+    wfOk = fwrite(px, 1, len, wf) == len;
+}
+
+bool saveCommit()
+{
+    if (!wf)
+        return false;
+
+    bool ok = (fclose(wf) == 0) && wfOk;
+    wf = nullptr;
+
+    char tmp[40];
+    snprintf(tmp, sizeof tmp, "%s.tmp", recPath(wfSlot));
 
     if (ok)
-        ok = rename(tmp, recPath(slot)) == 0;
+        ok = rename(tmp, recPath(wfSlot)) == 0;
     else
         remove(tmp);
 
     return ok;
 }
 
+void saveAbort()
+{
+    if (!wf)
+        return;
+
+    fclose(wf);
+    wf = nullptr;
+
+    char tmp[40];
+    snprintf(tmp, sizeof tmp, "%s.tmp", recPath(wfSlot));
+    remove(tmp);
+}
+
+// --- streamed replay ---
+static FILE* pf = nullptr;
+static int pfSlot = -1;
+static size_t pfFrameBytes = 0;
+static uint16_t pfFrameCount = 0;
+static uint32_t pfHash = 0; // the open file's stored hash (see storedHash)
+
+bool playOpen(uint8_t slot, rec::Recording& meta, uint16_t maxCount)
+{
+    playClose();
+
+    FILE* f = fopen(recPath(slot), "rb");
+    if (!f)
+        return false;
+
+    uint8_t hdr[rec::Recording::kHeaderLen];
+    if (fread(hdr, 1, sizeof hdr, f) != sizeof hdr || !meta.decodeHeader(hdr))
+    {
+        fclose(f);
+        return false;
+    }
+
+    size_t bytes = (size_t)meta.frameCount * meta.frameBytes();
+    if (meta.count == 0 || meta.count > maxCount || meta.frameCount == 0 ||
+        bytes > REC_MAX_BYTES)
+    {
+        fclose(f);
+        return false;
+    }
+
+    // the file must hold exactly what its header declares; anything else is
+    // truncation or trailing garbage, and replaying it would show junk
+    if (fseek(f, 0, SEEK_END) != 0 || ftell(f) != (long)(sizeof hdr + bytes))
+    {
+        fclose(f);
+        return false;
+    }
+
+    pf = f;
+    pfSlot = slot;
+    pfFrameBytes = meta.frameBytes();
+    pfFrameCount = meta.frameCount;
+    pfHash = rec::Recording::headerHash(hdr);
+    return true;
+}
+
+bool playRead(uint16_t frame, uint8_t* out, size_t len)
+{
+    if (!pf || frame >= pfFrameCount || len != pfFrameBytes)
+        return false;
+
+    long off = (long)(rec::Recording::kHeaderLen + (size_t)frame * pfFrameBytes);
+    return fseek(pf, off, SEEK_SET) == 0 && fread(out, 1, len, pf) == len;
+}
+
+void playClose()
+{
+    if (!pf)
+        return;
+
+    fclose(pf);
+    pf = nullptr;
+    pfSlot = -1;
+}
+
+int playSlot()
+{
+    return pf ? pfSlot : -1;
+}
+
 uint32_t storedHash(uint8_t slot)
 {
+    // LittleFS doesn't support opening a file twice: if the slot's file is
+    // the one being replayed right now (boot replay while the daemon
+    // re-uploads), answer from the hash cached when the replay opened it
+    if (pf && pfSlot == slot)
+        return pfHash;
+
     FILE* f = fopen(recPath(slot), "rb");
     if (!f)
         return 0;
