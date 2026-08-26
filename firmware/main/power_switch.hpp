@@ -47,4 +47,30 @@ int senseState();
 // "this chip reset mid-session". The fan controller arms its pump boost on
 // this. Lock-free aligned read, as senseState().
 uint32_t powerOnSeq();
+
+// coarse PSU state for sibling features (the BLE remote's status
+// characteristic): -1 = feature off, else 0 = OFF, 1 = BOOTING, 2 = ON.
+// Lock-free aligned read, as senseState().
+int psuState();
+
+// stage a remote power request (ble.cpp): the same gestures as the physical
+// button — REMOTE_ON is the press-while-off edge (ignored unless OFF),
+// REMOTE_OFF the graceful short press that asks the host over the link
+// (ignored unless ON, since only a running OS can answer), and
+// REMOTE_OFF_HARD the hold: release PS_ON# and cut the PSU (ignored only in
+// OFF; works in BOOTING too — a boot that never comes up is exactly a case
+// for it). The hard cut exists remotely for the same reason the hold does —
+// a wedged machine — just without walking to the box; the token gate in
+// ble.cpp is what stands in for the finger. Callable from any task; the pwr
+// task consumes it within one poll, so every power decision stays on that
+// task. A no-op while the feature is off; a second request supersedes the
+// first.
+enum Remote : uint8_t
+{
+    REMOTE_NONE = 0,
+    REMOTE_ON,
+    REMOTE_OFF,
+    REMOTE_OFF_HARD
+};
+void remoteRequest(Remote r);
 } // namespace pwr

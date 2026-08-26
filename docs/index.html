@@ -1,0 +1,316 @@
+<!doctype html>
+<!-- BLE power remote for the BC-250 receiver (firmware/main/ble.cpp).
+
+     A single-file Web Bluetooth client: connect to the receiver's GATT
+     service, show the PSU state, and send the two commands the firmware
+     accepts (power on / graceful shutdown), each prefixed with the shared
+     token written at flash time (make flash BLE=on BLE_TOKEN=...).
+
+     Web Bluetooth needs Chrome or Edge — on Android or desktop — and HTTPS
+     (GitHub Pages qualifies). iOS browsers don't have it. Installed from
+     Chrome's "Add to Home screen", the service worker (sw.js) makes it work
+     fully offline, which is the point: the machine travels.
+
+     Everything protocol-shaped must match ble.cpp:
+       service a5f20001-8f11-4e0e-9b3a-0bc250e0c001
+       control a5f20002-... : write  token(16, NUL-padded) + op(1)
+                              op 0x01=on 0x02=graceful shutdown 0x03=hard off
+       status  a5f20003-... : read/notify  1 byte  0=off 1=booting 2=on -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b0e14">
+<title>BC-250 Power</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #141926;
+    --text: #d7dce6;
+    --muted: #6b7385;
+    --off: #3a4256;
+    --on: #38d178;
+    --booting: #e8b23e;
+    --danger: #d15252;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.5 system-ui, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1.5rem;
+    padding: 2rem 1.5rem;
+    text-align: center;
+  }
+  h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: .08em;
+       text-transform: uppercase; color: var(--muted); }
+
+  /* the power button: a big ring that carries the state color */
+  #power {
+    width: 11rem; height: 11rem;
+    border-radius: 50%;
+    border: 5px solid var(--off);
+    background: var(--panel);
+    color: var(--text);
+    font: inherit; font-size: 1.05rem; font-weight: 600;
+    cursor: pointer;
+    transition: border-color .3s, box-shadow .3s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #power:disabled { opacity: .45; cursor: default; }
+  #power.off     { border-color: var(--off); }
+  #power.booting { border-color: var(--booting);
+                   box-shadow: 0 0 2.5rem color-mix(in srgb, var(--booting) 35%, transparent); }
+  #power.on      { border-color: var(--on);
+                   box-shadow: 0 0 2.5rem color-mix(in srgb, var(--on) 35%, transparent); }
+  /* power symbol drawn in CSS so there's no icon dependency */
+  #power .sym {
+    display: block; width: 2.2rem; height: 2.2rem; margin: 0 auto .6rem;
+    border: 3px solid currentColor; border-radius: 50%;
+    position: relative;
+    -webkit-mask: conic-gradient(from -35deg, transparent 70deg, #000 0);
+            mask: conic-gradient(from -35deg, transparent 70deg, #000 0);
+  }
+  #power .sym::after {
+    content: ""; position: absolute; left: 50%; top: -0.9rem;
+    transform: translateX(-50%);
+    width: 3px; height: 1.4rem; background: currentColor; border-radius: 2px;
+  }
+
+  #state { font-size: .95rem; color: var(--muted); min-height: 3em; max-width: 26rem; }
+  #state strong { color: var(--text); }
+
+  .row { display: flex; gap: .75rem; flex-wrap: wrap; justify-content: center; }
+  button.minor, input {
+    background: var(--panel); color: var(--text);
+    border: 1px solid #232a3d; border-radius: .5rem;
+    padding: .55rem 1rem; font: inherit; font-size: .9rem;
+  }
+  button.minor { cursor: pointer; }
+  button.minor:disabled { opacity: .45; cursor: default; }
+  button.minor.danger { color: var(--danger); }
+  input { width: 13rem; text-align: center; letter-spacing: .05em; }
+
+  #tokenbox { display: none; flex-direction: column; gap: .75rem; align-items: center; }
+  #tokenbox.show { display: flex; }
+  #tokenbox p { font-size: .85rem; color: var(--muted); max-width: 24rem; }
+  #unsupported { display: none; color: var(--danger); max-width: 26rem; }
+</style>
+</head>
+<body>
+<h1>BC-250 Power</h1>
+
+<button id="power" class="off" disabled>
+  <span class="sym"></span><span id="powerlabel">Connect</span>
+</button>
+
+<div id="state">Not connected.</div>
+
+<div class="row">
+  <button id="shutdown" class="minor danger" hidden>Shut down</button>
+  <button id="hardoff" class="minor danger" hidden>Force off</button>
+  <button id="forget" class="minor" hidden>Change token</button>
+</div>
+
+<div id="tokenbox">
+  <p>Enter the token this receiver was flashed with
+     (<code>BLE_TOKEN</code>). It is remembered on this phone.</p>
+  <input id="token" type="password" autocomplete="off"
+         placeholder="token" maxlength="16">
+  <button id="savetoken" class="minor">Save</button>
+</div>
+
+<div id="unsupported">
+  This browser has no Web Bluetooth. Use Chrome or Edge on Android or
+  desktop — iOS browsers can’t do this.
+</div>
+
+<script>
+'use strict';
+
+const SVC  = 'a5f20001-8f11-4e0e-9b3a-0bc250e0c001';
+const CTRL = 'a5f20002-8f11-4e0e-9b3a-0bc250e0c001';
+const STAT = 'a5f20003-8f11-4e0e-9b3a-0bc250e0c001';
+const OP_ON = 0x01, OP_SHUTDOWN = 0x02, OP_HARD_OFF = 0x03;
+const TOKEN_LEN = 16;
+const STATE_NAMES = ['off', 'booting', 'on'];
+
+const $ = id => document.getElementById(id);
+const powerBtn = $('power'), powerLabel = $('powerlabel');
+const stateEl = $('state'), shutdownBtn = $('shutdown');
+const hardoffBtn = $('hardoff'), forgetBtn = $('forget');
+
+let device = null, ctrl = null, stat = null;
+let psu = -1;          // last status byte seen, -1 = unknown
+let busy = false;      // a connect or write in flight
+
+// ---- token (localStorage; wrapped — storage can throw in private windows) ----
+const store = {
+  get() { try { return localStorage.getItem('ble-token') || ''; } catch { return ''; } },
+  set(v) { try { localStorage.setItem('ble-token', v); } catch {} },
+};
+
+function tokenBytes() {
+  const bytes = new Uint8Array(TOKEN_LEN); // NUL padding, as the firmware compares
+  const t = store.get();
+  for (let i = 0; i < Math.min(t.length, TOKEN_LEN); i++)
+    bytes[i] = t.charCodeAt(i);
+  return bytes;
+}
+
+// ---- UI ----
+function say(html) { stateEl.innerHTML = html; }
+
+function render() {
+  const connected = !!(device && device.gatt.connected);
+  powerBtn.className = STATE_NAMES[psu] || 'off';
+  // graceful shutdown needs a running OS to ask; the hard cut only needs the
+  // PSU to be up — it's the crash rescue, so it shows while booting too
+  shutdownBtn.hidden = !(connected && psu === 2);
+  hardoffBtn.hidden = !(connected && psu >= 1);
+  forgetBtn.hidden = !store.get();
+
+  if (!store.get()) {
+    powerBtn.disabled = true;
+    powerLabel.textContent = 'Connect';
+    $('tokenbox').classList.add('show');
+    return;
+  }
+  $('tokenbox').classList.remove('show');
+
+  if (!connected) {
+    powerBtn.disabled = busy;
+    powerLabel.textContent = busy ? 'Connecting…' : 'Connect';
+  } else if (psu === 0) {
+    powerBtn.disabled = busy;
+    powerLabel.textContent = 'Power on';
+  } else {
+    powerBtn.disabled = true;
+    powerLabel.textContent = psu === 1 ? 'Booting…' : 'On';
+  }
+}
+
+// ---- BLE ----
+async function connect() {
+  device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] });
+  device.addEventListener('gattserverdisconnected', onDisconnected);
+  const gatt = await device.gatt.connect();
+  const svc = await gatt.getPrimaryService(SVC);
+  ctrl = await svc.getCharacteristic(CTRL);
+  stat = await svc.getCharacteristic(STAT);
+  await stat.startNotifications();
+  stat.addEventListener('characteristicvaluechanged',
+                        e => onStatus(e.target.value.getUint8(0)));
+  onStatus((await stat.readValue()).getUint8(0));
+  say(`Connected to <strong>${device.name || 'receiver'}</strong>.`);
+}
+
+function onStatus(v) {
+  const was = psu;
+  psu = v;
+  if (v === 1) { say('<strong>Powering on…</strong> waiting for the board to come up.'); }
+  else if (v === 2 && was !== -1) { say('<strong>The machine is up.</strong>'); }
+  else if (v === 2) { say('Connected — the machine is <strong>already on</strong>.'); }
+  else if (v === 0 && was > 0) { say('The machine has powered <strong>off</strong>.'); }
+  render();
+}
+
+function onDisconnected() {
+  ctrl = stat = null;
+  psu = -1;
+  say('Disconnected.');
+  render();
+}
+
+async function write(op) {
+  const buf = new Uint8Array(TOKEN_LEN + 1);
+  buf.set(tokenBytes());
+  buf[TOKEN_LEN] = op;
+  try {
+    await ctrl.writeValueWithResponse(buf);
+  } catch (e) {
+    // NimBLE answers a wrong token with "insufficient authentication"
+    say(/auth|not permitted|gatt/i.test(e.message)
+        ? 'The receiver <strong>rejected the token</strong> — check it and try again.'
+        : `Write failed: ${e.message}`);
+    throw e;
+  }
+}
+
+// ---- wiring ----
+powerBtn.addEventListener('click', async () => {
+  if (busy) return;
+  busy = true; render();
+  try {
+    if (!(device && device.gatt.connected)) {
+      say('Pick the receiver in the chooser…');
+      await connect();
+    } else if (psu === 0) {
+      await write(OP_ON);
+      say('<strong>Power-on sent.</strong>');
+    }
+  } catch (e) {
+    if (e.name !== 'NotFoundError') // chooser dismissed = not an error worth shouting
+      say(`Couldn’t connect: ${e.message}<br>Is Bluetooth on, and are you in range? The receiver advertises whenever it has standby power.`);
+    else if (psu === -1)
+      say('Not connected.');
+  } finally {
+    busy = false; render();
+  }
+});
+
+shutdownBtn.addEventListener('click', async () => {
+  if (busy || !confirm('Ask the machine to shut down?')) return;
+  busy = true; render();
+  try {
+    await write(OP_SHUTDOWN);
+    say('<strong>Shutdown requested</strong> — the OS decides from here.');
+  } catch {} finally { busy = false; render(); }
+});
+
+hardoffBtn.addEventListener('click', async () => {
+  // the remote form of holding the physical button: an immediate PSU cut,
+  // no graceful anything — for a crashed machine. Hence the louder confirm.
+  if (busy || !confirm('FORCE the power off?\n\nThis cuts the PSU like ' +
+                       'holding the button — unsaved work is lost. ' +
+                       'For a machine that is wedged, not a normal shutdown.')) return;
+  busy = true; render();
+  try {
+    await write(OP_HARD_OFF);
+    say('<strong>Power cut.</strong>');
+  } catch {} finally { busy = false; render(); }
+});
+
+$('savetoken').addEventListener('click', () => {
+  const v = $('token').value.trim();
+  if (v.length < 8) { say('The token is 8–16 characters.'); return; }
+  store.set(v); $('token').value = '';
+  say('Token saved. Tap the button to connect.');
+  render();
+});
+
+forgetBtn.addEventListener('click', () => {
+  store.set(''); psu = -1;
+  if (device && device.gatt.connected) device.gatt.disconnect();
+  render();
+});
+
+if (!('bluetooth' in navigator)) {
+  $('unsupported').style.display = 'block';
+  powerBtn.disabled = true;
+}
+
+if ('serviceWorker' in navigator)
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0b0e14"/>
+  <!-- power symbol -->
+  <path d="M256 96v120" stroke="#38d178" stroke-width="36" stroke-linecap="round" fill="none"/>
+  <path d="M172 160a150 150 0 1 0 168 0" stroke="#38d178" stroke-width="36" stroke-linecap="round" fill="none"/>
+</svg>

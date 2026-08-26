@@ -13,10 +13,13 @@
 # no toolchain to write. fancfg is the same idea for the PWM fan controller
 # (see fan.cpp; `make flash FAN=on` / `make flash-fan`) — carved out of the
 # factory tail so pwrcfg and storage keep their offsets and deployed configs
-# survive this table change.
+# survive this table change. blecfg (the BLE power remote, see ble.cpp;
+# `make flash BLE=on` / `make flash-ble`) is the next 4 KB bite of the same
+# tail, again leaving every existing offset alone.
 # Name,     Type, SubType,  Offset,   Size,     Flags
 nvs,        data, nvs,      0x9000,   0x7000,
-factory,    app,  factory,  0x10000,  0x1EE000,
+factory,    app,  factory,  0x10000,  0x1ED000,
+blecfg,     data, 0x42,     0x1FD000, 0x1000,
 fancfg,     data, 0x41,     0x1FE000, 0x1000,
 pwrcfg,     data, 0x40,     0x1FF000, 0x1000,
 storage,    data, spiffs,   0x200000, 0x200000,

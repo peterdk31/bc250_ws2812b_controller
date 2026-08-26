@@ -1,0 +1,12 @@
+{
+  "name": "BC-250 Power",
+  "short_name": "BC-250",
+  "description": "Bluetooth power button for the BC-250 LED controller",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#0b0e14",
+  "theme_color": "#0b0e14",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

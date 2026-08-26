@@ -21,6 +21,9 @@
 // `pwrcfg` flash partition — the two services never touch. fan.* is the
 // second: the PWM fan controller, same shape (own task, own NVS namespace,
 // wiring in the `fancfg` partition), fed CMD_FAN_DUTY by the LED task.
+// ble.* is the third: the BLE power remote (config in `blecfg`), a phone-
+// facing remote control for the power switch — its whole contact surface is
+// pwr::psuState() / pwr::remoteRequest().
 // The wire protocol, framing, recording format/replay and crossfading are the
 // shared common/ code the daemon also compiles (on the include path — see
 // CMakeLists.txt).
@@ -35,6 +38,7 @@
 #include "esp_littlefs.h"
 #include "nvs_flash.h"
 
+#include "ble.hpp"
 #include "dbglog.hpp"
 #include "fan.hpp"
 #include "led_service.hpp"
@@ -78,6 +82,11 @@ extern "C" void app_main(void)
                      esp_err_to_name(ferr));
 
     led::start();
+
+    // the BLE power remote last: the slowest bring-up and the least critical
+    // (it only matters once someone reaches for their phone), and it reads
+    // the power switch's state, which pwr::start() has settled by now
+    ble::start();
 
     // app_main returns; FreeRTOS keeps running the service tasks
 }

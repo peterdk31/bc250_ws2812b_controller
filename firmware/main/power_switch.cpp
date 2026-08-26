@@ -225,6 +225,16 @@ static bool btnLongFired = false; // this press can no longer force off: either
 static uint32_t g_reqStart = 0;
 static uint32_t g_nakBlink = 0;
 
+// the feature made it through start()'s config checks and its task runs —
+// what psuState() keys "-1 = off" on
+static bool g_active = false;
+
+// a remote request staged by remoteRequest() (BLE), consumed at the top of
+// loop() so every power decision is made on this task, exactly like a button
+// edge. Single aligned byte, one consumer; a second write superseding an
+// unconsumed first is the semantics we want.
+static volatile uint8_t g_remote = REMOTE_NONE;
+
 // sense debounce (on the hysteresis output, not the raw voltage)
 static adc_oneshot_unit_handle_t g_adc = nullptr;
 static adc_cali_handle_t g_cali = nullptr;
@@ -429,12 +439,13 @@ static void powerOff()
 
 // ask the host to shut itself down (see the short-press note at the top). Asking
 // again while one is outstanding is deliberate — the user pressing a second time
-// wants another try, and the daemon acts on the first request only.
-static void requestShutdown(uint32_t now)
+// wants another try, and the daemon acts on the first request only. `why` names
+// the gesture for the log: "short press" (the button) or "remote" (BLE).
+static void requestShutdown(uint32_t now, const char* why)
 {
     g_reqStart = now ? now : 1;
     hostreq::request(proto::REQ_HOST_SHUTDOWN);
-    PLOG("short press: asked the host for a graceful shutdown");
+    PLOG("%s: asked the host for a graceful shutdown", why);
 }
 
 // ---- the task ----
@@ -442,6 +453,34 @@ static void requestShutdown(uint32_t now)
 static void loop()
 {
     uint32_t now = millis();
+
+    // a staged remote request first: the same two gestures as the button,
+    // minus the hold/failsafe semantics (those belong to a finger on the real
+    // switch). Anything that doesn't fit the current state is dropped with a
+    // log line — the remote's status characteristic is how a client finds out.
+    if (g_remote != REMOTE_NONE)
+    {
+        uint8_t r = g_remote;
+        g_remote = REMOTE_NONE;
+
+        if (r == REMOTE_ON && g_state == OFF)
+        {
+            PLOG("remote: power on");
+            powerOn(now);
+        }
+        else if (r == REMOTE_OFF && g_state == ON)
+            requestShutdown(now, "remote");
+        else if (r == REMOTE_OFF_HARD && g_state != OFF)
+        {
+            // the remote hold: a hard cut, for a wedged (or never-booting)
+            // machine. Same effect as holding the button for holdMs.
+            PLOG("remote: power OFF (hard), releasing PS_ON#");
+            powerOff();
+        }
+        else
+            PLOG("remote: request %u ignored in state %s", (unsigned)r,
+                 stateName(g_state));
+    }
 
     if (g_cfg.buttonPin >= 0)
     {
@@ -476,7 +515,7 @@ static void loop()
                 // released early, and this press neither powered anything on nor
                 // forced anything off (both set btnLongFired): the short press.
                 if (g_state == ON)
-                    requestShutdown(now);
+                    requestShutdown(now, "short press");
                 else
                     // BOOTING: the OS isn't up, so there's nobody to ask yet.
                     // Logged because from the outside this looks like a dead
@@ -647,6 +686,20 @@ int senseState()
 
 uint32_t powerOnSeq() { return g_powerOnSeq; }
 
+int psuState()
+{
+    if (!g_active)
+        return -1;
+
+    return g_state == OFF ? 0 : g_state == BOOTING ? 1 : 2;
+}
+
+void remoteRequest(Remote r)
+{
+    if (g_active)
+        g_remote = r;
+}
+
 void start()
 {
     bool loaded = loadConfig(g_cfg);
@@ -753,6 +806,7 @@ void start()
 
     // priority above the idle/main tasks but below the LED service's 5: a
     // 10 ms button poll never needs to win against the strip's latch cadence
+    g_active = true;
     xTaskCreate(taskMain, "pwr_sw", 4096, nullptr, 2, nullptr);
 }
 } // namespace pwr

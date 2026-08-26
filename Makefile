@@ -81,6 +81,20 @@ FAN_DUTY ?= 100
 FAN_BOOST_DUTY ?= 100
 FAN_BOOST_SECS ?= 5
 
+# BLE power remote (README "BLE remote"): while the machine is off the
+# receiver advertises a small Bluetooth LE service, so a phone (the Web
+# Bluetooth page in docs/) can press the power button remotely. Same scheme
+# as the power switch: the config lives in the receiver's `blecfg` flash
+# partition, written at flash time — BLE=on writes it alongside `flash` /
+# `flash-source` (BLE=off writes it disabled); unset leaves whatever is on
+# the chip. `make flash-ble` writes only that partition. BLE=on requires
+# BLE_TOKEN, the shared secret a phone must present with every command (8-16
+# ASCII chars, e.g. from `openssl rand -hex 6` — and note it lands in your
+# shell history); BLE_NAME is the advertised device name (public).
+BLE ?=
+BLE_TOKEN ?=
+BLE_NAME ?= BC250
+
 # cross-feature pin collision feeds: each encoder is told which pins the
 # *other* feature claims. Known-true (a hard error) when that feature is being
 # written "on" in the same run; skipped entirely on "off" (its pins are being
@@ -356,6 +370,23 @@ FANCFG_RESOLVE = fan=""; \
 		fan="$(FANCFG_OFF) $(CURDIR)/$(FANCFG_BIN)"; \
 	fi
 
+BLECFG_OFF = $(call part_off,blecfg)
+BLECFG_BIN = firmware/dist/blecfg.bin
+# companion to PWRCFG_RESOLVE for the BLE power remote: when BLE is set,
+# encode BLE_TOKEN/BLE_NAME into $(BLECFG_BIN) and set $$ble to the extra
+# offset+file pair for esptool write_flash; empty otherwise. blecfg.py is
+# where a missing/weak token is caught — the firmware would happily serve
+# whatever secret it is given.
+BLECFG_RESOLVE = ble=""; \
+	if [ -n "$(BLE)" ]; then \
+		case "$(BLE)" in on|off) ;; *) echo 'BLE must be "on" or "off" (see README, BLE remote)'; exit 1;; esac; \
+		[ -n "$(BLECFG_OFF)" ] || { echo "no blecfg offset found in firmware/partitions.csv"; exit 1; }; \
+		mkdir -p firmware/dist; \
+		python3 tools/blecfg.py --out "$(BLECFG_BIN)" $(if $(filter off,$(BLE)),--disabled) \
+			--token "$(BLE_TOKEN)" --name "$(BLE_NAME)" || exit 1; \
+		ble="$(BLECFG_OFF) $(CURDIR)/$(BLECFG_BIN)"; \
+	fi
+
 # prebuilt firmware images published to GitHub Releases by .github/workflows/
 # firmware.yml. `make flash` downloads the merged image for TARGET and writes it,
 # so the common case needs no ESP-IDF and no container — just esptool. Pin a
@@ -380,6 +411,14 @@ IDF_BUILD_CMD = idf.py -C firmware -B $(RECEIVER_BUILD) -DIDF_TARGET=$(TARGET) \
                 -DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS) build
 
 receiver: led receiver-toolchain
+	@# idf.py only merges sdkconfig.defaults into a build dir's sdkconfig when
+	@# that file doesn't exist yet — an existing build dir silently ignores a
+	@# changed defaults (symptom: "Missing header ... found in component bt"
+	@# right after a component was enabled there). Regenerate when stale.
+	@if [ -f "$(RECEIVER_BUILD)/sdkconfig" ] && [ firmware/sdkconfig.defaults -nt "$(RECEIVER_BUILD)/sdkconfig" ]; then \
+		echo "sdkconfig.defaults is newer than $(RECEIVER_BUILD)/sdkconfig — regenerating"; \
+		rm -f "$(RECEIVER_BUILD)/sdkconfig" "$(RECEIVER_BUILD)/sdkconfig.old"; \
+	fi
 	@if [ -n "$(IDF_NATIVE)" ]; then \
 		echo "building firmware ($(TARGET)) with native ESP-IDF at $(IDF_PATH)"; \
 		bash -c 'ROOT="$(CURDIR)"; . "$(IDF_PATH)/export.sh" >/dev/null && $(IDF_BUILD_CMD)'; \
@@ -396,7 +435,7 @@ receiver: led receiver-toolchain
 # Build-from-source instead with `make flash-source`.
 flash:
 	-@$(MAKE) --no-print-directory serial-perms
-	@$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); $(FANCFG_RESOLVE); \
+	@$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); $(FANCFG_RESOLVE); $(BLECFG_RESOLVE); \
 	mkdir -p firmware/dist; img="firmware/dist/$(FW_BIN)"; \
 	echo "fetching $(FW_URL)"; \
 	if command -v curl >/dev/null 2>&1; then fetch="curl -fSL -o $$img $(FW_URL)"; \
@@ -409,7 +448,7 @@ flash:
 	$(IMG_SPLIT_NVS); \
 	$(PORT_FREE); \
 	echo "flashing $(TARGET) via $$tool on $(PORT)"; \
-	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash $$imgargs $$pwr $$fan; \
+	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash $$imgargs $$pwr $$fan $$ble; \
 	rc=$$?; \
 	$(PORT_RESTORE); \
 	exit $$rc
@@ -422,10 +461,10 @@ flash:
 flash-source: receiver
 	-@$(MAKE) --no-print-directory serial-perms
 	@[ -f "$(RECEIVER_BUILD)/flash_args" ] || { echo "flash_args missing in $(RECEIVER_BUILD) (did the build run?)"; exit 1; }; \
-	$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); $(FANCFG_RESOLVE); \
+	$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); $(FANCFG_RESOLVE); $(BLECFG_RESOLVE); \
 	$(PORT_FREE); \
 	echo "flashing $(TARGET) via $$tool on $(PORT)"; \
-	( cd "$(RECEIVER_BUILD)" && $$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash @flash_args $$pwr $$fan ); \
+	( cd "$(RECEIVER_BUILD)" && $$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash @flash_args $$pwr $$fan $$ble ); \
 	rc=$$?; \
 	$(PORT_RESTORE); \
 	exit $$rc
@@ -457,6 +496,23 @@ flash-fan:
 	$(PORT_FREE); \
 	echo "writing fan config ($(FAN)) via $$tool on $(PORT)"; \
 	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash $$fan; \
+	rc=$$?; \
+	$(PORT_RESTORE); \
+	exit $$rc
+
+# write only the 4 KB blecfg partition: enable, re-token, rename or disable
+# the BLE power remote without reflashing the firmware. Requires BLE=on (with
+# BLE_TOKEN) or BLE=off. Like flash-fan, the chip must already run a firmware
+# whose partition table has the blecfg entry — against an older layout the
+# write lands in the (unused) factory tail and the firmware never sees it;
+# the debug log says so at boot.
+flash-ble:
+	-@$(MAKE) --no-print-directory serial-perms
+	@[ -n "$(BLE)" ] || { echo 'set BLE=on (BLE_TOKEN required, BLE_NAME optional) or BLE=off (disable)'; exit 1; }; \
+	$(ESPTOOL_RESOLVE); $(BLECFG_RESOLVE); \
+	$(PORT_FREE); \
+	echo "writing BLE remote config ($(BLE)) via $$tool on $(PORT)"; \
+	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash $$ble; \
 	rc=$$?; \
 	$(PORT_RESTORE); \
 	exit $$rc
@@ -507,4 +563,4 @@ receiver-clean:
 	rm -rf firmware/build firmware/build-* firmware/dist $(IDF_GENERATED)
 	-@[ -n "$(CONTAINER)" ] && $(CONTAINER) rmi $(IDF_IMAGE) 2>/dev/null || true
 
-.PHONY: all install install-config uninstall clean udev-rule serial-perms receiver-toolchain receiver receiver-clean flash flash-source flash-pwr flash-fan clear-nvs clear-recordings
+.PHONY: all install install-config uninstall clean udev-rule serial-perms receiver-toolchain receiver receiver-clean flash flash-source flash-pwr flash-fan flash-ble clear-nvs clear-recordings

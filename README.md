@@ -724,6 +724,59 @@ Two guardrails, mirroring the power switch's:
   story as the receiver's saved baud and strip geometry. `flash-fan` /
   `flash-pwr` touch only their own partitions and keep NVS.
 
+## BLE remote
+
+With the power switch fitted, the receiver can also be the machine's *remote*
+power button: it advertises a small Bluetooth LE service (idling on 5VSB even
+while the machine is off), and a phone within radio range can press the
+button — no WiFi, no app store, works wherever the machine is carried. The client is the Web Bluetooth page in `docs/` (host it on GitHub
+Pages and "install" it from Chrome once; it works offline afterwards) — or
+any BLE tool that can write a GATT characteristic. Note Web Bluetooth is a
+Chrome/Edge-on-Android (and desktop) feature; iOS browsers don't have it.
+
+Like the other receiver features it is **standalone** (no daemon involved)
+and opted into at flash time, in its own 4 KB `blecfg` partition:
+
+```sh
+sudo make flash BLE=on BLE_TOKEN=$(openssl rand -hex 6)   # firmware + remote
+sudo make flash-ble BLE=on BLE_TOKEN=... BLE_NAME=BC250   # re-token/rename only: seconds
+sudo make flash-ble BLE=off                               # disable
+```
+
+`BLE_TOKEN` (8–16 characters, required) is the shared secret the phone must
+present with every command — the only thing standing between anyone within
+radio range and your power button, so `tools/blecfg.py` refuses to write an
+enabled config without one. Enter it once on the web page; it is remembered
+on the phone. `BLE_NAME` is the advertised device name (public by
+definition).
+
+What the remote can do is deliberately narrow — the same gestures as the
+physical button, and nothing else:
+
+- **Power on** (the press-while-off edge, `pwr::remoteRequest`), taking the
+  exact same path as a real press: the fan boost arms, the power-on
+  animation replays, the sense wire confirms the boot.
+- **Graceful shutdown** (the short press): asks the host over the link to run
+  its poweroff command — needs `sinks.serial.power_button: true` in the
+  daemon config, like the button.
+- **Force off** (the hold): release PS_ON# and cut the PSU immediately — the
+  crash rescue, which is the one moment a *remote* power button really earns
+  its keep. The page double-confirms it; the firmware accepts it while
+  booting too (a boot that never comes up is exactly a case for it).
+
+Radio policy: the receiver advertises in both PSU states — a crashed machine
+must be reachable, and it counts as "on" — but at two paces: 300 ms intervals
+while off (quick to find, still gentle on 5VSB), ~1.3 s while the host is up,
+where the radio should stay a rounding error next to the strip's latch
+cadence. If the strip ever shows glitches with a phone connected, the RMT
+buffer in `render.cpp` (`mem_block_symbols`) is the knob to reach for.
+
+Guardrails, mirroring the fans': the chip must run a firmware whose partition
+table has the `blecfg` entry — `make flash-ble` against an older layout is a
+silent no-op except for the receiver's debug log saying `no blecfg partition`
+at boot. And the remote requires the power switch (`PWR=on`): a `blecfg`
+without it logs `power switch is off — remote disabled` and stays dark.
+
 ## Previewing without hardware
 
 Frames go to a list of *sinks* — the serial transport and/or an on-screen

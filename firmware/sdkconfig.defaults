@@ -22,3 +22,17 @@ CONFIG_FREERTOS_HZ=1000
 # The receiver is small; optimize for size (it fits the factory app partition
 # many times over, but there's no reason to carry the bulk).
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# Bluetooth for the BLE power remote (ble.cpp): NimBLE host, the peripheral
+# side only (we advertise + serve one GATT service; never scan, never
+# connect out), one connection is plenty for a power button. Compiled into
+# every image so the prebuilt-release flow keeps working; a board whose
+# blecfg partition is erased never initializes the stack, so the cost of not
+# opting in is flash, not RAM. On the plain ESP32 the controller runs
+# BLE-only (no Classic BT).
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
