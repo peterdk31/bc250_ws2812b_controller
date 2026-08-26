@@ -25,10 +25,15 @@ void begin(uint32_t baud)
     cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
     cfg.source_clk = UART_SCLK_DEFAULT;
 
-    // a generous RX ring so a recording upload (many frames back-to-back)
-    // can't outrun us while we copy each into RAM (mirrors the old
-    // Serial.setRxBufferSize(1024)). We never transmit, so no TX buffer.
-    uart_driver_install(PORT, 2048, 0, 0, nullptr, 0);
+    // The RX ring must ride out flash stalls: a recording upload is appended
+    // to LittleFS frame by frame as it streams in (rec_store::saveFrame), and
+    // a page program or block erase freezes this task for tens of ms with the
+    // host still sending — the driver drops bytes once the ring is full, and
+    // every drop costs upload frames (the stream then fails its integrity
+    // hash at END and nothing is stored). At the host's paced ~100 KB/s
+    // (SerialSink spaces CMD_REC_FRAMEs), 32 KB buys ~300 ms of stall.
+    // We never transmit, so no TX buffer.
+    uart_driver_install(PORT, 32768, 0, 0, nullptr, 0);
     uart_param_config(PORT, &cfg);
     // UART0's default pins are already wired to the USB-serial bridge; keep them.
 }
@@ -54,8 +59,19 @@ void write(const uint8_t* buf, size_t len)
 void begin(uint32_t /*baud*/)
 {
     usb_serial_jtag_driver_config_t cfg = {};
-    cfg.tx_buffer_size = 256;  // we never really transmit, but 0 is rejected
-    cfg.rx_buffer_size = 1024; // matches the old Serial.setRxBufferSize(1024)
+    cfg.tx_buffer_size = 256; // we never really transmit, but 0 is rejected
+
+    // The RX ring must ride out flash stalls: a recording upload is appended
+    // to LittleFS frame by frame as it streams in (rec_store::saveFrame), and
+    // a page program or block erase freezes this task for tens of ms with the
+    // host still sending. USB gives no relief here — the driver's ISR (IDF
+    // v5.3.1) unconditionally drains the 64-byte hardware FIFO and silently
+    // discards what a full ring buffer won't take, so there's no NAK
+    // backpressure and every overflow costs upload frames (the stream then
+    // fails its integrity hash at END and nothing is stored). At the host's
+    // paced ~100 KB/s (SerialSink spaces CMD_REC_FRAMEs), 32 KB buys ~300 ms
+    // of stall. The RAM is what the MAX_LEDS 2048->100 drop reclaimed.
+    cfg.rx_buffer_size = 32768;
     usb_serial_jtag_driver_install(&cfg);
 }
 

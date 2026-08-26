@@ -201,6 +201,19 @@ public:
             return false;
 
         tcdrain(fd);
+
+        // Recording frames are paced, not blasted: the receiver appends each
+        // one to LittleFS as it arrives, and a flash page program or block
+        // erase freezes its reader task for tens of ms while its RX ring
+        // (finite, and overflowed silently by the USB Serial/JTAG driver — no
+        // NAK backpressure) keeps filling. tcdrain only proves the kernel
+        // handed the bytes to the port, not that the receiver consumed them,
+        // so bound the in-flight backlog to what its ring can hold across a
+        // stall: ~204 wire bytes per 2 ms is ~100 KB/s. Uploads happen once
+        // per daemon start; the ~1 s this adds per slot is invisible.
+        if (cmd == proto::CMD_REC_FRAME)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+
         return true;
     }
 
