@@ -67,7 +67,9 @@ Everything this repo can put on the receiver, in one command — the ATX power
 switch, the PWM fans, and the BLE phone remote, with every knob spelled out
 (the values shown are the defaults for the BC-250 hookup described in the
 sections below, so trim freely — an omitted `PWR_*`/`FAN_*` var just means
-its default):
+its default). The one exception is `FAN_DUTY`, shown here as a per-channel
+list — percent per fan, in `FAN_PINS` order (e.g. pump at 100, radiator fans
+lower); a single value applies to all channels, and the default is 100:
 
 ```sh
 sudo make flash \
@@ -77,7 +79,7 @@ sudo make flash \
         PWR_HOLD=2 PWR_BOOT_TIMEOUT=10 \
         PWR_SENSE_LOW=800 PWR_SENSE_HIGH=2000 \
     FAN=on \
-        FAN_PINS=5,6,7,10 FAN_DUTY=100 \
+        FAN_PINS=5,6,7,10 FAN_DUTY=100,60,60,40 \
         FAN_BOOST_DUTY=100 FAN_BOOST_SECS=5 \
     BLE=on \
         BLE_TOKEN=$(openssl rand -hex 6) BLE_NAME=BC250
