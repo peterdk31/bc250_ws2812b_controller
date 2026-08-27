@@ -2,9 +2,19 @@
 <!-- BLE power remote for the BC-250 receiver (firmware/main/ble.cpp).
 
      A single-file Web Bluetooth client: connect to the receiver's GATT
-     service, show the PSU state, and send the two commands the firmware
-     accepts (power on / graceful shutdown), each prefixed with the shared
-     token written at flash time (make flash BLE=on BLE_TOKEN=...).
+     service, show the PSU state, and send the commands the firmware
+     accepts, each prefixed with the shared token written at flash time
+     (make flash BLE=on BLE_TOKEN=...).
+
+     The ring button IS the UI: its color is the PSU state, its label the
+     one action a tap performs. Text below it only appears for errors.
+
+     Reconnects on its own: the chooser grants a persistent permission, so
+     navigator.bluetooth.getDevices() can hand the device back on the next
+     visit and gatt.connect() pends until the receiver is in range (it
+     advertises in both PSU states, see ble.cpp). The chooser is only ever
+     needed once per phone. getDevices() is Chromium-only-ish; without it
+     the tap-to-connect path still works.
 
      Web Bluetooth needs Chrome or Edge — on Android or desktop — and HTTPS
      (GitHub Pages qualifies). iOS browsers don't have it. Installed from
@@ -45,7 +55,7 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 1.5rem;
+    gap: 1.25rem;
     padding: 2rem 1.5rem;
     text-align: center;
   }
@@ -70,6 +80,9 @@
                    box-shadow: 0 0 2.5rem color-mix(in srgb, var(--booting) 35%, transparent); }
   #power.on      { border-color: var(--on);
                    box-shadow: 0 0 2.5rem color-mix(in srgb, var(--on) 35%, transparent); }
+  /* a pending connect breathes so it doesn't read as dead */
+  #power.wait .sym { animation: breathe 2.4s ease-in-out infinite; }
+  @keyframes breathe { 50% { opacity: .35; } }
   /* power symbol drawn in CSS so there's no icon dependency */
   #power .sym {
     display: block; width: 2.2rem; height: 2.2rem; margin: 0 auto .6rem;
@@ -84,8 +97,8 @@
     width: 3px; height: 1.4rem; background: currentColor; border-radius: 2px;
   }
 
-  #state { font-size: .95rem; color: var(--muted); min-height: 3em; max-width: 26rem; }
-  #state strong { color: var(--text); }
+  /* errors only — empty (and invisible) the rest of the time */
+  #state { font-size: .9rem; color: var(--danger); min-height: 1.5em; max-width: 26rem; }
 
   .row { display: flex; gap: .75rem; flex-wrap: wrap; justify-content: center; }
   button.minor, input {
@@ -100,8 +113,7 @@
 
   #tokenbox { display: none; flex-direction: column; gap: .75rem; align-items: center; }
   #tokenbox.show { display: flex; }
-  #tokenbox p { font-size: .85rem; color: var(--muted); max-width: 24rem; }
-  #unsupported { display: none; color: var(--danger); max-width: 26rem; }
+  #tokenbox p { font-size: .85rem; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -111,7 +123,7 @@
   <span class="sym"></span><span id="powerlabel">Connect</span>
 </button>
 
-<div id="state">Not connected.</div>
+<div id="state"></div>
 
 <div class="row">
   <button id="shutdown" class="minor danger" hidden>Shut down</button>
@@ -120,16 +132,10 @@
 </div>
 
 <div id="tokenbox">
-  <p>Enter the token this receiver was flashed with
-     (<code>BLE_TOKEN</code>). It is remembered on this phone.</p>
+  <p>Receiver token (<code>BLE_TOKEN</code>)</p>
   <input id="token" type="password" autocomplete="off"
          placeholder="token" maxlength="16">
   <button id="savetoken" class="minor">Save</button>
-</div>
-
-<div id="unsupported">
-  This browser has no Web Bluetooth. Use Chrome or Edge on Android or
-  desktop — iOS browsers can’t do this.
 </div>
 
 <script>
@@ -149,17 +155,20 @@ const hardoffBtn = $('hardoff'), forgetBtn = $('forget');
 
 let device = null, ctrl = null, stat = null;
 let psu = -1;          // last status byte seen, -1 = unknown
-let busy = false;      // a connect or write in flight
+let busy = false;      // a user-initiated connect or write in flight
+let pending = false;   // an auto-reconnect gatt.connect() is pending
+let retryTimer = 0;
 
-// ---- token (localStorage; wrapped — storage can throw in private windows) ----
+// ---- storage (localStorage; wrapped — storage can throw in private windows) ----
 const store = {
-  get() { try { return localStorage.getItem('ble-token') || ''; } catch { return ''; } },
-  set(v) { try { localStorage.setItem('ble-token', v); } catch {} },
+  get(k) { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
 };
+const token = () => store.get('ble-token');
 
 function tokenBytes() {
   const bytes = new Uint8Array(TOKEN_LEN); // NUL padding, as the firmware compares
-  const t = store.get();
+  const t = token();
   for (let i = 0; i < Math.min(t.length, TOKEN_LEN); i++)
     bytes[i] = t.charCodeAt(i);
   return bytes;
@@ -169,15 +178,17 @@ function tokenBytes() {
 function say(html) { stateEl.innerHTML = html; }
 
 function render() {
+  if (!('bluetooth' in navigator)) { powerBtn.disabled = true; return; }
   const connected = !!(device && device.gatt.connected);
-  powerBtn.className = STATE_NAMES[psu] || 'off';
+  powerBtn.className = (STATE_NAMES[psu] || 'off') +
+                       (!connected && (pending || busy) ? ' wait' : '');
   // graceful shutdown needs a running OS to ask; the hard cut only needs the
   // PSU to be up — it's the crash rescue, so it shows while booting too
   shutdownBtn.hidden = !(connected && psu === 2);
   hardoffBtn.hidden = !(connected && psu >= 1);
-  forgetBtn.hidden = !store.get();
+  forgetBtn.hidden = !token();
 
-  if (!store.get()) {
+  if (!token()) {
     powerBtn.disabled = true;
     powerLabel.textContent = 'Connect';
     $('tokenbox').classList.add('show');
@@ -186,8 +197,10 @@ function render() {
   $('tokenbox').classList.remove('show');
 
   if (!connected) {
+    // still tappable while an auto-reconnect pends — the tap opens the
+    // chooser, the manual escape hatch (new receiver, permission revoked)
     powerBtn.disabled = busy;
-    powerLabel.textContent = busy ? 'Connecting…' : 'Connect';
+    powerLabel.textContent = busy || pending ? 'Connecting…' : 'Connect';
   } else if (psu === 0) {
     powerBtn.disabled = busy;
     powerLabel.textContent = 'Power on';
@@ -198,35 +211,71 @@ function render() {
 }
 
 // ---- BLE ----
-async function connect() {
-  device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] });
-  device.addEventListener('gattserverdisconnected', onDisconnected);
-  const gatt = await device.gatt.connect();
+// top-level named handlers: addEventListener dedupes identical refs, so
+// re-attaching across reconnects can't stack them
+const onStatusEvent = e => onStatus(e.target.value.getUint8(0));
+
+function attach(d) {
+  if (device && device !== d && device.gatt.connected) device.gatt.disconnect();
+  device = d;
+  d.addEventListener('gattserverdisconnected', onDisconnected);
+}
+
+async function open() {
+  const d = device;
+  const gatt = await d.gatt.connect();
+  if (device !== d) { gatt.disconnect(); return; } // superseded by a manual pick
   const svc = await gatt.getPrimaryService(SVC);
   ctrl = await svc.getCharacteristic(CTRL);
   stat = await svc.getCharacteristic(STAT);
   await stat.startNotifications();
-  stat.addEventListener('characteristicvaluechanged',
-                        e => onStatus(e.target.value.getUint8(0)));
+  stat.addEventListener('characteristicvaluechanged', onStatusEvent);
   onStatus((await stat.readValue()).getUint8(0));
-  say(`Connected to <strong>${device.name || 'receiver'}</strong>.`);
+  store.set('ble-device', d.id);
+  say('');
 }
 
 function onStatus(v) {
-  const was = psu;
   psu = v;
-  if (v === 1) { say('<strong>Powering on…</strong> waiting for the board to come up.'); }
-  else if (v === 2 && was !== -1) { say('<strong>The machine is up.</strong>'); }
-  else if (v === 2) { say('Connected — the machine is <strong>already on</strong>.'); }
-  else if (v === 0 && was > 0) { say('The machine has powered <strong>off</strong>.'); }
   render();
 }
 
-function onDisconnected() {
+function onDisconnected(e) {
+  if (e.target !== device) return; // a stale device we already replaced
   ctrl = stat = null;
   psu = -1;
-  say('Disconnected.');
   render();
+  scheduleReconnect(1000);
+}
+
+// auto-reconnect: gatt.connect() to a permitted device pends until it comes
+// in range, so one pending attempt is the whole loop; the timer only guards
+// against immediate rejections (Bluetooth off, permission gone)
+async function reconnect() {
+  if (!device || device.gatt.connected || pending || busy) return;
+  pending = true; render();
+  try { await open(); }
+  catch { scheduleReconnect(10000); }
+  finally { pending = false; render(); }
+}
+
+function scheduleReconnect(ms) {
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(reconnect, ms);
+}
+
+// on load (and when the tab returns — Chrome drops pending connects in the
+// background), pick up the device the chooser permitted last time
+async function resume() {
+  if (device) { reconnect(); return; }
+  if (!token() || !navigator.bluetooth?.getDevices) return;
+  try {
+    const known = await navigator.bluetooth.getDevices();
+    const d = known.find(x => x.id === store.get('ble-device')) || known[0];
+    if (!d) return;
+    attach(d);
+    reconnect();
+  } catch {}
 }
 
 async function write(op) {
@@ -235,10 +284,11 @@ async function write(op) {
   buf[TOKEN_LEN] = op;
   try {
     await ctrl.writeValueWithResponse(buf);
+    say('');
   } catch (e) {
     // NimBLE answers a wrong token with "insufficient authentication"
     say(/auth|not permitted|gatt/i.test(e.message)
-        ? 'The receiver <strong>rejected the token</strong> — check it and try again.'
+        ? 'Token rejected — check it and try again.'
         : `Write failed: ${e.message}`);
     throw e;
   }
@@ -247,20 +297,17 @@ async function write(op) {
 // ---- wiring ----
 powerBtn.addEventListener('click', async () => {
   if (busy) return;
-  busy = true; render();
+  busy = true; say(''); render();
   try {
     if (!(device && device.gatt.connected)) {
-      say('Pick the receiver in the chooser…');
-      await connect();
+      attach(await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] }));
+      await open();
     } else if (psu === 0) {
       await write(OP_ON);
-      say('<strong>Power-on sent.</strong>');
     }
   } catch (e) {
     if (e.name !== 'NotFoundError') // chooser dismissed = not an error worth shouting
-      say(`Couldn’t connect: ${e.message}<br>Is Bluetooth on, and are you in range? The receiver advertises whenever it has standby power.`);
-    else if (psu === -1)
-      say('Not connected.');
+      say(`Couldn’t connect: ${e.message}`);
   } finally {
     busy = false; render();
   }
@@ -269,10 +316,8 @@ powerBtn.addEventListener('click', async () => {
 shutdownBtn.addEventListener('click', async () => {
   if (busy || !confirm('Ask the machine to shut down?')) return;
   busy = true; render();
-  try {
-    await write(OP_SHUTDOWN);
-    say('<strong>Shutdown requested</strong> — the OS decides from here.');
-  } catch {} finally { busy = false; render(); }
+  try { await write(OP_SHUTDOWN); }
+  catch {} finally { busy = false; render(); }
 });
 
 hardoffBtn.addEventListener('click', async () => {
@@ -282,30 +327,36 @@ hardoffBtn.addEventListener('click', async () => {
                        'holding the button — unsaved work is lost. ' +
                        'For a machine that is wedged, not a normal shutdown.')) return;
   busy = true; render();
-  try {
-    await write(OP_HARD_OFF);
-    say('<strong>Power cut.</strong>');
-  } catch {} finally { busy = false; render(); }
+  try { await write(OP_HARD_OFF); }
+  catch {} finally { busy = false; render(); }
 });
 
 $('savetoken').addEventListener('click', () => {
   const v = $('token').value.trim();
   if (v.length < 8) { say('The token is 8–16 characters.'); return; }
-  store.set(v); $('token').value = '';
-  say('Token saved. Tap the button to connect.');
+  store.set('ble-token', v); $('token').value = '';
+  say('');
   render();
+  resume();
 });
 
 forgetBtn.addEventListener('click', () => {
-  store.set(''); psu = -1;
+  store.set('ble-token', ''); psu = -1;
+  clearTimeout(retryTimer);
   if (device && device.gatt.connected) device.gatt.disconnect();
+  device = null;
+  say('');
   render();
 });
 
-if (!('bluetooth' in navigator)) {
-  $('unsupported').style.display = 'block';
-  powerBtn.disabled = true;
-}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') resume();
+});
+
+if (!('bluetooth' in navigator))
+  say('No Web Bluetooth here — use Chrome or Edge (not on iOS).');
+else
+  resume();
 
 if ('serviceWorker' in navigator)
   navigator.serviceWorker.register('sw.js').catch(() => {});
