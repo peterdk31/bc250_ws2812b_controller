@@ -2,7 +2,7 @@
 // internet at all (a LAN party, a hotel), so everything is pre-cached on
 // install and served cache-first forever. Bump VERSION when any cached file
 // changes — the new worker drops the old cache on activation.
-const VERSION = 'v3';
+const VERSION = 'v4';
 const CACHE = `bc250-power-${VERSION}`;
 const FILES = ['./', 'index.html', 'manifest.webmanifest', 'icon.svg'];
 

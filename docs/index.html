@@ -11,10 +11,16 @@
 
      Reconnects on its own: the chooser grants a persistent permission, so
      navigator.bluetooth.getDevices() can hand the device back on the next
-     visit and gatt.connect() pends until the receiver is in range (it
-     advertises in both PSU states, see ble.cpp). The chooser is only ever
-     needed once per phone. getDevices() is Chromium-only-ish; without it
-     the tap-to-connect path still works.
+     visit. Chrome refuses to gatt.connect() a device it hasn't seen this
+     session, so the page first calls watchAdvertisements() and waits for
+     one advertisement (the receiver advertises in both PSU states, see
+     ble.cpp) before connecting — the sequence Chrome's own sample uses.
+     The chooser is only ever needed once per phone.
+
+     CAVEAT: as of 2026, getDevices()/watchAdvertisements() ship in Chrome
+     (desktop AND Android) only behind chrome://flags/
+     #enable-experimental-web-platform-features. Without the flag the page
+     says so once and falls back to tap-to-connect, which always works.
 
      Web Bluetooth needs Chrome or Edge — on Android or desktop — and HTTPS
      (GitHub Pages qualifies). iOS browsers don't have it. Installed from
@@ -99,6 +105,7 @@
 
   /* errors only — empty (and invisible) the rest of the time */
   #state { font-size: .9rem; color: var(--danger); min-height: 1.5em; max-width: 26rem; }
+  #state.hint { color: var(--muted); } /* capability notes, not failures */
 
   .row { display: flex; gap: .75rem; flex-wrap: wrap; justify-content: center; }
   button.minor, input {
@@ -156,8 +163,9 @@ const hardoffBtn = $('hardoff'), forgetBtn = $('forget');
 let device = null, ctrl = null, stat = null;
 let psu = -1;          // last status byte seen, -1 = unknown
 let busy = false;      // a user-initiated connect or write in flight
-let pending = false;   // an auto-reconnect gatt.connect() is pending
+let pending = false;   // an auto-reconnect attempt (watch or connect) is live
 let retryTimer = 0;
+let watchAbort = null; // aborts the advertisement watch of the live attempt
 
 // ---- storage (localStorage; wrapped — storage can throw in private windows) ----
 const store = {
@@ -175,7 +183,7 @@ function tokenBytes() {
 }
 
 // ---- UI ----
-function say(html) { stateEl.innerHTML = html; }
+function say(html, hint) { stateEl.innerHTML = html; stateEl.classList.toggle('hint', !!hint); }
 
 function render() {
   if (!('bluetooth' in navigator)) { powerBtn.disabled = true; return; }
@@ -216,6 +224,7 @@ function render() {
 const onStatusEvent = e => onStatus(e.target.value.getUint8(0));
 
 function attach(d) {
+  watchAbort?.abort(); // a manual pick supersedes any pending auto-attempt
   if (device && device !== d && device.gatt.connected) device.gatt.disconnect();
   device = d;
   d.addEventListener('gattserverdisconnected', onDisconnected);
@@ -248,13 +257,37 @@ function onDisconnected(e) {
   scheduleReconnect(1000);
 }
 
-// auto-reconnect: gatt.connect() to a permitted device pends until it comes
-// in range, so one pending attempt is the whole loop; the timer only guards
-// against immediate rejections (Bluetooth off, permission gone)
+// Chrome won't gatt.connect() a getDevices() device it hasn't discovered
+// this session: watch its advertisements and connect on the first one seen.
+// Resolves 'seen' (in range, connect now), 'fallback' (watch API missing or
+// refused — attempt a blind connect, the pre-flag behavior), or 'aborted'
+// (superseded by a manual pick / tab hidden — do nothing).
+function waitForAdvertisement(d) {
+  if (!d.watchAdvertisements) return Promise.resolve('fallback');
+  return new Promise(resolve => {
+    watchAbort?.abort();
+    const ac = watchAbort = new AbortController();
+    ac.signal.addEventListener('abort', () => resolve('aborted'));
+    d.addEventListener('advertisementreceived',
+                       () => { resolve('seen'); ac.abort(); },
+                       { once: true, signal: ac.signal });
+    d.watchAdvertisements({ signal: ac.signal })
+      .catch(() => { resolve('fallback'); ac.abort(); });
+  });
+}
+
+// auto-reconnect: the advertisement watch pends until the receiver is in
+// range, so one live attempt is the whole loop; the retry timer only guards
+// against failures after that (connect lost the race, Bluetooth off)
 async function reconnect() {
   if (!device || device.gatt.connected || pending || busy) return;
   pending = true; render();
-  try { await open(); }
+  const d = device;
+  try {
+    const how = await waitForAdvertisement(d);
+    if (how === 'aborted' || device !== d || d.gatt.connected) return;
+    await open();
+  }
   catch { scheduleReconnect(10000); }
   finally { pending = false; render(); }
 }
@@ -268,7 +301,13 @@ function scheduleReconnect(ms) {
 // background), pick up the device the chooser permitted last time
 async function resume() {
   if (device) { reconnect(); return; }
-  if (!token() || !navigator.bluetooth?.getDevices) return;
+  if (!token() || !('bluetooth' in navigator)) return;
+  if (!navigator.bluetooth.getDevices) {
+    // stock Chrome (2026): persistent-device APIs still flag-gated
+    say('Auto-reconnect needs “Experimental Web Platform features” turned ' +
+        'on in <code>chrome://flags</code> — until then, tap to connect.', true);
+    return;
+  }
   try {
     const known = await navigator.bluetooth.getDevices();
     const d = known.find(x => x.id === store.get('ble-device')) || known[0];
@@ -343,6 +382,7 @@ $('savetoken').addEventListener('click', () => {
 forgetBtn.addEventListener('click', () => {
   store.set('ble-token', ''); psu = -1;
   clearTimeout(retryTimer);
+  watchAbort?.abort();
   if (device && device.gatt.connected) device.gatt.disconnect();
   device = null;
   say('');
@@ -350,7 +390,10 @@ forgetBtn.addEventListener('click', () => {
 });
 
 document.addEventListener('visibilitychange', () => {
+  // Chrome silently stops background scans: abort ours so the attempt
+  // settles cleanly, and start a fresh one when the tab returns
   if (document.visibilityState === 'visible') resume();
+  else watchAbort?.abort();
 });
 
 if (!('bluetooth' in navigator))
