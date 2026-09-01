@@ -17,10 +17,14 @@
      ble.cpp) before connecting — the sequence Chrome's own sample uses.
      The chooser is only ever needed once per phone.
 
-     CAVEAT: as of 2026, getDevices()/watchAdvertisements() ship in Chrome
-     (desktop AND Android) only behind chrome://flags/
-     #enable-experimental-web-platform-features. Without the flag the page
-     says so once and falls back to tap-to-connect, which always works.
+     CAVEAT: as of 2026, auto-reconnect needs TWO chrome://flags (desktop
+     AND Android): #enable-experimental-web-platform-features unlocks the
+     getDevices()/watchAdvertisements() APIs, and — separately —
+     #enable-web-bluetooth-new-permissions-backend makes the chooser grant
+     persist across sessions. With only the first flag, getDevices() exists
+     but returns [] on the next visit (the grant died with the session), so
+     the page names the missing flag instead of degrading silently. Without
+     either, tap-to-connect always works.
 
      Web Bluetooth needs Chrome or Edge — on Android or desktop — and HTTPS
      (GitHub Pages qualifies). iOS browsers don't have it. Installed from
@@ -288,7 +292,11 @@ async function reconnect() {
     if (how === 'aborted' || device !== d || d.gatt.connected) return;
     await open();
   }
-  catch { scheduleReconnect(10000); }
+  catch (e) {
+    // keep retrying, but say why the last attempt died instead of idling mute
+    say(`Auto-reconnect: ${e.message} — retrying.`, true);
+    scheduleReconnect(10000);
+  }
   finally { pending = false; render(); }
 }
 
@@ -311,10 +319,19 @@ async function resume() {
   try {
     const known = await navigator.bluetooth.getDevices();
     const d = known.find(x => x.id === store.get('ble-device')) || known[0];
-    if (!d) return;
+    if (!d) {
+      // we HAVE connected before (a device id is stored) yet Chrome
+      // remembers nothing: the grant wasn't persisted — that's the second
+      // flag, which #enable-experimental-web-platform-features does not cover
+      if (store.get('ble-device'))
+        say('Chrome forgot the permission — for auto-reconnect, also enable ' +
+            '<code>chrome://flags/#enable-web-bluetooth-new-permissions-' +
+            'backend</code>, relaunch, and tap to connect once.', true);
+      return;
+    }
     attach(d);
     reconnect();
-  } catch {}
+  } catch (e) { say(`Auto-reconnect failed: ${e.message}`); }
 }
 
 async function write(op) {
