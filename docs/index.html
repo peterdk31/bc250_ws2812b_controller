@@ -321,12 +321,14 @@ async function resume() {
     const d = known.find(x => x.id === store.get('ble-device')) || known[0];
     if (!d) {
       // we HAVE connected before (a device id is stored) yet Chrome
-      // remembers nothing: the grant wasn't persisted — that's the second
-      // flag, which #enable-experimental-web-platform-features does not cover
+      // remembers nothing. One tap re-grants it; whether THAT grant then
+      // survives the session is the second flag's doing — the page can't
+      // read flag state, so name it only as the reason this would recur
       if (store.get('ble-device'))
-        say('Chrome forgot the permission — for auto-reconnect, also enable ' +
-            '<code>chrome://flags/#enable-web-bluetooth-new-permissions-' +
-            'backend</code>, relaunch, and tap to connect once.', true);
+        say('Chrome holds no permission for the receiver — tap to connect ' +
+            'once. If this keeps coming back, enable <code>chrome://flags/' +
+            '#enable-web-bluetooth-new-permissions-backend</code> and ' +
+            'relaunch Chrome.', true);
       return;
     }
     attach(d);
