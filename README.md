@@ -782,6 +782,15 @@ enabled config without one. Enter it once on the web page; it is remembered
 on the phone. `BLE_NAME` is the advertised device name (public by
 definition).
 
+Several machines: the page keeps every receiver the Bluetooth chooser has
+ever granted and lists them in a dropdown above the button — pick one to
+switch (the page holds one connection at a time, and reconnects to the last
+pick on its own), "Add a receiver…" opens the chooser for a new board. Tokens
+are remembered per receiver: a new board first tries the token you entered
+first; if that board was flashed with a different one, its first command is
+rejected and the page asks for that board's token. Give each board its own
+`BLE_NAME` so the dropdown reads as more than `BC250`, `BC250 (2)`.
+
 What the remote can do is deliberately narrow — the same gestures as the
 physical button, and nothing else:
 
