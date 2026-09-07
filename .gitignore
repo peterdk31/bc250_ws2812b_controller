@@ -29,3 +29,11 @@ __pycache__/
 
 # OS cruft
 .DS_Store
+
+# hardware/bc250_carrier: regenerable exports (make export) and KiCad's own scratch files
+hardware/bc250_carrier/out/
+hardware/bc250_carrier/*-backups/
+hardware/bc250_carrier/fp-info-cache
+hardware/bc250_carrier/*.kicad_prl
+hardware/bc250_carrier/*.lck
+hardware/bc250_carrier/__pycache__/

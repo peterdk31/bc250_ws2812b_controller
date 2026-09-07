@@ -28,6 +28,12 @@ sensors → rules → effect → frames ──serial──→ RMT ──→ WS28
 - Optionally, a momentary power button and a wire to the PSU's PS_ON# line —
   the receiver can then stand in for the PS_ON→GND jumper an ATX/FSP supply
   needs before it starts (see [Power switch](#power-switch)).
+- For the BC-250 there is a small carrier PCB in
+  [`hardware/bc250_carrier`](hardware/bc250_carrier/README.md): the C3 Super
+  Mini solders onto it, the PSU's 10-pin Mini-Fit Jr plug goes straight onto
+  a header, and the strip, button, sense wire and four PWM fan headers each
+  get a labelled connector — the power switch, strip and fan wiring below, on
+  one board.
 
 ## Getting started
 

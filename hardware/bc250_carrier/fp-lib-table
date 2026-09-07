@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "bc250_carrier")(type "KiCad")(uri "${KIPRJMOD}/bc250_carrier.pretty")(options "")(descr "Project footprints"))
+)

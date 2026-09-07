@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "bc250_carrier")(type "KiCad")(uri "${KIPRJMOD}/bc250_carrier.kicad_sym")(options "")(descr "Project symbols"))
+)
