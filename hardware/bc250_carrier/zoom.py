@@ -1,5 +1,5 @@
 """Crop a kicad-cli board PDF to the board area by rewriting its MediaBox, so a
-viewer shows the 70 x 45 mm board filling the page instead of a stamp in the
+viewer shows the board filling the page instead of a stamp in the
 corner of an A4 sheet. Byte length is preserved so the xref table stays valid."""
 import re
 

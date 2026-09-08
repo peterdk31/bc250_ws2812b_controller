@@ -2,7 +2,9 @@
 #
 #   make            generate + check + export
 #   make check      geometry check only (KiCad 7's kicad-cli has no DRC)
-#   make export     gerbers (+ zip for JLCPCB), drill, PDFs, position file, netlist into out/
+#   make drc        KiCad's own DRC through the pcbnew Python module (out/drc.txt)
+#   make export     gerbers (+ zip for JLCPCB), drill, PDFs, position file, netlist, BOM xml into out/
+#   make preview    quick PNG render of the layout (out/preview.png, Pillow only, no KiCad needed)
 #   BOARDS=3 make   size the LCSC parts list (out/lcsc_parts.csv) for 3 boards (default 10)
 #
 # Needs python3 and kicad-cli 7 (KICAD_SHARE points at KiCad's share dir,
@@ -15,15 +17,21 @@ CLI ?= kicad-cli
 BOARDS ?= 10         # boards to order: sizes out/lcsc_parts.csv
 export BOARDS
 
-.PHONY: all generate check export clean
+.PHONY: all generate check drc export preview clean
 
-all: generate check export
+all: generate check drc preview export
 
 generate:
 	python3 generate.py
 
 check:
 	python3 check.py
+
+preview:
+	python3 preview.py
+
+drc:
+	mkdir -p $(OUT) && python3 drc.py $(PCB) $(OUT)/drc.txt
 
 export:
 	rm -rf $(OUT)/gerbers && mkdir -p $(OUT)/gerbers
@@ -34,6 +42,7 @@ export:
 	$(CLI) pcb export pos --format csv --units mm --output $(OUT)/positions.csv $(PCB)
 	$(CLI) sch export pdf --output $(OUT)/schematic.pdf $(SCH)
 	$(CLI) sch export netlist --output $(OUT)/netlist.net $(SCH)
+	$(CLI) sch export python-bom --output $(OUT)/bom.xml $(SCH)
 	python3 -c "import zoom; zoom.crop('$(OUT)/board-top.pdf', '$(OUT)/zoom-top.pdf', False); zoom.crop('$(OUT)/board-bottom.pdf', '$(OUT)/zoom-bottom.pdf', True)"
 	python3 -c "import shutil; shutil.make_archive('$(OUT)/bc250_carrier-gerbers', 'zip', '$(OUT)/gerbers')"
 
