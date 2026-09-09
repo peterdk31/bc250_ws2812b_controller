@@ -80,12 +80,17 @@ sudo make flash
 ```
 
 The config is `/etc/led-controller/config.json` when it exists, else the
-repo's (`CONFIG=path` overrides). The shipped blocks are all off — a fresh box
-writes the fans and the remote off and leaves the power switch alone (see
-[Power switch](#power-switch) for why that one is different) until you enable
-them. Writing the features from one file also arms the encoders' strictest
-cross-checks: a pin claimed by two blocks, or by a block and `strip.pin`, is a
-hard error. Each feature's section has the `flash-pwr` / `flash-fan` /
+repo's (`CONFIG=path` overrides). The shipped blocks are all off, so a fresh
+box writes all three features off — the shipped `power_switch` block carries
+the carrier board's pins with `"enabled": false`, and an explicit `false`
+*is* written. That matters only on a receiver whose power switch is already
+on: written off, it releases PS_ON# and cuts the machine's power (see [Power
+switch](#power-switch)). Flashing such a box from a config that has no
+`power_switch` block at all leaves the chip's switch settings alone, so
+delete the block, or enable it, before flashing a machine whose power
+already hangs on the receiver. Writing the features from one file also arms
+the encoders' strictest cross-checks: a pin claimed by two blocks, or by a
+block and `strip.pin`, is a hard error. Each feature's section has the `flash-pwr` / `flash-fan` /
 `flash-ble` target that rewrites just that block in seconds.
 
 Finally, edit `/etc/led-controller/config.json` for your hardware — at least
