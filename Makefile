@@ -62,24 +62,16 @@ PWR_BOOT_TIMEOUT ?= 10
 PWR_SENSE_LOW ?= 800
 PWR_SENSE_HIGH ?= 2000
 
-# PWM fans (README "Fans"): same scheme as the power switch — the wiring lives
-# in the receiver's `fancfg` flash partition, written at flash time. FAN=on
-# writes it alongside `flash` / `flash-source` (FAN=off writes it disabled);
-# unset leaves whatever is on the chip. `make flash-fan` writes only that
-# partition. FAN_PINS is one GPIO per fan PWM wire, in channel order (the
-# daemon's "fans.duty" percents map to that order); the defaults are the free
-# pins on the BC-250 hookup — 0 and 20 remain spare (20 is U0RXD, a J5-UART
-# candidate). FAN_DUTY is percent per channel (one value = all channels);
-# 100 is the safe cooling default, and the daemon config can lower it at
-# runtime without reflashing. FAN_BOOST_* run every channel at a fixed duty
-# for a few seconds after the host powers on, so an AIO pump primes reliably
-# (100%/5s; boost 0 s = off). Keep an AIO pump's resting duty high — 100
-# ideal, never below ~30.
-FAN ?=
-FAN_PINS ?= 5,6,7,10
-FAN_DUTY ?= 100
-FAN_BOOST_DUTY ?= 100
-FAN_BOOST_SECS ?= 5
+# PWM fans (README "Fans"): the settings live in the daemon config's "fans"
+# block — the one place the fans are described — and `flash` / `flash-source`
+# / `flash-fan` bake its standalone part (which headers are enabled, each one's
+# fallback duty and boost, the boost length) into the receiver's `fancfg`
+# flash partition, the way strip.pin already comes from the config. No FAN_*
+# variables: edit the block, flash. A config with no enabled header writes the
+# feature off. The header → GPIO map is the carrier board's (tools/pincheck.py
+# FAN_PINS; "pins" in the block overrides it for a hand-wired build). The
+# enabled headers' pins feed the power switch's collision check below.
+FAN_PINS_USED = $(if $(CONFIG),$(shell python3 tools/fancfg.py --config "$(CONFIG)" --target $(TARGET) --list-pins 2>/dev/null))
 
 # BLE power remote (README "BLE remote"): while the machine is off the
 # receiver advertises a small Bluetooth LE service, so a phone (the Web
@@ -108,9 +100,11 @@ FAN_AVOID = $(if $(filter off,$(PWR)),,\
 	$(if $(filter -1,$(PWR_SENSE)),,--avoid "$(PWR_SENSE):--sense (power switch)") \
 	$(if $(filter -1,$(PWR_LED)),,--avoid "$(PWR_LED):--led (power switch)") \
 	$(if $(filter on,$(PWR)),--avoid-hard))
-PWR_AVOID = $(if $(filter off,$(FAN)),,\
-	$(foreach p,$(subst $(comma), ,$(FAN_PINS)),--avoid "$(p):--pins (fans)") \
-	$(if $(filter on,$(FAN)),--avoid-hard))
+PWR_AVOID = $(foreach p,$(subst $(comma), ,$(FAN_PINS_USED)),--avoid "$(p):a fan header (the config's fans block)") \
+	$(if $(FANS_KNOWN),--avoid-hard)
+# `flash` and `flash-source` always write fancfg from the same config, so
+# there the fan pins are known-true and a collision is a hard error
+flash flash-source: FANS_KNOWN := 1
 
 # PORT: config (or a command-line override) is authoritative; detection only
 # fills a gap. Resolution order: command-line override > configured
@@ -156,7 +150,7 @@ DOCKER_USER = $(if $(filter docker,$(CONTAINER)),--user $${SUDO_UID:-$$(id -u)}:
 # (sdkconfig is relocated into the per-target build dir, below).
 IDF_GENERATED = firmware/managed_components firmware/dependencies.lock
 
-HEADERS = daemon/output/strip.hpp daemon/config_loader.hpp vendor/json.hpp \
+HEADERS = daemon/output/strip.hpp daemon/config_loader.hpp daemon/fans.hpp vendor/json.hpp \
           daemon/effects/effect.hpp daemon/rules/condition.hpp daemon/color/color.hpp \
           daemon/sources/hwmon.hpp daemon/sources/steam.hpp \
           daemon/sources/audio.hpp daemon/sources/audio_detect.hpp \
@@ -352,22 +346,24 @@ PWRCFG_RESOLVE = pwr=""; \
 
 FANCFG_OFF = $(call part_off,fancfg)
 FANCFG_BIN = firmware/dist/fancfg.bin
-# companion to PWRCFG_RESOLVE for the fan controller: when FAN is set, encode
-# the FAN_* vars into $(FANCFG_BIN) and set $$fan to the extra offset+file pair
-# for esptool write_flash; empty otherwise. As with pwrcfg.py, fancfg.py is
-# the only place a wiring mistake can be caught — the firmware silently treats
-# a bad pin as "not wired" and that fan just never spins.
+# companion to PWRCFG_RESOLVE for the fan controller: encode the config's
+# "fans" block into $(FANCFG_BIN) and set $$fan to the extra offset+file pair
+# for esptool write_flash. Always, when there is a config to read (no block or
+# no enabled header = written off); with no config at all the chip's fancfg is
+# left alone. As with pwrcfg.py, fancfg.py is the only place a mistake can be
+# caught — the firmware silently treats a bad pin as "not wired" and that fan
+# just never spins — so it validates the block like the daemon does, and the
+# pins against the chip and the other features.
 FANCFG_RESOLVE = fan=""; \
-	if [ -n "$(FAN)" ]; then \
-		case "$(FAN)" in on|off) ;; *) echo 'FAN must be "on" or "off" (see README, Fans)'; exit 1;; esac; \
+	if [ -n "$(CONFIG)" ]; then \
 		[ -n "$(FANCFG_OFF)" ] || { echo "no fancfg offset found in firmware/partitions.csv"; exit 1; }; \
 		mkdir -p firmware/dist; \
-		python3 tools/fancfg.py --out "$(FANCFG_BIN)" $(if $(filter off,$(FAN)),--disabled) \
+		python3 tools/fancfg.py --out "$(FANCFG_BIN)" --config "$(CONFIG)" \
 			--target $(TARGET) --strip-pin $(STRIP_PIN) \
-			--pins "$(FAN_PINS)" --duty "$(FAN_DUTY)" \
-			--boost-duty $(FAN_BOOST_DUTY) --boost-secs $(FAN_BOOST_SECS) \
 			$(FAN_AVOID) || exit 1; \
 		fan="$(FANCFG_OFF) $(CURDIR)/$(FANCFG_BIN)"; \
+	else \
+		echo "no config found (CONFIG) — leaving the fan settings on the chip alone"; \
 	fi
 
 BLECFG_OFF = $(call part_off,blecfg)
@@ -484,17 +480,19 @@ flash-pwr:
 	$(PORT_RESTORE); \
 	exit $$rc
 
-# write only the 4 KB fancfg partition: enable, re-pin, re-speed or disable
-# the fans without reflashing the firmware. Requires FAN=on or FAN=off. Only
-# useful once the chip runs a firmware whose partition table has the fancfg
-# entry — against an older layout the write lands in the (unused) factory
-# tail and the firmware never sees it; the debug log says so at boot.
+# write only the 4 KB fancfg partition — the config's "fans" block, after an
+# edit — without reflashing the firmware (seconds). Only useful once the chip
+# runs a firmware that reads the FAN2 layout (this change on) and whose
+# partition table has the fancfg entry — against an older layout the write
+# lands in the (unused) factory tail and the firmware never sees it; the debug
+# log says so at boot. An older firmware that knows only FAN1 reads a FAN2 blob
+# as "no config" and turns the fans off — reflash the firmware first.
 flash-fan:
 	-@$(MAKE) --no-print-directory serial-perms
-	@[ -n "$(FAN)" ] || { echo 'set FAN=on (write the wiring, FAN_* vars override defaults) or FAN=off (disable)'; exit 1; }; \
+	@[ -n "$(CONFIG)" ] || { echo 'no config found — set CONFIG=path/to/config.json (its "fans" block is what gets written)'; exit 1; }; \
 	$(ESPTOOL_RESOLVE); $(FANCFG_RESOLVE); \
 	$(PORT_FREE); \
-	echo "writing fan config ($(FAN)) via $$tool on $(PORT)"; \
+	echo "writing fan config from $(CONFIG) via $$tool on $(PORT)"; \
 	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash $$fan; \
 	rc=$$?; \
 	$(PORT_RESTORE); \

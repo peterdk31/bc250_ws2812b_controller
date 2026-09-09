@@ -7,6 +7,7 @@
 #include <vector>
 #include <memory>
 #include "effect.hpp"
+#include "fans.hpp"
 #include "motion.hpp"
 #include "rules.hpp"
 #include "steam.hpp"
@@ -25,6 +26,25 @@ static double now_seconds()
     timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+// is the whole machine going down, or just this service? systemd reports
+// "stopping" once shutdown.target (poweroff, reboot, halt) is under way, which
+// is when our SIGTERM is part of a power-off. Anything else — a restart, a
+// stop, a Ctrl-C, no systemd at all — reads as "no", the safe answer: the
+// receiver then treats the silence like any other and the fans fall back.
+static bool systemStopping()
+{
+    FILE* f = popen("systemctl is-system-running 2>/dev/null", "r");
+    if (!f)
+        return false;
+
+    char buf[32] = {0};
+    if (!fgets(buf, sizeof buf, f))
+        buf[0] = 0;
+    pclose(f);
+
+    return strncmp(buf, "stopping", 8) == 0;
 }
 
 // wrap already-corrected recording pixels into a wire frame (--preview): the
@@ -97,45 +117,6 @@ static void recordAndUpload(const Config& cfg, const Strip& strip,
     }
 }
 
-// push the configured fan speeds ("fans.duty", an array of duty percents,
-// one per fan channel wired on the receiver — see common/protocol.hpp and
-// README "Fans") to the receiver, which applies them to its PWM outputs and
-// persists them in NVS, so they keep applying on daemon-less boots. Sent once
-// at startup like the recordings: there is no re-send because there is
-// nothing to re-send to — a receiver that rebooted restores the same values
-// from NVS. No "fans" key = nothing sent = the receiver keeps what it has
-// (its flash-time defaults, or an earlier push).
-static void uploadFanDuty(const Config& cfg,
-                          std::vector<std::unique_ptr<Sink>>& sinks)
-{
-    const json::Value* d = cfg.find("fans.duty");
-
-    if (!d || !d->isArray())
-        return;
-
-    // count(1) then count u8 percents, clamped here so a config typo can't
-    // ride the wire (the receiver clamps again regardless)
-    uint8_t p[1 + 6];
-    uint8_t n = 0;
-
-    for (auto& v : d->items)
-    {
-        if (n >= 6) // the receiver drives at most 6 channels (LEDC on the C3)
-        {
-            fprintf(stderr, "fans.duty: more than 6 values, extra ignored\n");
-            break;
-        }
-
-        int pct = json::toInt(v);
-        p[1 + n++] = (uint8_t)(pct < 0 ? 0 : pct > 100 ? 100 : pct);
-    }
-
-    p[0] = n;
-
-    for (auto& s : sinks)
-        s->sendCommand(proto::CMD_FAN_DUTY, p, (uint16_t)(1 + n));
-}
-
 // ./led <config> --preview <slot>: record an esp32 slot and play it back to
 // the sinks exactly as the receiver will, so the viewer previews the real
 // recording — its one-shot intro, then the looping tail (or a held last frame)
@@ -195,8 +176,9 @@ static void usage(const char* prog)
             "                                         (power_on/shutdown) to the viewer\n"
             "       %s --list                         list available effects\n"
             "       %s --steam-status                 dump Steam download detection\n"
+            "       %s <config> --fan-status          dump the fan headers' sources and duties\n"
             "       %s --config-get <config> <path>   print a config value\n",
-            prog, prog, prog, prog, prog, prog);
+            prog, prog, prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char** argv)
@@ -244,6 +226,7 @@ int main(int argc, char** argv)
     // the sinks, exactly as the receiver will — so the viewer previews the real
     // recording (sequence, loop and hold included), not just the live effect
     bool previewMode = (argc == 4 && strcmp(argv[2], "--preview") == 0);
+    bool fanStatus = (argc == 3 && strcmp(argv[2], "--fan-status") == 0);
 
     if (!previewMode && argc != 2 && argc != 3)
     {
@@ -257,6 +240,21 @@ int main(int argc, char** argv)
     {
         fprintf(stderr, "failed to load config: %s\n", argv[1]);
         return 1;
+    }
+
+    // the fan controller's half on this side (daemon/fans.hpp): the "fans"
+    // block, validated up front like the rules — a bad header stops the daemon
+    // here rather than running the fans on a half-read config
+    fans::Controller fanCtl;
+
+    if (!fanCtl.load(cfg))
+        return 1;
+
+    // ./led <config> --fan-status: what each header resolves to right now
+    if (fanStatus)
+    {
+        fanCtl.dumpStatus(stdout);
+        return 0;
     }
 
     signal(SIGTERM, onStop);
@@ -281,10 +279,26 @@ int main(int argc, char** argv)
         return runPreview(cfg, strip, sinks, argv[3]);
 
     // record the power-on/shutdown effects and stream them for the receiver
-    // to replay (the receiver renders nothing itself), and push the
-    // configured fan speeds
+    // to replay (the receiver renders nothing itself), and push the fans'
+    // standalone settings
     recordAndUpload(cfg, strip, sinks);
-    uploadFanDuty(cfg, sinks);
+    fanCtl.pushStandalone(sinks);
+
+    // the fan curves run on their own 0.5 s cadence in both loops below; a
+    // no-op when no header is enabled
+    const double fanInterval = 0.5;
+    double lastFanTick = -1e9;
+
+    auto fansTick = [&]()
+    {
+        double now = now_seconds();
+
+        if (now - lastFanTick >= fanInterval)
+        {
+            lastFanTick = now;
+            fanCtl.tick(now, sinks);
+        }
+    };
 
     std::unique_ptr<Effect> effect;
     std::string active;
@@ -359,12 +373,16 @@ int main(int argc, char** argv)
     auto notifyShutdown = [&]()
     {
         // carry the crossfade duration so the receiver dissolves from the last
-        // live frame into the shutdown recording instead of snapping
-        const uint8_t dur[2] = {(uint8_t)(crossfadeMs & 0xFF),
-                                (uint8_t)(crossfadeMs >> 8)};
+        // live frame into the shutdown recording instead of snapping, and
+        // whether this is the machine going down (the fans then hold their
+        // live duties through the power-off) or just this service stopping
+        // (they expire to their fallback as after any other silence)
+        const uint8_t p[3] = {(uint8_t)(crossfadeMs & 0xFF),
+                              (uint8_t)(crossfadeMs >> 8),
+                              (uint8_t)(systemStopping() ? proto::SHUTDOWN_POWERING_OFF : 0)};
 
         for (auto& s : sinks)
-            s->sendCommand(proto::CMD_SHUTDOWN, dur, 2);
+            s->sendCommand(proto::CMD_SHUTDOWN, p, sizeof p);
     };
 
     // single-effect mode, no rules
@@ -374,8 +392,12 @@ int main(int argc, char** argv)
             return 1;
 
         while (!g_stop)
+        {
+            fansTick();
+
             if (!renderFrame())
                 return 1;
+        }
 
         notifyShutdown();
         return 0;
@@ -399,6 +421,8 @@ int main(int argc, char** argv)
     while (!g_stop)
     {
         double now = now_seconds();
+
+        fansTick();
 
         if (now - lastEval >= evalInterval)
         {

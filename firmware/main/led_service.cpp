@@ -179,6 +179,13 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
         // here.
         replayXms = len >= 2 ? (uint16_t)(payload[0] | (payload[1] << 8)) : 0;
 
+        // optional flags byte: when the machine itself is powering off, the
+        // fans wind down from where they are rather than expiring to their
+        // fallback duty while it finishes. A plain daemon stop/restart doesn't
+        // set it, and then the live duties expire as after any other silence.
+        if (len >= 3 && (payload[2] & proto::SHUTDOWN_POWERING_OFF))
+            fan::hostShutdown();
+
         if (rec_store::playOpen(proto::SLOT_SHUTDOWN, active, MAX_LEDS))
         {
             LLOG("shutdown: replaying %u frames, xfade %u ms",
@@ -273,11 +280,17 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
         // req code and nonce
         hostreq::onAck(payload, len);
     }
-    else if (cmd == proto::CMD_FAN_DUTY)
+    else if (cmd == proto::CMD_FAN_STANDALONE)
     {
-        // fan speeds from the daemon config ("fans.duty") — hand them to the
-        // fan task (fan.hpp); a no-op when the feature is off
-        fan::setDuty(payload, len);
+        // the fan controller's standalone settings from the daemon config
+        // ("fans" block) — hand them to the fan task (fan.hpp); a no-op when
+        // the feature is off
+        fan::setStandalone(payload, len);
+    }
+    else if (cmd == proto::CMD_FAN_LIVE)
+    {
+        // the daemon's fan curves' current duties, same hand-off
+        fan::setLive(payload, len);
     }
 }
 

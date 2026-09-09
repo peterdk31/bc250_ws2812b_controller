@@ -52,6 +52,19 @@ CHIPS = {
 }
 MAX_PIN = {'esp32s2': 46, 'esp32s3': 48, 'esp32c6': 30, 'esp32h2': 27}
 
+# The fan headers' PWM GPIOs, header1 first (fancfg.py; README "Fans"). Not
+# something the daemon config carries: on the BC-250 carrier board
+# (hardware/bc250_carrier) FAN1..FAN4 are soldered to these C3 pins, so the
+# map is a fact about the board, like the strapping pins are about the chip.
+# A hand-wired build on other pins overrides it with "pins" in the config's
+# fans block. The plain-ESP32 row is a plausible free set for that chip (its
+# 6-11 are flash, 0/2/5/12/15 straps, 1/3 the host UART, 34+ input-only) and
+# has not been wired up on real hardware.
+FAN_PINS = {
+    'esp32c3': [5, 6, 7, 10],
+    'esp32': [16, 17, 18, 19],
+}
+
 
 def top_pin(target):
     """Highest GPIO number the target has, or None for an unknown target."""

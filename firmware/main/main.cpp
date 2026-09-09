@@ -20,7 +20,8 @@
 // button, its own task with its own NVS namespace, wiring read from the
 // `pwrcfg` flash partition — the two services never touch. fan.* is the
 // second: the PWM fan controller, same shape (own task, own NVS namespace,
-// wiring in the `fancfg` partition), fed CMD_FAN_DUTY by the LED task.
+// wiring in the `fancfg` partition), fed the two CMD_FAN_* commands and the
+// shutdown notice by the LED task.
 // ble.* is the third: the BLE power remote (config in `blecfg`), a phone-
 // facing remote control for the power switch — its whole contact surface is
 // pwr::psuState() / pwr::remoteRequest().

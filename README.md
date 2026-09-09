@@ -70,12 +70,15 @@ write and restarts it after.
 ### The full BC-250 flash
 
 Everything this repo can put on the receiver, in one command — the ATX power
-switch, the PWM fans, and the BLE phone remote, with every knob spelled out
-(the values shown are the defaults for the BC-250 hookup described in the
-sections below, so trim freely — an omitted `PWR_*`/`FAN_*` var just means
-its default). The one exception is `FAN_DUTY`, shown here as a per-channel
-list — percent per fan, in `FAN_PINS` order (e.g. pump at 100, radiator fans
-lower); a single value applies to all channels, and the default is 100:
+switch, the PWM fans, and the BLE phone remote. The power switch and the remote
+take their knobs on the command line (the values shown are the defaults for the
+BC-250 hookup described in the sections below, so trim freely — an omitted
+`PWR_*` var just means its default). The fans take none: their settings are
+the `fans` block of the config (`/etc/led-controller/config.json` when it
+exists, else the repo's), and `make flash` bakes that block's standalone part
+into the receiver the same way it already bakes `strip.pin` — see
+[Fans](#fans). The shipped block has every header disabled, so a fresh box
+writes the fan feature off until you enable a header.
 
 ```sh
 sudo make flash \
@@ -84,20 +87,17 @@ sudo make flash \
         PWR_SENSE=2 PWR_LED=8 \
         PWR_HOLD=2 PWR_BOOT_TIMEOUT=10 \
         PWR_SENSE_LOW=800 PWR_SENSE_HIGH=2000 \
-    FAN=on \
-        FAN_PINS=5,6,7,10 FAN_DUTY=100,60,60,40 \
-        FAN_BOOST_DUTY=100 FAN_BOOST_SECS=5 \
     BLE=on \
         BLE_TOKEN=$(openssl rand -hex 6) BLE_NAME=BC250
 ```
 
 Set `BLE_TOKEN` to something you'll remember (8–16 characters) or note the
-generated one — the phone page asks for it once. Writing all three features
-"on" in one run also arms the encoders' strictest cross-checks: pin
-collisions between the features (and with `strip.pin`) become hard errors
-instead of warnings. Each feature has its own section below — what it does,
-the wiring, and the `flash-pwr`/`flash-fan`/`flash-ble` targets that rewrite
-just that feature's config in seconds.
+generated one — the phone page asks for it once. Writing the features in one
+run also arms the encoders' strictest cross-checks: pin collisions between
+them (and with `strip.pin`) become hard errors instead of warnings. Each
+feature has its own section below — what it does, the wiring, and the
+`flash-pwr`/`flash-fan`/`flash-ble` targets that rewrite just that feature's
+config in seconds.
 
 Finally, edit `/etc/led-controller/config.json` for your hardware — at least
 `strip.leds`, `strip.pin`, and `sinks.serial.port` — then `sudo systemctl
@@ -235,11 +235,13 @@ ever says unprompted is a power-button request (see
         "power_on": { ... },    // boot/shutdown animations the receiver replays
         "shutdown": { ... }     // (standalone effects only)
     },
-    "fans": {
-        "duty": [100, 60, 60, 40] // optional: percent per receiver fan channel
-                                  // (see Fans). Pushed once at startup and
-                                  // persisted on the receiver; omit the key to
-                                  // leave the receiver's stored values alone
+    "fans": {                   // the PWM fan headers, see Fans — one block per
+        "hysteresis": 3,        // header, all with the same keys
+        "ramp": 5,
+        "boost_seconds": 5,
+        "header1": { "enabled": false, "name": "pump", "source": "constant",
+                     "curve": "65", "boost": 100, "fallback": 100 },
+        "header2": { ... }
     },
     "rules": [ ... ]
 }
@@ -683,84 +685,175 @@ is pressed.
 ## Fans
 
 The receiver also drives up to six 4-pin PWM fans at the fan spec's 25 kHz —
-built for an AIO liquid cooler, whose pump is just another 4-pin channel. Like
-the power switch it runs **standalone**: no daemon needed, wiring chosen at
-flash time in its own small partition (`fancfg`), off until opted into with
-`FAN=on`. The fans are powered from the PSU directly (they draw far more than
-a GPIO ever could); only their PWM input wires connect to the receiver, with
-all grounds common. The receiver's 3.3 V push-pull output is comfortably above
-the spec's ~2.8 V logic-high threshold, so standard 4-pin fans read it fine;
-the fans' tach (sense) wires stay unconnected.
+built for an AIO liquid cooler, whose pump is just another 4-pin channel. The
+fans are powered from the PSU directly (they draw far more than a GPIO ever
+could); only their PWM input wires connect to the receiver, with all grounds
+common. The receiver's 3.3 V push-pull output is comfortably above the spec's
+~2.8 V logic-high threshold, so standard 4-pin fans read it fine; the fans'
+tach (sense) wires stay unconnected. On the carrier board the four headers are
+labelled FAN1–FAN4; elsewhere, see the wiring table below.
 
-Each channel's duty comes from three places, strongest first:
+Everything about the fans is the config's `fans` block. Each header gets one
+entry, and every entry has the same six keys:
 
-- **The boot boost**: every channel runs at `FAN_BOOST_DUTY` (default 100 %)
-  for `FAN_BOOST_SECS` (default 5 s) when the host powers on, so an AIO pump
-  always spins up cleanly and primes. With the power switch configured, "host
-  powers on" means *its* power-on event — the button press asserting PS_ON# —
-  confirmed by the sense wire reading the rail up. A reset of the receiver
-  itself (a crash, a reflash, a daemon reconnect) never re-fires it: the
-  power-on counter it arms on survives nothing but a real press, where the
-  bare rail edge re-fired after every warm reset (the sense line always dips
-  through one debounce while re-settling). Without the power switch, USB host
-  presence stands in (SOF keepalives, debounced 3 s so a bus reset doesn't
-  re-fire it), else the boost fires once at receiver boot. `FAN_BOOST_SECS=0`
-  disables it.
-- **The daemon config**: a `"fans": { "duty": [100, 60, 60, 40] }` array —
-  percent per channel, in `FAN_PINS` order — is pushed once at daemon startup
-  (restart the daemon to apply a change, as with everything else in the
-  config). The receiver **persists these in NVS**, so they keep applying on
-  boots where the daemon never runs. Omit the key and nothing is sent.
-- **The flash-time defaults**: `FAN_DUTY`, percent per channel (one value =
-  all channels), default 100 — full speed is the safe answer for cooling
-  until something says otherwise. Re-flashing the config with *different*
-  duties outranks an older daemon push (the stale NVS values are dropped);
-  `make clear-nvs` also reverts to these.
+```jsonc
+"fans": {
+    "hysteresis": 3,       // a temperature source must fall this many °C before a fan slows (default 3)
+    "ramp": 5,             // max percent per second on the way down; speed-ups are immediate (default 5, 0 = instant)
+    "boost_seconds": 5,    // how long a header with a `boost` runs it after the host powers on
 
-Keep the **pump** channel high: AIO pumps want a constant 100 % (or 70–80 %
-for quiet — this one is ~30 dBA at full tilt), never below ~30 %, with the
-radiator fans doing the dynamic cooling. The boost is a spin-up prime, not the
-pump's protection.
+    "header1": {
+        "enabled": false,
+        "name": "pump",             // log lines only
+        "source": "constant",       // fixed speed: curve is one value. AIO pumps want a steady 100 (70-80 for quiet)
+        "curve": "65",
+        "boost": 100,               // duty for the first `boost_seconds` after power-on, or null for no boost
+        "fallback": 100             // what the receiver runs at boot and whenever the daemon isn't driving it
+    },
+    "header2": {
+        "enabled": false,
+        "name": "radiator",
+        "source": "temp",           // the top-level `sensors` pick, in °C
+        "curve": "45:35 60:55 75:100",   // source:percent points, linear between, flat beyond the ends
+        "boost": null,
+        "fallback": 100
+    },
+    "header3": {
+        "enabled": false,
+        "name": "exhaust",
+        "source": "nct6686:pwm1",   // mirror the BC-250's own fan header; pwm outputs read 0..100 %
+        "curve": "0:25 100:80",     // floor of 25, scaled to 80 % of what the board asks for
+        "boost": null,
+        "fallback": 100
+    },
+    "header4": {
+        "enabled": false,
+        "name": "intake",
+        "source": "gpu_load",       // amdgpu busy, 0..100 %
+        "curve": "0:20 40:20 100:60",   // silent until the GPU actually works
+        "boost": null,
+        "fallback": 60
+    }
+}
+```
 
-Wiring (ESP32-C3 defaults; channel order = `FAN_PINS` order = `fans.duty`
-order):
+**`source`** is what the curve reads, and the x unit of the curve follows it:
 
-| receiver pin | connects to |
-|---|---|
-| GPIO5, 6, 7, 10 (`FAN_PINS`) | one fan's PWM input each (pin 4 on the 4-pin connector) |
-| — | fan +12 V and GND come from the PSU, **sharing a common ground** with the receiver; tach (pin 3) unconnected |
+| source | reads | x unit |
+|---|---|---|
+| `constant` | nothing — the curve is one value | — |
+| `temp` | the top-level `sensors` pick | °C |
+| `chip:label` | any hwmon temperature, same syntax as `sensors` (`amdgpu:edge`, `nct6686:CPU`; a comma list of candidates works too) | °C |
+| `chip:pwmN` | a hwmon pwm *output* — the board's own fan header, i.e. what its BIOS fan curve is asking for | % (0..255 read as 0..100) |
+| `cpu_load` / `gpu_load` | the rule conditions' readings | % |
 
-GPIO0 and 20 remain free for two more channels (20 is U0RXD, a J5-UART
-candidate — prefer 0 first). `tools/fancfg.py` validates the pins like the
+**`curve`** is `x:percent` points in one string, linear between points and
+flat beyond the ends, so a curve never has to spell out 0 or 100 on the x
+axis. Floors, ceilings and scaling all live in the curve (`"0:25 100:80"` is a
+floor of 25 scaled to 80 %). A `constant` source takes a single bare value,
+and a bare value requires `constant` — the daemon (and `make flash`) refuse
+the other combinations, along with an unknown or missing key, so a typo is a
+startup error rather than a silently odd fan.
+
+**`boost`** and **`fallback`** are the header's *standalone* settings — what
+the receiver does on its own. Full speed is the safe answer for cooling, which
+is why `fallback` is 100 in most examples; a header with `boost: null` starts
+at its fallback instead of boosting. Reading the pump above as a timeline:
+
+1. Power button pressed. The receiver asserts PS_ON#, sees the rail up, and
+   runs the pump at 100 % for `boost_seconds`.
+2. Boost ends; the daemon isn't up yet, so the pump runs its fallback, 100 %.
+3. The daemon starts and pushes 65 %. The pump settles there.
+4. The daemon crashes or is stopped under a running machine. Fifteen seconds
+   later the receiver notices the silence and the pump goes back to 100 %.
+5. Normal shutdown. The daemon's shutdown notice says the machine itself is
+   powering off, and the receiver *holds* the last live duties instead, so the
+   fans wind down from where they are when the PSU cuts — no full-speed blip.
+   (A plain `systemctl restart` or `stop` doesn't say that, and the fans fall
+   back as in step 4 if no daemon comes back.)
+
+Each header's duty comes from three places, strongest first: the **boost**
+while its window runs; the daemon's **live** duty (its curve's output, pushed
+on the 0.5 s rule tick when it changes and refreshed every 5 s, never
+persisted); and the **fallback**. With the power switch configured, "host
+powers on" means *its* power-on event — the button press asserting PS_ON# —
+confirmed by the sense wire reading the rail up, so a reset of the receiver
+itself (a crash, a reflash, a daemon reconnect) never re-fires the boost.
+Without the power switch, USB host presence stands in (debounced 3 s so a bus
+reset doesn't re-fire it), else the boost fires once at receiver boot.
+`boost_seconds: 0` disables boosting altogether.
+
+**`hysteresis`** and **`ramp`** are global, because they exist to stop hunting
+and apply the same way to every fan. Hysteresis applies to temperature sources
+only; a constant ignores both.
+
+**`enabled: false`** means the header is simply not the daemon's: nothing is
+sent for it, and at flash time it gets no pin, so the receiver never drives
+its output. Note that is not "off" — a 4-pin fan with a floating PWM input
+runs at full speed, per the fan spec. A fan you want *stopped* is an enabled
+header with `"source": "constant", "curve": "0"`.
+
+### Getting the block onto the receiver
+
+Two consumers read the same block:
+
+- **`make flash` / `make flash-source`** bake the standalone part — which
+  headers are enabled, their pins, `fallback`, `boost`, `boost_seconds` —
+  into the receiver's `fancfg` flash partition, exactly as `strip.pin` is
+  baked. So a box that never runs the daemon is configured by editing the
+  block and running `sudo make flash-fan` (the fancfg partition alone, a couple
+  of seconds); its fans run their `fallback` duties, because that is what
+  fallback means. The config is `/etc/led-controller/config.json` when it
+  exists, else the repo's (`CONFIG=path` overrides).
+- **The daemon** reads the block at runtime, drives the curves, and pushes the
+  same standalone part once at startup, so an edit plus a daemon restart
+  updates the receiver without a reflash. The receiver **persists that push in
+  NVS**; a re-flashed fancfg with *different* values outranks a stale push
+  (the same newer-default-wins rule as its saved baud), and `make clear-nvs`
+  also reverts to the flashed values.
+
+```sh
+sudo make flash                        # firmware + the config's fans block, always
+sudo make flash-fan                    # rewrite only the fans block: seconds
+sudo make flash-fan CONFIG=other.json  # ...from a different config
+led /etc/led-controller/config.json --fan-status   # what each header resolves to right now
+```
+
+`--fan-status` prints every header's source, the sysfs file it resolved to,
+its current reading and the duty it would run — the first thing to run when a
+fan isn't doing what the curve says.
+
+Wiring (channel order = header order):
+
+| header | receiver pin (ESP32-C3) | connects to |
+|---|---|---|
+| header1–header4 | GPIO5, 6, 7, 10 — the carrier board's FAN1–FAN4 | one fan's PWM input each (pin 4 on the 4-pin connector) |
+| — | — | fan +12 V and GND come from the PSU, **sharing a common ground** with the receiver; tach (pin 3) unconnected |
+
+The header → GPIO map is the board's, not the config's (`tools/pincheck.py`,
+`FAN_PINS`; the plain ESP32 gets 16, 17, 18, 19, untested). A hand-wired build
+on other pins, or with a fifth and sixth fan, adds `"pins": "5,6,7,10,0,20"`
+to the `fans` block — one GPIO per header, in order (20 is U0RXD, a J5-UART
+candidate; prefer 0 first). `tools/fancfg.py` validates the pins like the
 power switch's encoder does — nonexistent on `TARGET`, flash/host-link pads,
 collisions with `strip.pin`, the power switch's pins (a warning normally, an
 error when `PWR=on` is written in the same run), or each other — because the
 firmware has no console and a bad pin just looks like a fan that never spins.
 
-```sh
-sudo make flash FAN=on                          # firmware + default fan wiring
-sudo make flash-fan FAN=on FAN_PINS=5,6         # re-pin only: 2 fans, seconds
-sudo make flash-fan FAN=on FAN_DUTY=100,60,60,40 # per-channel resting duty
-sudo make flash-fan FAN=off                     # disable (outputs go away on reboot)
-
-# every setting spelled out (values shown are the defaults)
-sudo make flash FAN=on \
-    FAN_PINS=5,6,7,10 FAN_DUTY=100 \
-    FAN_BOOST_DUTY=100 FAN_BOOST_SECS=5
-```
-
 Two guardrails, mirroring the power switch's:
 
-- **The chip must run a firmware whose partition table has the `fancfg`
-  entry** (v1.13.0 or newer). `make flash-fan` against an older layout
-  writes a sector that firmware never reads — a silent no-op, except the
-  receiver's debug log says `no fancfg partition` at boot. Reflash the
-  firmware itself first.
-- A full `make flash` / `make flash-source` **wipes NVS** (the merged image
-  pads over it), which includes a daemon-pushed duty — the fans revert to the
-  `FAN_DUTY` flash defaults until the daemon next starts and re-pushes. Same
-  story as the receiver's saved baud and strip geometry. `flash-fan` /
-  `flash-pwr` touch only their own partitions and keep NVS.
+- **The chip must run a firmware that reads this block's layout** (the `FAN2`
+  fancfg, from this change on) **and whose partition table has the `fancfg`
+  entry** (v1.13.0 or newer). `make flash-fan` against an older layout writes
+  a sector that firmware never reads — a silent no-op, except the receiver's
+  debug log says `no fancfg partition` at boot — and a firmware that knows
+  only the old layout reads the new blob as "no config" and turns the fans
+  off. `make flash` writes both halves together, so only `flash-fan` alone
+  can hit this: reflash the firmware first.
+- A full `make flash` / `make flash-source` rewrites fancfg from the config
+  and **wipes the daemon's persisted push**, so the receiver runs exactly the
+  flashed block until the daemon next starts. Which is the same block, so
+  nothing changes unless the two copies of the config differ.
 
 ## BLE remote
 

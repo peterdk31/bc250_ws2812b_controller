@@ -63,6 +63,43 @@
             }
         }
     },
+    "fans": {
+        "hysteresis": 3,
+        "ramp": 5,
+        "boost_seconds": 5,
+        "header1": {
+            "enabled": false,
+            "name": "pump",
+            "source": "constant",
+            "curve": "65",
+            "boost": 100,
+            "fallback": 100
+        },
+        "header2": {
+            "enabled": false,
+            "name": "radiator",
+            "source": "temp",
+            "curve": "45:35 60:55 75:100",
+            "boost": null,
+            "fallback": 100
+        },
+        "header3": {
+            "enabled": false,
+            "name": "exhaust",
+            "source": "nct6686:pwm1",
+            "curve": "0:25 100:80",
+            "boost": null,
+            "fallback": 100
+        },
+        "header4": {
+            "enabled": false,
+            "name": "intake",
+            "source": "gpu_load",
+            "curve": "0:20 40:20 100:60",
+            "boost": null,
+            "fallback": 60
+        }
+    },
     "rules": [
         {
             "if": "temp>85",

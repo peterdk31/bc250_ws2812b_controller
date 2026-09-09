@@ -71,8 +71,14 @@ static const uint8_t PIX_HEADER = 9;
 
 // play the stored shutdown recording. Optional payload: 2 bytes (little-endian)
 // crossfade ms — the receiver dissolves from the last live frame into the
-// recording over it, just like a live anim change. Absent/0 = snap.
+// recording over it, just like a live anim change. Absent/0 = snap. An
+// optional third byte carries flags: SHUTDOWN_POWERING_OFF when the daemon is
+// exiting because the machine is going down (systemd is stopping the system),
+// as opposed to a plain service stop or restart — the fan controller holds its
+// live duties through a power-off (see CMD_FAN_LIVE) and lets them expire
+// otherwise. Older firmware reads the two bytes it knows and ignores the rest.
 static const uint8_t CMD_SHUTDOWN = 0x01;
+static const uint8_t SHUTDOWN_POWERING_OFF = 0x01;
 
 // CMD_REC_BEGIN: start streaming a recording for one slot. Payload (15 bytes,
 // all little-endian) describes what follows and lets the receiver skip an
@@ -120,16 +126,42 @@ static const uint8_t CMD_LOG_DRAIN = 0x05;
 // never sends it, and the receiver reports the silence rather than assuming.
 static const uint8_t CMD_REQ_ACK = 0x06;
 
-// CMD_FAN_DUTY: set the PWM fan duty cycles. Payload: count(1), then `count`
-// u8 duty percents (0-100; >100 clamps to 100). Duty i applies to the i-th
-// WIRED fan channel — the fan pins themselves live in the receiver's `fancfg`
-// flash partition (firmware/main/fan.cpp), chosen at flash time like the power
-// switch's wiring; this command only adjusts speeds. The receiver persists the
-// values in NVS so they survive reboots and daemon-less operation, which is
-// also why the daemon sends this once at startup and never repeats it. Unknown
-// to older firmware, which ignores it; a receiver without the fan feature
-// enabled drops it silently.
-static const uint8_t CMD_FAN_DUTY = 0x07;
+// The fan controller (firmware/main/fan.cpp, README "Fans") drives up to
+// FAN_CHANNELS PWM outputs, one per header. Both fan commands carry one byte
+// per header, header1 first, and FAN_NONE (0xFF) in a duty slot means "this
+// header is not the daemon's to drive" — the receiver leaves it exactly as it
+// is (a disabled header in the config). The pins themselves live in the
+// receiver's `fancfg` flash partition, written at flash time from the same
+// config block; these commands only ever adjust speeds. Both are unknown to
+// older firmware, which ignores them.
+static const uint8_t FAN_CHANNELS = 6;
+static const uint8_t FAN_NONE = 0xFF;
+
+// CMD_FAN_STANDALONE: what each header runs when the daemon is NOT driving it
+// — before the daemon is up, after it dies, on a daemon-less box. Payload
+// (1 + 2*FAN_CHANNELS bytes): boost_secs(1), then per header fallback(1)
+// boost(1). fallback is the resting duty percent (FAN_NONE = leave the
+// header alone); boost is the duty percent the header runs for boost_secs
+// after the host powers on (FAN_NONE = this header sits the boost out). The
+// receiver persists these in NVS, so they apply on daemon-less boots too,
+// and the daemon sends them once at startup — there is nothing to re-send.
+static const uint8_t CMD_FAN_STANDALONE = 0x08;
+
+// CMD_FAN_LIVE: the duties the daemon's curves want right now. Payload:
+// FAN_CHANNELS duty percents (FAN_NONE = not driven). Volatile: never
+// persisted, and dropped back to the standalone fallback when the host goes
+// silent (the LED service's host timeout), so a crashed daemon can't leave a
+// fan pinned low under load. After a CMD_SHUTDOWN flagged SHUTDOWN_POWERING_OFF
+// the receiver holds the last live duties instead — the machine is going down
+// and its fans should wind down from where they are, not roar for the last
+// few seconds. Sent on the
+// daemon's 0.5 s tick when a value changes, plus a slow refresh so a receiver
+// that reset mid-run picks the duties back up.
+static const uint8_t CMD_FAN_LIVE = 0x09;
+
+// 0x07 was CMD_FAN_DUTY, the flat percent array this replaced; retired, never
+// reused (a receiver on that firmware ignores the two above and keeps its
+// flash-time duties).
 
 // REQ_HOST_SHUTDOWN: "power yourself down, gracefully." The receiver's power
 // switch sends this on a short button press while the machine is up — the

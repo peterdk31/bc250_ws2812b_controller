@@ -125,10 +125,10 @@ The fan headers are mounted rotated, so on the board their pins read
 `PWM T 12V G` left to right (pin 1, GND, is the *right* pin of each header)
 and every header's lock ramp faces down the board, away from the strip
 connector.
-Fan channel order follows the firmware's `FAN_PINS=5,6,7,10` default: FAN1
-(top left) is GPIO5 and `fans.duty` index 0, FAN2 top right, FAN3 bottom
-left, FAN4 (bottom right) is GPIO10 and index 3. Each header's name is
-printed just below it.
+The header names are the config's: FAN1 (top left) is GPIO5 and `header1` in
+the config's `fans` block, FAN2 top right, FAN3 bottom left, FAN4 (bottom
+right) is GPIO10 and `header4` (the header → GPIO map is `FAN_PINS` in
+`tools/pincheck.py`). Each header's name is printed just below it.
 
 The strip path is sized for 3 A: a 3 mm 3.3V trace from the header's front
 3.3 V pin (the rear one is tied behind it) up the header's left side and
@@ -211,8 +211,9 @@ Two things to check when the parts arrive, before soldering:
 ```sh
 # the button's second pin is a real GND, not GPIO21
 sudo make flash-pwr PWR=on PWR_BUTTON_GND=-1
-# fans: the default FAN_PINS=5,6,7,10 already matches FAN1..FAN4
-sudo make flash-fan FAN=on
+# fans: header1..header4 in the config's fans block are FAN1..FAN4 (GPIO 5, 6,
+# 7, 10) — enable the ones you use, then write the block
+sudo make flash-fan
 ```
 
 `PWR_LED` can stay at 8: that is the Super Mini's own blue LED, so the
