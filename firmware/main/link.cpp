@@ -33,7 +33,13 @@ void begin(uint32_t baud)
     // hash at END and nothing is stored). At the host's paced ~100 KB/s
     // (SerialSink spaces CMD_REC_FRAMEs), 32 KB buys ~300 ms of stall.
     // We never transmit, so no TX buffer.
-    uart_driver_install(PORT, 32768, 0, 0, nullptr, 0);
+    //
+    // ESP_INTR_FLAG_IRAM: the RX interrupt must keep draining the 128-byte
+    // hardware FIFO while a flash program/erase has the cache disabled, or
+    // every erase during an upload silently drops one frame — that stall is
+    // why the ring exists, and without this it never sees those bytes
+    // (CONFIG_UART_ISR_IN_IRAM in sdkconfig.defaults places the handler).
+    uart_driver_install(PORT, 32768, 0, 0, nullptr, ESP_INTR_FLAG_IRAM);
     uart_param_config(PORT, &cfg);
     // UART0's default pins are already wired to the USB-serial bridge; keep them.
 }

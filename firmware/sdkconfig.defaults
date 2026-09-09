@@ -36,3 +36,14 @@ CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
+
+# UART0 is the host link on the plain ESP32, at 921600 baud with no flow
+# control. Every LittleFS page program / block erase (a recording upload is
+# appended to flash frame by frame) disables the cache and with it every
+# interrupt handler that lives in flash — the UART driver's included, so
+# nothing drains the 128-byte hardware FIFO, which overruns in ~1.4 ms while
+# an erase lasts tens of ms. Each erase then ate one upload frame (82/86,
+# INCOMPLETE, nothing stored). In IRAM the handler keeps running through the
+# stall and the 32 KB RX ring (link.cpp) absorbs it, as on the C3 where USB
+# NAKs instead of dropping. Costs ~3 KB of IRAM; no effect on the C3 link.
+CONFIG_UART_ISR_IN_IRAM=y
