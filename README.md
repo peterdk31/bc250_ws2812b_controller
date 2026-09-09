@@ -62,45 +62,34 @@ sudo make flash                              # download prebuilt firmware + flas
 sudo systemctl enable --now led-controller
 ```
 
-`make flash` reads the chip (`esp32.target`, default `esp32c3`) and port
-(`sinks.serial.port`) from the config; override on the command line, e.g.
+`make flash` reads the chip (`target`, default `esp32c3`) and port
+(`serial.port`) from the config; override on the command line, e.g.
 `sudo make flash PORT=/dev/ttyACM0 TARGET=esp32`. It stops the service during the
 write and restarts it after.
 
 ### The full BC-250 flash
 
-Everything this repo can put on the receiver, in one command — the ATX power
-switch, the PWM fans, and the BLE phone remote. The power switch and the remote
-take their knobs on the command line (the values shown are the defaults for the
-BC-250 hookup described in the sections below, so trim freely — an omitted
-`PWR_*` var just means its default). The fans take none: their settings are
-the `fans` block of the config (`/etc/led-controller/config.json` when it
-exists, else the repo's), and `make flash` bakes that block's standalone part
-into the receiver the same way it already bakes `strip.pin` — see
-[Fans](#fans). The shipped block has every header disabled, so a fresh box
-writes the fan feature off until you enable a header.
+Everything this repo can put on the receiver — the ATX power switch, the PWM
+fans, the BLE phone remote — is described in the config, in the blocks
+`power_switch`, `fans` and `ble_remote` (each has its own section below).
+`make flash` bakes all three into the receiver's small settings partitions the
+same way it already bakes `strip.pin`, so the full flash is the plain one:
 
 ```sh
-sudo make flash \
-    PWR=on \
-        PWR_PS_ON=3 PWR_BUTTON=1 PWR_BUTTON_GND=21 \
-        PWR_SENSE=2 PWR_LED=8 \
-        PWR_HOLD=2 PWR_BOOT_TIMEOUT=10 \
-        PWR_SENSE_LOW=800 PWR_SENSE_HIGH=2000 \
-    BLE=on \
-        BLE_TOKEN=$(openssl rand -hex 6) BLE_NAME=BC250
+sudo make flash
 ```
 
-Set `BLE_TOKEN` to something you'll remember (8–16 characters) or note the
-generated one — the phone page asks for it once. Writing the features in one
-run also arms the encoders' strictest cross-checks: pin collisions between
-them (and with `strip.pin`) become hard errors instead of warnings. Each
-feature has its own section below — what it does, the wiring, and the
-`flash-pwr`/`flash-fan`/`flash-ble` targets that rewrite just that feature's
-config in seconds.
+The config is `/etc/led-controller/config.json` when it exists, else the
+repo's (`CONFIG=path` overrides). The shipped blocks are all off — a fresh box
+writes the fans and the remote off and leaves the power switch alone (see
+[Power switch](#power-switch) for why that one is different) until you enable
+them. Writing the features from one file also arms the encoders' strictest
+cross-checks: a pin claimed by two blocks, or by a block and `strip.pin`, is a
+hard error. Each feature's section has the `flash-pwr` / `flash-fan` /
+`flash-ble` target that rewrites just that block in seconds.
 
 Finally, edit `/etc/led-controller/config.json` for your hardware — at least
-`strip.leds`, `strip.pin`, and `sinks.serial.port` — then `sudo systemctl
+`strip.leds`, `strip.pin`, and `serial.port` — then `sudo systemctl
 restart led-controller`.
 
 To try an effect directly (stop the service first, it holds the port):
@@ -139,7 +128,7 @@ matters to you, get a C3.
 
 The serial baud auto-negotiates: if bytes arrive but no frame decodes, the
 receiver cycles through the supported rates until frames validate, then
-remembers the working rate in flash. Changing `sinks.serial.baud` just needs a
+remembers the working rate in flash. Changing `serial.baud` just needs a
 service restart.
 
 ## Flashing the receiver
@@ -158,7 +147,7 @@ The image is written at `0x0` and doesn't touch the NVS or LittleFS partitions,
 so a reflash keeps a board's saved state.
 
 **Building from source** is only needed to modify the firmware, or to bake a
-non-default `sinks.serial.baud` / `esp32.host_timeout_ms` into it. It builds inside
+non-default `serial.baud` / `host_timeout_ms` into it. It builds inside
 Espressif's ESP-IDF container (needs `docker` or `podman` — nothing is installed
 on the host, and `make receiver-clean` drops the cached image), or against a
 native ESP-IDF if you set `IDF_PATH=...`:
@@ -189,7 +178,7 @@ The receiver has no console (the link is the daemon's), so it keeps a small log
 ring in RAM and hands it back over the link on request. Set
 
 ```jsonc
-"sinks": { "serial": { "debug_log": true } }
+"serial": { "debug_log": true }
 ```
 
 and its lines appear in `journalctl -u led-controller` — the recording uploads
@@ -203,37 +192,38 @@ ever says unprompted is a power-button request (see
 
 ## Configuration
 
-`/etc/led-controller/config.json`:
+`/etc/led-controller/config.json`. The first half describes the receiver — the
+chip, the link, and everything it does on its own when the daemon isn't
+running — the second half the host's rendering:
 
 ```jsonc
 {
-    "sinks": {
-        "serial": {
-            "port": "/dev/ttyUSB0",
-            "baud": 921600,
-            "debug_log": false,     // drain the receiver's log to journalctl
-            "power_button": false,  // honor a short press on the receiver's power
-                                    // button (see Power switch) — off by default
-            "power_button_command": "systemctl poweroff"
-        }
-    },                          // port "none" or "" (or LED_PORT=none) runs headless;
-                                // omitting the key defaults to /dev/ttyUSB0
-    "strip": {
-        "leds": 58,
-        "pin": 13,              // ESP32 GPIO driving the strip
-        "reverse": false,       // flip so LED 0 is at the far end
-        "brightness": 0.2,      // 0..1, linear
-        "gamma": "2.2",         // one value, or three ("2.0 2.2 2.4") per R/G/B
-        "white_balance": "ffb0f0" // RRGGBB neutral-white gain; ffffff = off
+    "target": "esp32c3",        // chip to build/flash for (esp32, esp32c3, ...)
+    "serial": {
+        "port": "/dev/ttyUSB0", // "none" or "" (or LED_PORT=none) runs headless;
+        "baud": 921600,         // omitting the key defaults to /dev/ttyUSB0
+        "debug_log": false      // drain the receiver's log to journalctl
     },
-    "sensors": [ ... ],         // hwmon candidates, see Sensors
-    "esp32": {
-        "target": "esp32c3",    // chip to build/flash for (esp32, esp32c3, ...)
-        "host_timeout_ms": 5000, // receiver blanks after this long with no frame —
-                                 // baked into the firmware by `make flash-source`
-                                 // only; the prebuilt image always uses 5000
-        "power_on": { ... },    // boot/shutdown animations the receiver replays
-        "shutdown": { ... }     // (standalone effects only)
+    "host_timeout_ms": 5000,    // receiver blanks after this long with no frame —
+                                // baked into the firmware by `make flash-source`
+                                // only; the prebuilt image always uses 5000
+    "power_on": { ... },        // boot/shutdown animations the receiver replays
+    "shutdown": { ... },        // (standalone effects only, see below)
+
+    "power_switch": {           // the ATX power button, see Power switch
+        "enabled": false,
+        "hold_seconds": 2,          // hold this long for a hard cut
+        "boot_timeout_seconds": 10, // rail not up by then = release PS_ON#
+        "sense_low_mv": 800,
+        "sense_high_mv": 2000,
+        "pins": { "ps_on": 3, "button": 1, "button_gnd": null, "sense": 2, "led": 8 },
+        "short_press": null         // what the daemon runs on a short press,
+                                    // e.g. "systemctl poweroff"; null = ignore it
+    },
+    "ble_remote": {             // the phone power button, see BLE remote
+        "enabled": false,
+        "name": "BC250",
+        "token": ""                 // 8-16 chars; readable by anyone with a shell here
     },
     "fans": {                   // the PWM fan headers, see Fans — one block per
         "hysteresis": 3,        // header, all with the same keys
@@ -243,9 +233,23 @@ ever says unprompted is a power-button request (see
                      "curve": "65", "boost": 100, "fallback": 100 },
         "header2": { ... }
     },
+
+    "strip": {
+        "leds": 58,
+        "pin": 13,              // ESP32 GPIO driving the strip
+        "reverse": false,       // flip so LED 0 is at the far end
+        "brightness": 0.2,      // 0..1, linear
+        "gamma": "2.2",         // one value, or three ("2.0 2.2 2.4") per R/G/B
+        "white_balance": "ffb0f0" // RRGGBB neutral-white gain; ffffff = off
+    },
+    "sensors": [ ... ],         // hwmon candidates, see Sensors
     "rules": [ ... ]
 }
 ```
+
+Configs from before September 2026 had an `esp32` block and a `sinks.serial`
+one; the daemon names the old key and what it became, and exits, rather than
+run on a half-read file.
 
 ### Tuning the colors
 
@@ -423,22 +427,19 @@ Settings resolve per-rule first, then top-level config, then the defaults above.
 
 ### Boot & shutdown animations
 
-Set `esp32.power_on` / `esp32.shutdown` to any standalone effect, or a
-`sequence` played into one recording — typically a one-shot intro into a looping
-idle:
+Set `power_on` / `shutdown` to any standalone effect, or a `sequence` played
+into one recording — typically a one-shot intro into a looping idle:
 
 ```jsonc
-"esp32": {
-    "power_on": {
-        "sequence": [
-            { "effect": "boot",    "record_seconds": 4,
-              "settings": { "intro_seconds": 3, "color": "ff7818" } },
-            { "effect": "breathe", "record_seconds": 5, "loop": true,
-              "settings": { "palette": "2a0a00,ff7818", "period_seconds": 5 } }
-        ]
-    },
-    "shutdown": { "effect": "shutdown", "settings": { "color": "0028ff" } }
-}
+"power_on": {
+    "sequence": [
+        { "effect": "boot",    "record_seconds": 4,
+          "settings": { "intro_seconds": 3, "color": "ff7818" } },
+        { "effect": "breathe", "record_seconds": 5, "loop": true,
+          "settings": { "palette": "2a0a00,ff7818", "period_seconds": 5 } }
+    ]
+},
+"shutdown": { "effect": "shutdown", "settings": { "color": "0028ff" } }
 ```
 
 The last segment's `loop` decides the tail (loop from its first frame, else hold
@@ -472,12 +473,11 @@ minus its WiFi/BLE):
   keeping it held afterwards is free to mean the failsafe below.
 - **Short press** while the machine is up → the ordinary PC power-button
   gesture: the OS is asked to shut itself down gracefully. The receiver can't
-  do that itself, so it asks over the link and the daemon runs
-  `sinks.serial.power_button_command` (default `systemctl poweroff`); the
-  machine then powers itself off and the sense wire's follow-down releases
-  PS_ON#. **This needs `"sinks": { "serial": { "power_button": true } }` in the
-  daemon's config** — it is off by default, so a box that hasn't opted in
-  ignores the press (and says so in the journal). If nobody answers within 3 s
+  do that itself, so it asks over the link and the daemon runs the
+  `power_switch.short_press` command (`"systemctl poweroff"`); the machine
+  then powers itself off and the sense wire's follow-down releases PS_ON#.
+  **This needs `short_press` set to a command** — it ships `null`, so a box
+  that hasn't opted in ignores the press (and says so in the journal). If nobody answers within 3 s
   — daemon down, no OS yet, feature off — the request is dropped and the
   feedback LED blinks fast for a moment, because otherwise an unheard press
   looks exactly like a broken button. Nothing about this path touches PS_ON#:
@@ -509,15 +509,15 @@ minus its WiFi/BLE):
   The sense line is still sampled and logged while held (see the debug log
   below) — that log is how the right pin and thresholds get found.
 
-Wiring (ESP32-C3 defaults shown; every pin is a `PWR_*` make variable):
+Wiring (the shipped `power_switch.pins`, for the ESP32-C3; `null` = not wired):
 
 | receiver pin | connects to |
 |---|---|
-| GPIO3 (`PWR_PS_ON`) | gate of an N-channel MOSFET that sinks PS_ON# to ground (see note below) — **not** PS_ON# directly |
-| GPIO1 (`PWR_BUTTON`) | momentary switch terminal A (internal pull-up, pressed = low) |
-| GPIO21 (`PWR_BUTTON_GND`, -1 if the switch is wired to a real GND) | switch terminal B — driven low as a local ground, so the button needs no run to a real GND. (U0TXD: free while the host link is USB) |
-| GPIO2 (`PWR_SENSE`, -1 = not wired) | optional board-power sense, e.g. BC-250 TPMS1 pin 9, which is the board's main **3.3 V rail**. Emphatically *not* pin 15 (`3VSB`): that stays up whenever PS_ON# is held, so it reads like a working sense wire and then never fires follow-down or the boot timeout. Read as an averaged ADC voltage with hysteresis (`PWR_SENSE_LOW`/`PWR_SENSE_HIGH` mV); the ADC saturates near 3.1 V, so a healthy rail logs ~2.9–3.1 V |
-| GPIO8 (`PWR_LED`, -1 = none) | optional feedback: the board's own little LED *blinks* while the button reads pressed, so button wiring can be eyeballed without a PSU. GPIO8 is the plain onboard LED on common C3 dev boards; a blink shows regardless of the LED's polarity |
+| GPIO3 (`ps_on`) | gate of an N-channel MOSFET that sinks PS_ON# to ground (see note below) — **not** PS_ON# directly |
+| GPIO1 (`button`) | momentary switch terminal A (internal pull-up, pressed = low) |
+| `button_gnd`: `null` when the switch is wired to a real GND (the carrier board), else e.g. GPIO21 | switch terminal B — driven low as a local ground, so the button needs no run to a real GND. (GPIO21 is U0TXD: free while the host link is USB) |
+| GPIO2 (`sense`, `null` = not wired) | optional board-power sense, e.g. BC-250 TPMS1 pin 9, which is the board's main **3.3 V rail**. Emphatically *not* pin 15 (`3VSB`): that stays up whenever PS_ON# is held, so it reads like a working sense wire and then never fires follow-down or the boot timeout. Read as an averaged ADC voltage with hysteresis (`sense_low_mv` / `sense_high_mv`); the ADC saturates near 3.1 V, so a healthy rail logs ~2.9–3.1 V |
+| GPIO8 (`led`, `null` = none) | optional feedback: the board's own little LED *blinks* while the button reads pressed, so button wiring can be eyeballed without a PSU. GPIO8 is the plain onboard LED on common C3 dev boards; a blink shows regardless of the LED's polarity |
 | 5VSB + GND | PSU standby rail, so the receiver runs while the machine is off — **read the warning below before also plugging in USB** |
 
 > ⚠️ **Critical — 5VSB and USB at the same time.** In this role the receiver
@@ -541,11 +541,11 @@ Wiring (ESP32-C3 defaults shown; every pin is a `PWR_*` make variable):
 tied to PS_ON#: the line is pulled to 5 V inside the PSU, and letting it rise
 back-feeds the pad's clamp diode so it never reaches a clean "off" — direct
 drive doesn't work. Wire a small N-channel MOSFET (a **2N7000** is plenty for
-PS_ON#'s ~1 mA) as a low-side switch: **gate** ← `PWR_PS_ON`, **source** →
-GND, **drain** → PS_ON#. `PWR_PS_ON` HIGH turns the MOSFET on and pulls PS_ON#
+PS_ON#'s ~1 mA) as a low-side switch: **gate** ← the `ps_on` pin, **source** →
+GND, **drain** → PS_ON#. `ps_on` HIGH turns the MOSFET on and pulls PS_ON#
 to ground (PSU on); LOW releases it (PSU off). Add a **gate pull-down (~100 kΩ,
 gate → GND)** so the MOSFET stays off whenever the pad isn't driving it — at
-power-up before the firmware runs, during a reset, and on the `PWR=off` release
+power-up before the firmware runs, during a reset, and on the `"enabled": false` release
 path; without it a floating gate could start the PSU on its own. (100 kΩ is
 ample: the gate is a near-pure capacitance, and the line switches about once
 per boot.)
@@ -556,11 +556,11 @@ ESP32-C3  (running on the PSU's 5VSB standby rail — see the USB warning above)
   5V      ──  PSU 5VSB
   GND     ──  PSU GND
   GPIO4   ──  WS2812B strip DIN   (strip.pin)        ── the LED output; daemon-set
-  GPIO3   ──  2N7000 gate         (PWR_PS_ON)        ── PS_ON# via MOSFET, below
-  GPIO1   ──  button  N (common)  (PWR_BUTTON)
-  GPIO21  ──  button  NO          (PWR_BUTTON_GND)
-  GPIO2   ──  BC-250 TPMS1 pin 9  (PWR_SENSE)        ── board sense (3.3 V rail)
-  GPIO8   ──  onboard LED         (PWR_LED)          ── feedback, no wiring
+  GPIO3   ──  2N7000 gate         (pins.ps_on)       ── PS_ON# via MOSFET, below
+  GPIO1   ──  button  N (common)  (pins.button)
+  GPIO21  ──  button  NO          (pins.button_gnd)  ── or a real GND, and null here
+  GPIO2   ──  BC-250 TPMS1 pin 9  (pins.sense)       ── board sense (3.3 V rail)
+  GPIO8   ──  onboard LED         (pins.led)         ── feedback, no wiring
 
 
 PS_ON# drive — low-side N-channel MOSFET (2N7000)
@@ -593,8 +593,8 @@ LED strip (WS2812B)
    DIN ← GPIO4; the strip's +5 V and GND come from the PSU's main 5 V rail (a
    26-LED strip is more than the 5VSB rail should carry), sharing a common GND
    with the ESP32-C3. GPIO4 is the C3 build's value — the strip pin is the
-   daemon's `strip.pin` (pushed at runtime, cached in NVS), NOT a flash-time
-   PWR_* setting, so it just must not collide with the pins above or the C3's
+   daemon's `strip.pin` (pushed at runtime, cached in NVS), not one of the
+   `power_switch.pins`, so it just must not collide with the pins above or the C3's
    flash pins (GPIO12–17). The repo's default `strip.pin` is 4 to match the
    default `TARGET` (esp32c3); a plain ESP32 wants something like 13.
 ```
@@ -614,51 +614,47 @@ happened; the failsafe above exists because of it). So GPIO2 it is, and
 though: on a plain ESP32 the strapping pins select boot mode outright (GPIO0
 low = download boot), so there a sense line grounded half the time really can
 stop the chip booting — the encoder still warns for those. Second, if the sense
-wire isn't connected, set `PWR_SENSE=-1` rather than leaving the input
+wire isn't connected, set `"sense": null` rather than leaving the input
 floating: a floating ADC pin reads noise, and the boot timeout may cut the PSU
 seconds after every power-on. Third, the defaults are C3-specific: on a plain
 ESP32, GPIO1/3 are its UART0 console and 0/2 are strapping pins — pick
 different ones.
 
-The feature is **off until opted into at flash time**: the settings live in a
-small dedicated flash partition (`pwrcfg`), not in the firmware image, so the
-prebuilt image works and pins change without touching source. `PWR=on` writes
-the partition alongside a normal flash, and `make flash-pwr` writes *only*
+The feature is **off until opted into**: its settings are the config's
+`power_switch` block, and they live on the receiver in a small dedicated flash
+partition (`pwrcfg`), not in the firmware image, so the prebuilt image works
+and pins change without touching source. `make flash` writes the partition
+from the block alongside a normal flash, and `make flash-pwr` writes *only*
 that partition — re-pinning takes a couple of seconds and keeps the installed
-firmware. Once written, the settings survive reflashes (a plain `make flash`
-never touches them). Two guardrails to know about:
+firmware. Three guardrails to know about:
 
+- **A config with no `power_switch` block leaves the chip's settings alone.**
+  The fans and the remote are written *off* in that case, harmlessly; the
+  power switch written off releases an asserted PS_ON# once the receiver
+  reboots — it cuts the machine's power — so only an explicit
+  `"enabled": false` does that. Put the jumper back first if the machine's
+  power already hangs on the receiver.
 - **The firmware must be v1.6.0 or newer** — that's where the `pwrcfg`
   partition first exists. `make flash-pwr` against an older installed
-  firmware (or `PWR=on` with an older `FW_RELEASE` pinned) writes a sector
-  that firmware never reads: a silent no-op. Update the firmware itself
-  first. (Individual settings added later are simply ignored by firmware
-  that predates them — e.g. v1.6.0 exactly reads everything but `PWR_LED`.)
-- The wiring is validated before anything is written: `tools/pwrcfg.py`
-  rejects pins the firmware would silently drop (nonexistent on `TARGET`,
+  firmware (or an older `FW_RELEASE` pinned) writes a sector that firmware
+  never reads: a silent no-op. Update the firmware itself first. (Individual
+  settings added later are simply ignored by firmware that predates them —
+  e.g. v1.6.0 exactly reads everything but the `led` pin.)
+- The block is validated before anything is written: `tools/pwrcfg.py`
+  rejects pins the firmware would silently drop (nonexistent on `target`,
   SPI-flash or host-link pads, a non-ADC sense pin, a collision with the
-  `strip.pin` LED data pin) and nonsense tunings (inverted hysteresis
-  thresholds). The receiver has no console, so a config it can't use would
-  otherwise just look like a dead button.
+  `strip.pin` LED data pin or a fan header) and nonsense tunings (inverted
+  hysteresis thresholds), and an unknown or missing key. The receiver has no
+  console, so a config it can't use would otherwise just look like a dead
+  button.
 
 ```sh
-sudo make flash PWR=on                        # flash firmware + default wiring
-sudo make flash-pwr PWR=on PWR_SENSE=-1       # re-pin only (e.g. no sense wire)
-sudo make flash-pwr PWR=on PWR_HOLD=8         # timings too (seconds)
-sudo make flash-pwr PWR=off                   # disable the feature
-
-# the prebuilt image with every setting spelled out (values shown are the
-# defaults — name only the ones you change)
-sudo make flash PWR=on \
-    PWR_PS_ON=3 PWR_BUTTON=1 PWR_BUTTON_GND=21 PWR_SENSE=2 PWR_LED=8 \
-    PWR_HOLD=2 PWR_BOOT_TIMEOUT=10 \
-    PWR_SENSE_LOW=800 PWR_SENSE_HIGH=2000
+sudo make flash          # firmware + the config's power_switch block (and the fans', and the remote's)
+sudo make flash-pwr      # rewrite only the power_switch block: seconds
 ```
 
 The switch runs standalone — no daemon involved; the button matters exactly
-when the host is off. Disabling with `PWR=off` releases an asserted PS_ON#
-once the receiver reboots into the new setting — put the jumper back first if
-the machine's power already hangs on the receiver.
+when the host is off. Only `short_press` is the daemon's.
 
 **Reflashing caveat:** once the machine's power hangs on this pin, remember
 that flashing the receiver *from that machine* resets the chip mid-write. On
@@ -836,8 +832,9 @@ on other pins, or with a fifth and sixth fan, adds `"pins": "5,6,7,10,0,20"`
 to the `fans` block — one GPIO per header, in order (20 is U0RXD, a J5-UART
 candidate; prefer 0 first). `tools/fancfg.py` validates the pins like the
 power switch's encoder does — nonexistent on `TARGET`, flash/host-link pads,
-collisions with `strip.pin`, the power switch's pins (a warning normally, an
-error when `PWR=on` is written in the same run), or each other — because the
+collisions with `strip.pin`, the power switch's pins (a warning from
+`flash-fan` alone, an error from `make flash`, which writes both blocks), or
+each other — because the
 firmware has no console and a bad pin just looks like a fan that never spins.
 
 Two guardrails, mirroring the power switch's:
@@ -866,20 +863,26 @@ any BLE tool that can write a GATT characteristic. Note Web Bluetooth is a
 Chrome/Edge-on-Android (and desktop) feature; iOS browsers don't have it.
 
 Like the other receiver features it is **standalone** (no daemon involved)
-and opted into at flash time, in its own 4 KB `blecfg` partition:
+and configured in the config's `ble_remote` block, which `make flash` bakes
+into its own 4 KB `blecfg` partition:
 
-```sh
-sudo make flash BLE=on BLE_TOKEN=$(openssl rand -hex 6)   # firmware + remote
-sudo make flash-ble BLE=on BLE_TOKEN=... BLE_NAME=BC250   # re-token/rename only: seconds
-sudo make flash-ble BLE=off                               # disable
+```jsonc
+"ble_remote": { "enabled": true, "name": "BC250", "token": "5f3a9c1e2b7d" }
 ```
 
-`BLE_TOKEN` (8–16 characters, required) is the shared secret the phone must
-present with every command — the only thing standing between anyone within
-radio range and your power button, so `tools/blecfg.py` refuses to write an
-enabled config without one. Enter it once on the web page; it is remembered
-on the phone. `BLE_NAME` is the advertised device name (public by
-definition).
+```sh
+sudo make flash          # firmware + the block
+sudo make flash-ble      # rewrite only the block: seconds (re-token, rename, disable)
+```
+
+`token` (8–16 characters, required when enabled; `openssl rand -hex 6` makes
+a good one) is the shared secret the phone must present with every command —
+the only thing standing between anyone within radio range and your power
+button, so `tools/blecfg.py` refuses to write an enabled block without one.
+Enter it once on the web page; it is remembered on the phone. It sits in the
+config in the clear: anyone with a shell on the box can read it, and can also
+just run `systemctl poweroff`, which is all it guards. `name` is the
+advertised device name (public by definition).
 
 Several machines: the page keeps every receiver the Bluetooth chooser has
 ever granted and lists them in a dropdown above the button — pick one to
@@ -888,7 +891,7 @@ pick on its own), "Add a receiver…" opens the chooser for a new board. Tokens
 are remembered per receiver: a new board first tries the token you entered
 first; if that board was flashed with a different one, its first command is
 rejected and the page asks for that board's token. Give each board its own
-`BLE_NAME` so the dropdown reads as more than `BC250`, `BC250 (2)`.
+`name` so the dropdown reads as more than `BC250`, `BC250 (2)`.
 
 What the remote can do is deliberately narrow — the same gestures as the
 physical button, and nothing else:
@@ -897,8 +900,8 @@ physical button, and nothing else:
   exact same path as a real press: the fan boost arms, the power-on
   animation replays, the sense wire confirms the boot.
 - **Graceful shutdown** (the short press): asks the host over the link to run
-  its poweroff command — needs `sinks.serial.power_button: true` in the
-  daemon config, like the button.
+  its poweroff command — needs `power_switch.short_press` set in the daemon
+  config, like the button.
 - **Force off** (the hold): release PS_ON# and cut the PSU immediately — the
   crash rescue, which is the one moment a *remote* power button really earns
   its keep. The page double-confirms it; the firmware accepts it while
@@ -914,14 +917,15 @@ buffer in `render.cpp` (`mem_block_symbols`) is the knob to reach for.
 Guardrails, mirroring the fans': the chip must run a firmware whose partition
 table has the `blecfg` entry — `make flash-ble` against an older layout is a
 silent no-op except for the receiver's debug log saying `no blecfg partition`
-at boot. And the remote requires the power switch (`PWR=on`): a `blecfg`
-without it logs `power switch is off — remote disabled` and stays dark.
+at boot. And the remote requires the power switch (`power_switch.enabled`):
+a `blecfg` without it logs `power switch is off — remote disabled` and stays
+dark. A config with no `ble_remote` block writes the remote off.
 
 ## Previewing without hardware
 
 Frames go to a list of *sinks* — the serial transport and/or an on-screen
 viewer — so the daemon runs with no strip attached. Set `LED_PORT=none` (or
-`sinks.serial.port` empty) to skip serial:
+`serial.port` empty) to skip serial:
 
 ```sh
 make virtual-strip
@@ -997,5 +1001,5 @@ Command frame (distinct second sync byte, so the pixel parser skips it):
 Byte values and payload formats live in `common/protocol.hpp`, shared by host
 and firmware. The receiver drops bad-checksum frames and rescans for sync, so a
 desync recovers within a frame; if nothing valid arrives for
-`esp32.host_timeout_ms`, it blanks the strip. **Host and receiver must be updated
+`host_timeout_ms`, it blanks the strip. **Host and receiver must be updated
 together when the protocol changes.**

@@ -44,7 +44,7 @@
 
 // blank the strip when the host stops sending (crash, unplug); the last frame
 // would otherwise stay lit forever. The Makefile overrides this with
-// serial.host_timeout_ms from the host config.
+// host_timeout_ms from the host config.
 #ifndef HOST_TIMEOUT_MS
 #define HOST_TIMEOUT_MS 5000
 #endif
@@ -78,7 +78,7 @@
 #define HUNT_MIN_BYTES 64
 
 // receiver-side debug log (drained to journalctl when the daemon has
-// "sinks.serial.debug_log" on; see dbglog.hpp). Event lines only — nothing
+// "serial.debug_log" on; see dbglog.hpp). Event lines only — nothing
 // per-frame — so an unwatched board costs a bounded vsnprintf per event.
 #define LLOG(fmt, ...) dbglog::line("led: " fmt, ##__VA_ARGS__)
 

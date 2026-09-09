@@ -208,12 +208,16 @@ Two things to check when the parts arrive, before soldering:
 
 ## Flashing for this board
 
+Everything is the config's: the shipped `power_switch` block already has this
+board's pins (`ps_on` 3, `button` 1, `button_gnd` null — the button's second
+pin is a real GND, not GPIO21 — `sense` 2, `led` 8), and `header1..header4` in
+the `fans` block are FAN1..FAN4 (GPIO 5, 6, 7, 10). Set `enabled` on what you
+use, then:
+
 ```sh
-# the button's second pin is a real GND, not GPIO21
-sudo make flash-pwr PWR=on PWR_BUTTON_GND=-1
-# fans: header1..header4 in the config's fans block are FAN1..FAN4 (GPIO 5, 6,
-# 7, 10) — enable the ones you use, then write the block
-sudo make flash-fan
+sudo make flash          # everything, or
+sudo make flash-pwr      # just the power switch block
+sudo make flash-fan      # just the fans block
 ```
 
 `PWR_LED` can stay at 8: that is the Super Mini's own blue LED, so the

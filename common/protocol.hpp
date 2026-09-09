@@ -11,7 +11,7 @@
 //
 // log frame:     SYNC0 LOG_SYNC seq(4) ms(4) len <text[len]> checksum
 //   A receiver→host frame — a debug backchannel: when the daemon has
-//   "sinks.serial.debug_log" set it periodically sends CMD_LOG_DRAIN with the
+//   "serial.debug_log" set it periodically sends CMD_LOG_DRAIN with the
 //   highest seq it has seen, and the receiver replies with one of these per
 //   buffered log line newer than that (see firmware/main/dbglog.*). All
 //   little-endian; checksum is the XOR of the seq, ms, len bytes and the text.
@@ -167,7 +167,7 @@ static const uint8_t CMD_FAN_LIVE = 0x09;
 // switch sends this on a short button press while the machine is up — the
 // ordinary PC power-button gesture, which nothing but the OS can honor. The
 // daemon runs its configured poweroff command
-// ("sinks.serial.power_button_command"); the receiver then just waits, and its
+// ("power_switch.short_press"); the receiver then just waits, and its
 // existing sense-line follow-down releases PS_ON# when the board's rail
 // collapses. So this asks the host to do something and never itself decides
 // anything about the PSU — holding the button remains the only hard cut.

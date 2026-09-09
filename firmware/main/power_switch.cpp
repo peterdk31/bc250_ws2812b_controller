@@ -59,7 +59,7 @@
 //   * A SHORT press while the machine is up is the ordinary PC power-button
 //     gesture: shut the OS down gracefully. Nothing here can do that — only the
 //     OS can — so it asks, over the link, and the daemon runs its poweroff
-//     command (hostreq.hpp, and "sinks.serial.power_button" on the host). We
+//     command (hostreq.hpp, and "power_switch.short_press" on the host). We
 //     then do nothing at all: the board powers itself off, the sense line drops,
 //     and the follow-down below cuts the PSU. If nobody answers within
 //     REQ_ACK_MS — no daemon, no OS, the host feature left off — the request is
@@ -579,7 +579,7 @@ static void loop()
         else if (now - g_reqStart >= REQ_ACK_MS)
         {
             PLOG("no answer in %ums: daemon down, or its "
-                 "sinks.serial.power_button is off",
+                 "power_switch.short_press is null",
                  (unsigned)REQ_ACK_MS);
             hostreq::cancel();
             g_reqStart = 0;

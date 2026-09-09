@@ -83,25 +83,23 @@ static std::vector<uint8_t> framePixels(uint8_t pin, uint16_t count,
     return f;
 }
 
-// render the receiver's power-on/shutdown effects (the "esp32" block) to
-// frames and stream them over so the receiver can store and replay them — at
-// the next power-on (before the daemon is up) and on shutdown (after it
-// exits). The receiver runs no effect code of its own; these recordings are
-// the only thing it plays standalone. Done once at startup, so an edited
-// effect is picked up on the next daemon (re)start and shown one power cycle
-// later. Skipped entirely when there's no "esp32" block. The recording uses
-// `strip` purely as a correction canvas — by value inside record(), so the
-// daemon's own Strip is untouched. Broadcast to every sink; only the serial
-// transport acts on commands, the rest no-op (see host/sink.hpp).
+// render the receiver's power-on/shutdown effects (the "power_on" and
+// "shutdown" blocks) to frames and stream them over so the receiver can store
+// and replay them — at the next power-on (before the daemon is up) and on
+// shutdown (after it exits). The receiver runs no effect code of its own;
+// these recordings are the only thing it plays standalone. Done once at
+// startup, so an edited effect is picked up on the next daemon (re)start and
+// shown one power cycle later. A missing block is simply not recorded. The
+// recording uses `strip` purely as a correction canvas — by value inside
+// record(), so the daemon's own Strip is untouched. Broadcast to every sink;
+// only the serial transport acts on commands, the rest no-op (see
+// daemon/output/sink.hpp).
 static void recordAndUpload(const Config& cfg, const Strip& strip,
                             std::vector<std::unique_ptr<Sink>>& sinks)
 {
-    if (!cfg.find("esp32"))
-        return;
-
     const struct { const char* path; uint8_t id; } slots[] = {
-        {"esp32.power_on", proto::SLOT_POWER_ON},
-        {"esp32.shutdown", proto::SLOT_SHUTDOWN},
+        {"power_on", proto::SLOT_POWER_ON},
+        {"shutdown", proto::SLOT_SHUTDOWN},
     };
 
     for (auto& slot : slots)
@@ -120,16 +118,13 @@ static void recordAndUpload(const Config& cfg, const Strip& strip,
 // ./led <config> --preview <slot>: record an esp32 slot and play it back to
 // the sinks exactly as the receiver will, so the viewer previews the real
 // recording — its one-shot intro, then the looping tail (or a held last frame)
-// — not just the live effect. `slotArg` is "power_on"/"shutdown" or a dotted
-// config path. Runs until interrupted; returns the process exit code.
+// — not just the live effect. `slot` is "power_on"/"shutdown" (any dotted
+// config path holding an effect block works). Runs until interrupted; returns
+// the process exit code.
 static int runPreview(const Config& cfg, Strip& strip,
                       std::vector<std::unique_ptr<Sink>>& sinks,
-                      const std::string& slotArg)
+                      const std::string& slot)
 {
-    std::string slot = slotArg;
-    if (slot.find('.') == std::string::npos)
-        slot = "esp32." + slot;
-
     rec::Recording r;
 
     if (!rec::record(cfg, strip, slot, r) || !r.valid())
@@ -167,12 +162,39 @@ static int runPreview(const Config& cfg, Strip& strip,
     return 0;
 }
 
+// The config's shape changed in Sep 2026 and there is no compatibility path
+// (one file on one box): the "esp32" block dissolved into top-level keys and
+// "sinks.serial" became "serial", with the power button moving into the
+// "power_switch" block. Say exactly what to rename rather than running on a
+// half-read file — a silently ignored "serial" block would mean a daemon that
+// opens the wrong port with the wrong baud.
+static bool checkRetiredKeys(const Config& cfg)
+{
+    const struct { const char* key; const char* now; } retired[] = {
+        {"esp32", "its keys moved to the top level: \"target\", "
+                  "\"host_timeout_ms\", \"power_on\", \"shutdown\""},
+        {"sinks", "\"sinks\": { \"serial\": { ... } } is now just \"serial\": "
+                  "{ ... }; power_button/power_button_command became "
+                  "\"power_switch\": { \"short_press\": \"systemctl poweroff\" }"},
+    };
+
+    bool ok = true;
+    for (auto& r : retired)
+        if (cfg.root().find(r.key))
+        {
+            fprintf(stderr, "config: \"%s\" is no longer a key — %s\n", r.key, r.now);
+            ok = false;
+        }
+
+    return ok;
+}
+
 static void usage(const char* prog)
 {
     fprintf(stderr,
             "Usage: %s <config>                       run the rules\n"
             "       %s <config> <effect>              run a single effect\n"
-            "       %s <config> --preview <slot>      replay a recorded esp32 slot\n"
+            "       %s <config> --preview <slot>      replay a recorded receiver slot\n"
             "                                         (power_on/shutdown) to the viewer\n"
             "       %s --list                         list available effects\n"
             "       %s --steam-status                 dump Steam download detection\n"
@@ -222,9 +244,10 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    // ./led <config> --preview <slot>: record an esp32 slot and play it back to
-    // the sinks, exactly as the receiver will — so the viewer previews the real
-    // recording (sequence, loop and hold included), not just the live effect
+    // ./led <config> --preview <slot>: record a receiver slot and play it back
+    // to the sinks, exactly as the receiver will — so the viewer previews the
+    // real recording (sequence, loop and hold included), not just the live
+    // effect
     bool previewMode = (argc == 4 && strcmp(argv[2], "--preview") == 0);
     bool fanStatus = (argc == 3 && strcmp(argv[2], "--fan-status") == 0);
 
@@ -241,6 +264,9 @@ int main(int argc, char** argv)
         fprintf(stderr, "failed to load config: %s\n", argv[1]);
         return 1;
     }
+
+    if (!checkRetiredKeys(cfg))
+        return 1;
 
     // the fan controller's half on this side (daemon/fans.hpp): the "fans"
     // block, validated up front like the rules — a bad header stops the daemon
@@ -409,7 +435,7 @@ int main(int argc, char** argv)
         return 1;
 
     // the boot animation is the receiver replaying its stored power-on
-    // recording (config's "esp32" block) at true power-on while the OS comes
+    // recording (config's "power_on" block) at true power-on while the OS comes
     // up — so the daemon goes straight to the rules instead of playing it here
 
     const double evalInterval = 0.5;

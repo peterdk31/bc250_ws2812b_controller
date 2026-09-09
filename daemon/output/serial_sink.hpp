@@ -26,7 +26,7 @@ class SerialSink : public Sink
 public:
     // Build from config, or return nullptr to run headless (no hardware).
     //
-    // The port comes from "sinks.serial.port", overridable for a single run by the
+    // The port comes from "serial.port", overridable for a single run by the
     // LED_PORT environment variable so a dev box with no hardware can drive
     // the on-screen viewer without editing config.json:
     //
@@ -39,30 +39,31 @@ public:
     // to reopen the device rather than silently running blind.
     static std::unique_ptr<SerialSink> fromConfig(const Config& cfg)
     {
-        std::string port = cfg.get("sinks.serial.port", "/dev/ttyUSB0");
+        std::string port = cfg.get("serial.port", "/dev/ttyUSB0");
 
         if (const char* env = getenv("LED_PORT"))
             port = env;
 
-        int baud = cfg.getInt("sinks.serial.baud", 921600);
+        int baud = cfg.getInt("serial.baud", 921600);
 
         // opt-in debug backchannel: when set, the receiver's in-RAM log
         // (firmware/main/dbglog.*) is drained over the return direction of the
         // link and forwarded to stderr, i.e. journalctl. Off = today's
         // behavior exactly (write-only, no reads, nothing polled).
-        bool debug = cfg.getBool("sinks.serial.debug_log", false);
+        bool debug = cfg.getBool("serial.debug_log", false);
 
         // opt-in power button: the receiver's power switch (firmware/main/
         // power_switch.cpp) sends a REQ_HOST_SHUTDOWN when its button gets a
         // short press while the machine is up — the ordinary PC power-button
-        // gesture, which only the OS can honor. With this set we honor it by
-        // running `command`. Deliberately off by default: a byte sequence on a
-        // serial port that powers the machine down deserves an explicit yes,
-        // and a box without the button wired should never grow the behavior
-        // just by updating the daemon.
-        bool button = cfg.getBool("sinks.serial.power_button", false);
-        std::string buttonCmd = cfg.get("sinks.serial.power_button_command",
-                                        "systemctl poweroff");
+        // gesture, which only the OS can honor. "power_switch.short_press" is
+        // the command we honor it with; null (or absent) means we don't.
+        // Deliberately off by default: a byte sequence on a serial port that
+        // powers the machine down deserves an explicit yes, and a box without
+        // the button wired should never grow the behavior just by updating
+        // the daemon.
+        const json::Value* sp = cfg.find("power_switch.short_press");
+        bool button = sp && sp->isString() && !sp->text.empty();
+        std::string buttonCmd = button ? sp->text : "";
 
         if (isHeadless(port))
         {
@@ -270,7 +271,7 @@ private:
             {
                 warnedOff_ = true;
                 fprintf(stderr, "serial: receiver asked for a graceful shutdown, "
-                                "but sinks.serial.power_button is off — ignoring\n");
+                                "but power_switch.short_press is null — ignoring\n");
             }
             return;
         }

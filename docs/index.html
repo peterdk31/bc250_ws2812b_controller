@@ -4,13 +4,14 @@
      A single-file Web Bluetooth client: connect to a receiver's GATT
      service, show the PSU state, and send the commands the firmware
      accepts, each prefixed with the shared token written at flash time
-     (make flash BLE=on BLE_TOKEN=...).
+     (the config's ble_remote.token, baked by make flash).
 
      The ring button IS the UI: its color is the PSU state, its label the
      one action a tap performs. Text below it only appears for errors.
 
      Any number of receivers: every board the chooser has ever granted is
-     listed in the dropdown above the ring (by its advertised BLE_NAME), and
+     listed in the dropdown above the ring (by its advertised name — the
+     config's ble_remote.name), and
      the page holds ONE live connection — the selected board's. Switching
      drops that connection and runs the reconnect dance on the new pick.
      Tokens are kept per board (each is flashed with its own); a board with
@@ -159,7 +160,7 @@
 </div>
 
 <div id="tokenbox">
-  <p id="tokenfor">Receiver token (BLE_TOKEN)</p>
+  <p id="tokenfor">Receiver token</p>
   <input id="token" type="password" autocomplete="off"
          placeholder="token" maxlength="16">
   <div class="row">
@@ -177,7 +178,7 @@ const STAT = 'a5f20003-8f11-4e0e-9b3a-0bc250e0c001';
 const OP_ON = 0x01, OP_SHUTDOWN = 0x02, OP_HARD_OFF = 0x03;
 const TOKEN_LEN = 16;
 const STATE_NAMES = ['off', 'booting', 'on'];
-const DEFAULT_NAME = 'BC250'; // what the firmware advertises without a BLE_NAME
+const DEFAULT_NAME = 'BC250'; // what the firmware advertises without a ble_remote.name
 const ADD = '+';              // picker value of the "add a receiver" entry
 
 const $ = id => document.getElementById(id);
@@ -203,7 +204,7 @@ const store = {
 // Every receiver the chooser has ever granted, by BluetoothDevice.id:
 // { name, token }. The name caches what the board advertised so the list
 // renders before (or without) getDevices(); the token is per board because
-// each is flashed with its own BLE_TOKEN — a board without one of its own
+// each is flashed with its own ble_remote.token — a board without one of its own
 // uses the shared 'ble-token', the first token ever entered on this phone.
 const receivers = (() => {
   try { return JSON.parse(store.get('ble-receivers')) || {}; } catch { return {}; }
@@ -297,7 +298,7 @@ function render() {
   const box = $('tokenbox');
   box.classList.toggle('show', editToken || !token());
   $('tokenfor').textContent = device
-    ? `Token for ${label(device.id)} (BLE_TOKEN)` : 'Receiver token (BLE_TOKEN)';
+    ? `Token for ${label(device.id)}` : 'Receiver token';
   $('canceltoken').hidden = !token();
   if (!token()) {
     powerBtn.disabled = true;

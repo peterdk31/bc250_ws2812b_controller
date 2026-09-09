@@ -25,103 +25,66 @@ PREFIX = /usr/local
 # falls back to the default below.
 CONFIG ?= $(firstword $(wildcard /etc/led-controller/config.json config.json))
 CONFIG_GET = ./led --config-get $(CONFIG)
-BAUD ?= $(or $(shell $(CONFIG_GET) sinks.serial.baud 2>/dev/null),921600)
-TIMEOUT_MS ?= $(or $(shell $(CONFIG_GET) esp32.host_timeout_ms 2>/dev/null),5000)
+BAUD ?= $(or $(shell $(CONFIG_GET) serial.baud 2>/dev/null),921600)
+TIMEOUT_MS ?= $(or $(shell $(CONFIG_GET) host_timeout_ms 2>/dev/null),5000)
 STRIP_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),4)
 
-# ATX power switch (README "Power switch"): the wiring lives in the receiver's
-# small `pwrcfg` flash partition, not in the firmware image, so it's chosen at
-# flash time and survives reflashes. PWR=on writes it alongside `flash` /
-# `flash-source` (PWR=off writes it disabled); unset leaves whatever is on the
-# chip. `make flash-pwr` writes only that partition — change pins in seconds
-# without touching the app. The defaults are this project's BC-250 hookup on
-# an ESP32-C3: button across GPIO1/21, TPMS1 sense on GPIO2, PS_ON# on GPIO3.
-# (GPIO21 is the C3's U0TXD — free while the host link is USB, but it's a
-# J5-UART candidate pin; move the button to a real GND if that link lands.)
-# Sense is GPIO2 — the pin this hookup is actually wired to, and proven on the
-# hardware. It briefly defaulted to GPIO0 on the theory that GPIO2 being a C3
-# strapping pin was worth avoiding; that cost a machine an evening (a config
-# flashed with the wire still on GPIO2 reads a dead pin, so the boot timeout cut
-# the PSU 10 s into every boot), and the theory was thin anyway: per Espressif
-# the C3's boot mode is GPIO9/8 and GPIO2 "does not determine" it — the only
-# GPIO2 caveat is a pull-up recommendation for glitch immunity. GPIO4 is the
-# strip's DIN. On a plain ESP32 strap pins DO select boot mode, so the choice
-# matters more there; that chip needs different pins anyway — GPIO1/3 are its
-# UART0, 0/2 strapping.
-# PWR_LED blinks the board's own LED while the button reads pressed (wiring
-# feedback; a blink shows on active-high and active-low LEDs alike) — GPIO8
-# is the plain LED on common C3 dev boards, -1 = none.
-PWR ?=
-PWR_PS_ON ?= 3
-PWR_BUTTON ?= 1
-PWR_BUTTON_GND ?= 21
-PWR_SENSE ?= 2
-PWR_LED ?= 8
-PWR_HOLD ?= 2
-PWR_BOOT_TIMEOUT ?= 10
-PWR_SENSE_LOW ?= 800
-PWR_SENSE_HIGH ?= 2000
+# Receiver features configured at flash time — the ATX power switch, the PWM
+# fans, the BLE power remote — each live in a small flash partition of their
+# own (pwrcfg / fancfg / blecfg), not in the firmware image, so the prebuilt
+# image fits every board and a setting changes in seconds without a toolchain.
+# Their settings are blocks of the daemon config (`power_switch`, `fans`,
+# `ble_remote` — README, each feature's section), the one place the box is
+# described; `flash` / `flash-source` encode all three from it, and
+# `flash-pwr` / `flash-fan` / `flash-ble` rewrite one partition. No PWR_* /
+# FAN_* / BLE_* variables any more: edit the config, flash.
+#
+# One asymmetry, on purpose. A config with no `fans` or `ble_remote` block
+# writes that feature OFF (harmless: a floating PWM fan runs full, a phone
+# can't find the board). A config with no `power_switch` block leaves the
+# chip's power-switch settings ALONE: writing that feature off releases PS_ON#
+# once the receiver reboots — it cuts the machine's power — so only an
+# explicit "enabled": false may do it (pwrcfg.py exits 3 for "no block").
 
-# PWM fans (README "Fans"): the settings live in the daemon config's "fans"
-# block — the one place the fans are described — and `flash` / `flash-source`
-# / `flash-fan` bake its standalone part (which headers are enabled, each one's
-# fallback duty and boost, the boost length) into the receiver's `fancfg`
-# flash partition, the way strip.pin already comes from the config. No FAN_*
-# variables: edit the block, flash. A config with no enabled header writes the
-# feature off. The header → GPIO map is the carrier board's (tools/pincheck.py
-# FAN_PINS; "pins" in the block overrides it for a hand-wired build). The
-# enabled headers' pins feed the power switch's collision check below.
+# The fans' standalone part (which headers are enabled, each one's fallback
+# duty and boost, the boost length) is what fancfg holds; curves are the
+# daemon's. The header → GPIO map is the carrier board's (tools/pincheck.py
+# FAN_PINS; "pins" in the block overrides it for a hand-wired build). Each
+# encoder's --list-pins feeds the other's collision check below.
 FAN_PINS_USED = $(if $(CONFIG),$(shell python3 tools/fancfg.py --config "$(CONFIG)" --target $(TARGET) --list-pins 2>/dev/null))
 
-# BLE power remote (README "BLE remote"): while the machine is off the
-# receiver advertises a small Bluetooth LE service, so a phone (the Web
-# Bluetooth page in docs/) can press the power button remotely. Same scheme
-# as the power switch: the config lives in the receiver's `blecfg` flash
-# partition, written at flash time — BLE=on writes it alongside `flash` /
-# `flash-source` (BLE=off writes it disabled); unset leaves whatever is on
-# the chip. `make flash-ble` writes only that partition. BLE=on requires
-# BLE_TOKEN, the shared secret a phone must present with every command (8-16
-# ASCII chars, e.g. from `openssl rand -hex 6` — and note it lands in your
-# shell history); BLE_NAME is the advertised device name (public).
-BLE ?=
-BLE_TOKEN ?=
-BLE_NAME ?= BC250
+
+PWR_PINS_USED = $(if $(CONFIG),$(shell python3 tools/pwrcfg.py --config "$(CONFIG)" --target $(TARGET) --list-pins 2>/dev/null))
 
 # cross-feature pin collision feeds: each encoder is told which pins the
-# *other* feature claims. Known-true (a hard error) when that feature is being
-# written "on" in the same run; skipped entirely on "off" (its pins are being
-# freed); otherwise a soft warning, since what's actually on the chip is
-# unknowable from here and these are just this Makefile's defaults.
+# *other* feature claims, as read from the same config. In `flash` and
+# `flash-source` both partitions are written from that config in one run, so
+# the pins are known-true and a collision is a hard error; from `flash-pwr` /
+# `flash-fan` alone what is actually on the chip's other partition is
+# unknowable from here, so it is a warning.
 comma := ,
-FAN_AVOID = $(if $(filter off,$(PWR)),,\
-	$(if $(filter -1,$(PWR_PS_ON)),,--avoid "$(PWR_PS_ON):--ps-on (power switch)") \
-	$(if $(filter -1,$(PWR_BUTTON)),,--avoid "$(PWR_BUTTON):--button (power switch)") \
-	$(if $(filter -1,$(PWR_BUTTON_GND)),,--avoid "$(PWR_BUTTON_GND):--button-gnd (power switch)") \
-	$(if $(filter -1,$(PWR_SENSE)),,--avoid "$(PWR_SENSE):--sense (power switch)") \
-	$(if $(filter -1,$(PWR_LED)),,--avoid "$(PWR_LED):--led (power switch)") \
-	$(if $(filter on,$(PWR)),--avoid-hard))
+FAN_AVOID = $(foreach p,$(subst $(comma), ,$(PWR_PINS_USED)),--avoid "$(p):claimed by the power switch (the config's power_switch block)") \
+	$(if $(KNOWN),--avoid-hard)
 PWR_AVOID = $(foreach p,$(subst $(comma), ,$(FAN_PINS_USED)),--avoid "$(p):a fan header (the config's fans block)") \
-	$(if $(FANS_KNOWN),--avoid-hard)
-# `flash` and `flash-source` always write fancfg from the same config, so
-# there the fan pins are known-true and a collision is a hard error
-flash flash-source: FANS_KNOWN := 1
+	$(if $(KNOWN),--avoid-hard)
+flash flash-source: KNOWN := 1
 
 # PORT: config (or a command-line override) is authoritative; detection only
 # fills a gap. Resolution order: command-line override > configured
-# sinks.serial.port > first likely device node > default. Config wins over
+# serial.port > first likely device node > default. Config wins over
 # detection on purpose — a port pinned in config (e.g. a C3 on /dev/ttyACM1)
 # must not be overridden just because another device enumerated first. The udev
 # rule pins /dev/led-controller, so it's preferred by the glob when present.
 DETECTED_PORT = $(firstword $(wildcard /dev/led-controller /dev/ttyACM* /dev/ttyUSB*))
-PORT ?= $(or $(shell $(CONFIG_GET) sinks.serial.port 2>/dev/null),$(DETECTED_PORT),/dev/ttyUSB0)
+PORT ?= $(or $(shell $(CONFIG_GET) serial.port 2>/dev/null),$(DETECTED_PORT),/dev/ttyUSB0)
 
 # TARGET: which ESP chip to build for. An ESP32-C3 is RISC-V, not Xtensa, so the
-# firmware must be built for the right arch. From esp32.target in config, else
+# firmware must be built for the right arch. From `target` in config, else
 # the C3 (the board this project ships with). A command-line override always
 # wins, e.g. `make flash TARGET=esp32`. esptool auto-detects the connected chip
 # when flashing, but the *build* needs the target named explicitly.
 VALID_TARGETS = esp32 esp32c3 esp32s2 esp32s3 esp32c6 esp32h2
-TARGET ?= $(or $(filter $(VALID_TARGETS),$(shell $(CONFIG_GET) esp32.target 2>/dev/null)),esp32c3)
+TARGET ?= $(or $(filter $(VALID_TARGETS),$(shell $(CONFIG_GET) target 2>/dev/null)),esp32c3)
 
 # ESP-IDF build strategy. The firmware needs the ~2 GB ESP-IDF toolchain, which
 # we DON'T want permanently installed on the host. So by default the build runs
@@ -322,26 +285,24 @@ open(p + ".post", "wb").write(d[e:])' "$$img" $(NVS_OFF) $(NVS_SIZE) || exit 1; 
 
 PWRCFG_OFF = $(call part_off,pwrcfg)
 PWRCFG_BIN = firmware/dist/pwrcfg.bin
-# shell snippet (companion to ESPTOOL_RESOLVE): when PWR is set, encode the
-# PWR_* vars into $(PWRCFG_BIN) and set $$pwr to the extra offset+file pair for
-# esptool write_flash; empty otherwise. pwrcfg.py refuses wiring the firmware
-# would silently drop (bad pin for TARGET, non-ADC sense, collision with the
-# strip.pin data pin, ...) — the firmware has no console, so this is the only
-# place a mistake can be caught. Absolute path — flash-source runs esptool
-# from the build dir.
+# shell snippet (companion to ESPTOOL_RESOLVE): encode the config's
+# "power_switch" block into $(PWRCFG_BIN) and set $$pwr to the extra
+# offset+file pair for esptool write_flash. No block (pwrcfg.py exit 3) or no
+# config at all = $$pwr stays empty and the chip's settings are left alone (see
+# the note above on why this feature, alone, is never written off implicitly).
+# pwrcfg.py refuses wiring the firmware would silently drop (bad pin for
+# TARGET, non-ADC sense, collision with the strip.pin data pin, ...) — the
+# firmware has no console, so this is the only place a mistake can be caught.
+# Absolute path — flash-source runs esptool from the build dir.
 PWRCFG_RESOLVE = pwr=""; \
-	if [ -n "$(PWR)" ]; then \
-		case "$(PWR)" in on|off) ;; *) echo 'PWR must be "on" or "off" (see README, Power switch)'; exit 1;; esac; \
+	if [ -n "$(CONFIG)" ]; then \
 		[ -n "$(PWRCFG_OFF)" ] || { echo "no pwrcfg offset found in firmware/partitions.csv"; exit 1; }; \
 		mkdir -p firmware/dist; \
-		python3 tools/pwrcfg.py --out "$(PWRCFG_BIN)" $(if $(filter off,$(PWR)),--disabled) \
+		python3 tools/pwrcfg.py --out "$(PWRCFG_BIN)" --config "$(CONFIG)" \
 			--target $(TARGET) --strip-pin $(STRIP_PIN) \
-			--ps-on $(PWR_PS_ON) --button $(PWR_BUTTON) --button-gnd $(PWR_BUTTON_GND) \
-			--sense $(PWR_SENSE) --led $(PWR_LED) \
-			--hold $(PWR_HOLD) --boot-timeout $(PWR_BOOT_TIMEOUT) \
-			--sense-low $(PWR_SENSE_LOW) --sense-high $(PWR_SENSE_HIGH) \
-			$(PWR_AVOID) || exit 1; \
-		pwr="$(PWRCFG_OFF) $(CURDIR)/$(PWRCFG_BIN)"; \
+			$(PWR_AVOID); rc=$$?; \
+		if [ $$rc -eq 0 ]; then pwr="$(PWRCFG_OFF) $(CURDIR)/$(PWRCFG_BIN)"; \
+		elif [ $$rc -ne 3 ]; then exit 1; fi; \
 	fi
 
 FANCFG_OFF = $(call part_off,fancfg)
@@ -368,18 +329,16 @@ FANCFG_RESOLVE = fan=""; \
 
 BLECFG_OFF = $(call part_off,blecfg)
 BLECFG_BIN = firmware/dist/blecfg.bin
-# companion to PWRCFG_RESOLVE for the BLE power remote: when BLE is set,
-# encode BLE_TOKEN/BLE_NAME into $(BLECFG_BIN) and set $$ble to the extra
-# offset+file pair for esptool write_flash; empty otherwise. blecfg.py is
-# where a missing/weak token is caught — the firmware would happily serve
-# whatever secret it is given.
+# companion to PWRCFG_RESOLVE for the BLE power remote: encode the config's
+# "ble_remote" block into $(BLECFG_BIN) and set $$ble to the extra offset+file
+# pair for esptool write_flash. Always, when there is a config to read (no
+# block = written off); blecfg.py is where a missing/weak token is caught —
+# the firmware would happily serve whatever secret it is given.
 BLECFG_RESOLVE = ble=""; \
-	if [ -n "$(BLE)" ]; then \
-		case "$(BLE)" in on|off) ;; *) echo 'BLE must be "on" or "off" (see README, BLE remote)'; exit 1;; esac; \
+	if [ -n "$(CONFIG)" ]; then \
 		[ -n "$(BLECFG_OFF)" ] || { echo "no blecfg offset found in firmware/partitions.csv"; exit 1; }; \
 		mkdir -p firmware/dist; \
-		python3 tools/blecfg.py --out "$(BLECFG_BIN)" $(if $(filter off,$(BLE)),--disabled) \
-			--token "$(BLE_TOKEN)" --name "$(BLE_NAME)" || exit 1; \
+		python3 tools/blecfg.py --out "$(BLECFG_BIN)" --config "$(CONFIG)" || exit 1; \
 		ble="$(BLECFG_OFF) $(CURDIR)/$(BLECFG_BIN)"; \
 	fi
 
@@ -465,16 +424,17 @@ flash-source: receiver
 	$(PORT_RESTORE); \
 	exit $$rc
 
-# write only the 4 KB pwrcfg partition: enable, re-pin or disable the power
-# switch without reflashing the firmware (a couple of seconds). Requires
-# PWR=on or PWR=off. Note esptool still resets the chip — the reflashing
-# caveat in the README (Power switch) applies here too.
+# write only the 4 KB pwrcfg partition — the config's "power_switch" block,
+# after an edit — without reflashing the firmware (a couple of seconds). Note
+# esptool still resets the chip — the reflashing caveat in the README (Power
+# switch) applies here too.
 flash-pwr:
 	-@$(MAKE) --no-print-directory serial-perms
-	@[ -n "$(PWR)" ] || { echo 'set PWR=on (write the wiring, PWR_* vars override defaults) or PWR=off (disable)'; exit 1; }; \
+	@[ -n "$(CONFIG)" ] || { echo 'no config found — set CONFIG=path/to/config.json (its "power_switch" block is what gets written)'; exit 1; }; \
 	$(ESPTOOL_RESOLVE); $(PWRCFG_RESOLVE); \
+	[ -n "$$pwr" ] || { echo 'nothing to write: the config has no "power_switch" block'; exit 1; }; \
 	$(PORT_FREE); \
-	echo "writing power-switch config ($(PWR)) via $$tool on $(PORT)"; \
+	echo "writing power-switch config from $(CONFIG) via $$tool on $(PORT)"; \
 	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash $$pwr; \
 	rc=$$?; \
 	$(PORT_RESTORE); \
@@ -498,18 +458,17 @@ flash-fan:
 	$(PORT_RESTORE); \
 	exit $$rc
 
-# write only the 4 KB blecfg partition: enable, re-token, rename or disable
-# the BLE power remote without reflashing the firmware. Requires BLE=on (with
-# BLE_TOKEN) or BLE=off. Like flash-fan, the chip must already run a firmware
-# whose partition table has the blecfg entry — against an older layout the
-# write lands in the (unused) factory tail and the firmware never sees it;
-# the debug log says so at boot.
+# write only the 4 KB blecfg partition — the config's "ble_remote" block —
+# without reflashing the firmware. Like flash-fan, the chip must already run a
+# firmware whose partition table has the blecfg entry — against an older
+# layout the write lands in the (unused) factory tail and the firmware never
+# sees it; the debug log says so at boot.
 flash-ble:
 	-@$(MAKE) --no-print-directory serial-perms
-	@[ -n "$(BLE)" ] || { echo 'set BLE=on (BLE_TOKEN required, BLE_NAME optional) or BLE=off (disable)'; exit 1; }; \
+	@[ -n "$(CONFIG)" ] || { echo 'no config found — set CONFIG=path/to/config.json (its "ble_remote" block is what gets written)'; exit 1; }; \
 	$(ESPTOOL_RESOLVE); $(BLECFG_RESOLVE); \
 	$(PORT_FREE); \
-	echo "writing BLE remote config ($(BLE)) via $$tool on $(PORT)"; \
+	echo "writing BLE remote config from $(CONFIG) via $$tool on $(PORT)"; \
 	$$tool --chip $(TARGET) --port "$(PORT)" --baud $(BAUD) write_flash $$ble; \
 	rc=$$?; \
 	$(PORT_RESTORE); \

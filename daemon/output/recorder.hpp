@@ -26,7 +26,7 @@
 namespace rec
 {
 
-// Render `slot` (an "esp32.*" config block) into `out`, using `canvas` for the
+// Render `slot` (the "power_on" / "shutdown" config block) into `out`, using `canvas` for the
 // same brightness/gamma/white-balance correction the live strip applies.
 // `canvas` is taken by value so recording never disturbs the daemon's own Strip.
 //

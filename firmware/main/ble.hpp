@@ -18,8 +18,9 @@
 // is the knob to reach for before this policy is.
 //
 // Every command must carry a shared-secret token, chosen at flash time: the
-// config lives in the small `blecfg` flash partition (`make flash BLE=on
-// BLE_TOKEN=...` / `make flash-ble`, tools/blecfg.py encodes). With the
+// config lives in the small `blecfg` flash partition (the daemon config's
+// "ble_remote" block, written by `make flash` / `make flash-ble`;
+// tools/blecfg.py encodes). With the
 // partition erased the feature is off and the BLE stack is never initialized
 // — a board that hasn't opted in spends no RAM on this.
 //

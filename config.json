@@ -1,67 +1,63 @@
 {
-    "sinks": {
-        "serial": {
-            "port": "/dev/led-controller",
-            "baud": 921600,
-	    "debug_log": false,
-	    "power_button": false,
-	    "power_button_command": "systemctl poweroff"
-        }
+    "target": "esp32c3",
+    "serial": {
+        "port": "/dev/led-controller",
+        "baud": 921600,
+        "debug_log": false
     },
-    "strip": {
-        "leds": 33,
-        "pin": 4,
-        "reverse": false,
-        "brightness": 1.0,
-        "gamma": "2.2",
-        "white_balance": "ffb0f0"
-    },
-    "crossfade_ms": 600,
-    "frame_ms": 16,
-    "sensors": [
-        "k10temp:Tctl",
-        "nct6686:CPU",
-        "nct6687:CPU",
-        "nct6686:AMD TSI Addr 98h",
-        "nct6683:AMD TSI Addr 98h",
-        "nct6686"
-    ],
-    "esp32": {
-        "target": "esp32c3",
-        "host_timeout_ms": 5000,
-        "power_on": {
-            "sequence": [
-                {
-                    "effect": "button_on",
-                    "record_seconds": 4.5,
-                    "settings": {
-                        "origin": 0.5,
-                        "palette": "ff0000,ff8000,ffff00,00c000,0060ff,8000ff",
-                        "spread_seconds": 2.5,
-                        "period_seconds": 4,
-                        "min_brightness": 0.05
-                    }
-                },
-                {
-                    "effect": "breathe",
-                    "record_seconds": 5,
-                    "loop": true,
-                    "settings": {
-                        "palette": "ffffff",
-                        "period_seconds": 5,
-                        "min_brightness": 0.05
-                    }
+    "host_timeout_ms": 5000,
+    "power_on": {
+        "sequence": [
+            {
+                "effect": "button_on",
+                "record_seconds": 4.5,
+                "settings": {
+                    "origin": 0.5,
+                    "palette": "ff0000,ff8000,ffff00,00c000,0060ff,8000ff",
+                    "spread_seconds": 2.5,
+                    "period_seconds": 4,
+                    "min_brightness": 0.05
                 }
-            ]
-        },
-        "shutdown": {
-            "effect": "button_off",
-            "settings": {
-                "origin": 0.5,
-                "palette": "ff0000,ff8000,ffff00,00c000,0060ff,8000ff",
-                "duration_seconds": 1.4
+            },
+            {
+                "effect": "breathe",
+                "record_seconds": 5,
+                "loop": true,
+                "settings": {
+                    "palette": "ffffff",
+                    "period_seconds": 5,
+                    "min_brightness": 0.05
+                }
             }
+        ]
+    },
+    "shutdown": {
+        "effect": "button_off",
+        "settings": {
+            "origin": 0.5,
+            "palette": "ff0000,ff8000,ffff00,00c000,0060ff,8000ff",
+            "duration_seconds": 1.4
         }
+    },
+    "power_switch": {
+        "enabled": false,
+        "hold_seconds": 2,
+        "boot_timeout_seconds": 10,
+        "sense_low_mv": 800,
+        "sense_high_mv": 2000,
+        "pins": {
+            "ps_on": 3,
+            "button": 1,
+            "button_gnd": null,
+            "sense": 2,
+            "led": 8
+        },
+        "short_press": null
+    },
+    "ble_remote": {
+        "enabled": false,
+        "name": "BC250",
+        "token": ""
     },
     "fans": {
         "hysteresis": 3,
@@ -100,6 +96,24 @@
             "fallback": 60
         }
     },
+    "strip": {
+        "leds": 33,
+        "pin": 4,
+        "reverse": false,
+        "brightness": 1.0,
+        "gamma": "2.2",
+        "white_balance": "ffb0f0"
+    },
+    "crossfade_ms": 600,
+    "frame_ms": 16,
+    "sensors": [
+        "k10temp:Tctl",
+        "nct6686:CPU",
+        "nct6687:CPU",
+        "nct6686:AMD TSI Addr 98h",
+        "nct6683:AMD TSI Addr 98h",
+        "nct6686"
+    ],
     "rules": [
         {
             "if": "temp>85",
@@ -122,7 +136,7 @@
                 "palette": "6078ff",
                 "base_color": "000014",
                 "blobs": 3,
-                "width": 0.10
+                "width": 0.1
             }
         },
         {
@@ -238,7 +252,7 @@
                             "palette": "6078ff",
                             "base_color": "000014",
                             "blobs": 3,
-                            "width": 0.10
+                            "width": 0.1
                         }
                     },
                     {
