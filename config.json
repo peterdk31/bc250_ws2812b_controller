@@ -2,7 +2,10 @@
     "sinks": {
         "serial": {
             "port": "/dev/led-controller",
-            "baud": 921600
+            "baud": 921600,
+	    "debug_log": false,
+	    "power_button": false,
+	    "power_button_command": "systemctl poweroff"
         }
     },
     "strip": {
