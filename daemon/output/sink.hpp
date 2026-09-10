@@ -32,4 +32,15 @@ struct Sink
         (void)len;
         return true;
     }
+
+    // the return direction: a message the receiver sent (a msg frame, see
+    // common/protocol.hpp MSG_*) — the BLE dashboard's phone watching or
+    // editing the fans. Pops one queued message into kind/payload and returns
+    // true; false when there is none. Only the serial transport ever has any.
+    virtual bool takeMessage(uint8_t& kind, std::vector<uint8_t>& payload)
+    {
+        (void)kind;
+        (void)payload;
+        return false;
+    }
 };

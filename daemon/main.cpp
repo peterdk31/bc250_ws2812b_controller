@@ -2,6 +2,7 @@
 #include <string.h>
 #include <time.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <thread>
 #include <chrono>
 #include <vector>
@@ -20,6 +21,46 @@
 // play the shutdown effect before we exit
 static volatile sig_atomic_t g_stop = 0;
 static void onStop(int) { g_stop = 1; }
+
+// SIGHUP (`systemctl reload`): re-read the config now, without waiting for
+// the file watch below to notice a change
+static volatile sig_atomic_t g_reload = 0;
+static void onReload(int) { g_reload = 1; }
+
+// the config file's modification time as seconds (0 when it can't be
+// stat'ed), for the live-reload watch in the rules loop
+static double fileMtime(const char* path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return 0;
+    return st.st_mtim.tv_sec + st.st_mtim.tv_nsec / 1e9;
+}
+
+// one top-level config value, or a Null for an absent key — so two configs
+// can be compared block by block with json::equal
+static const json::Value& topLevel(const Config& cfg, const char* key)
+{
+    static const json::Value none;
+    const json::Value* v = cfg.root().find(key);
+    return v ? *v : none;
+}
+
+// are two configs identical apart from their "fans" block? A reload confined
+// to the fans (a curve edited by hand — the common case now that the
+// dashboard writes the same file) must not disturb the running effect.
+static bool sameExceptFans(const Config& a, const Config& b)
+{
+    json::Value x = a.root(), y = b.root();
+    for (json::Value* v : {&x, &y})
+        for (auto it = v->members.begin(); it != v->members.end(); ++it)
+            if (it->first == "fans")
+            {
+                v->members.erase(it);
+                break;
+            }
+    return json::equal(x, y);
+}
 
 static double now_seconds()
 {
@@ -273,7 +314,7 @@ int main(int argc, char** argv)
     // here rather than running the fans on a half-read config
     fans::Controller fanCtl;
 
-    if (!fanCtl.load(cfg))
+    if (!fanCtl.load(cfg, argv[1]))
         return 1;
 
     // ./led <config> --fan-status: what each header resolves to right now
@@ -285,6 +326,7 @@ int main(int argc, char** argv)
 
     signal(SIGTERM, onStop);
     signal(SIGINT, onStop);
+    signal(SIGHUP, onReload);
 
     Strip strip = Strip::fromConfig(cfg);
 
@@ -309,15 +351,35 @@ int main(int argc, char** argv)
     // standalone settings
     recordAndUpload(cfg, strip, sinks);
     fanCtl.pushStandalone(sinks);
+    fanCtl.pushConfig(sinks); // for the BLE dashboard (daemon/fans.hpp)
 
     // the fan curves run on their own 0.5 s cadence in both loops below; a
-    // no-op when no header is enabled
+    // no-op when no header is enabled. The dashboard's messages back from the
+    // receiver (a phone watching, a curve edit) are taken every frame — an
+    // atomic peek when there are none, which is nearly always.
     const double fanInterval = 0.5;
     double lastFanTick = -1e9;
+
+    // live reload (README "Configuration"): the file's mtime as loaded, and as
+    // last seen by the watch in the rules loop. A dashboard edit the fan
+    // controller writes itself moves the mtime too; that write is already
+    // live, so it is taken as seen rather than reloaded.
+    const char* cfgPath = argv[1];
+    double cfgMtime = fileMtime(cfgPath);
+    double cfgSeen = cfgMtime;
+    int cfgStable = 0;
 
     auto fansTick = [&]()
     {
         double now = now_seconds();
+
+        uint8_t kind;
+        std::vector<uint8_t> payload;
+        for (auto& s : sinks)
+            while (s->takeMessage(kind, payload))
+                fanCtl.onMessage(kind, payload, now, sinks);
+        if (fanCtl.takeWrote())
+            cfgMtime = cfgSeen = fileMtime(cfgPath);
 
         if (now - lastFanTick >= fanInterval)
         {
@@ -329,6 +391,7 @@ int main(int argc, char** argv)
     std::unique_ptr<Effect> effect;
     std::string active;
     const json::Value* activeSettings = nullptr;
+    int activeRule = -1; // index into rules of the rule that started it (rules mode)
     double effectStart = 0;
 
     // crossfading now lives on the receiver (and the viewer): every frame
@@ -336,7 +399,7 @@ int main(int argc, char** argv)
     // they dissolve whenever the id changes (see common/fade.hpp). The daemon
     // just stamps those — it composites nothing itself. The same duration
     // drives the live→shutdown dissolve (sent with CMD_SHUTDOWN).
-    const uint16_t crossfadeMs = (uint16_t)cfg.getInt("crossfade_ms", 600);
+    uint16_t crossfadeMs = (uint16_t)cfg.getInt("crossfade_ms", 600);
     strip.setTransitionMs(crossfadeMs);
 
     auto activate = [&](const std::string& name,
@@ -444,15 +507,114 @@ int main(int argc, char** argv)
     double lastSwitch = -1e9;
     const Rule* want = nullptr;
 
+    // re-read the config and swap it in under the running loop. Everything is
+    // parsed and validated into fresh objects first, so a broken file is
+    // reported and the running config kept — a save with a typo costs a
+    // journal line, not a crash loop. The receiver-side blocks (power_switch,
+    // fans' pins, ble_remote) are flash-time and simply aren't consulted here.
+    auto reload = [&](const char* why)
+    {
+        fprintf(stderr, "config: %s — reloading %s\n", why, cfgPath);
+
+        Config fresh;
+        fans::Controller freshFans;
+        std::vector<Rule> freshRules;
+        if (!fresh.load(cfgPath) || !checkRetiredKeys(fresh) ||
+            !freshFans.load(fresh, cfgPath) || !loadRules(fresh, freshRules))
+        {
+            fprintf(stderr, "config: reload failed — keeping the running config; "
+                            "fix the file and save again\n");
+            return;
+        }
+
+        // the link is opened once; its settings need a restart to take
+        if (!json::equal(topLevel(cfg, "serial"), topLevel(fresh, "serial")))
+            fprintf(stderr, "config: \"serial\" changed — that needs a restart\n");
+
+        bool recordings = !json::equal(topLevel(cfg, "power_on"), topLevel(fresh, "power_on")) ||
+                          !json::equal(topLevel(cfg, "shutdown"), topLevel(fresh, "shutdown")) ||
+                          !json::equal(topLevel(cfg, "strip"), topLevel(fresh, "strip"));
+
+        bool fansOnly = sameExceptFans(cfg, fresh);
+        int wantIdx = want ? (int)(want - rules.data()) : -1;
+
+        // the rules' settings pointers target values inside the tree's
+        // vectors, whose storage a move carries over intact — so moving the
+        // fresh tree into cfg keeps them valid
+        cfg = std::move(fresh);
+        rules = std::move(freshRules);
+        fanCtl = std::move(freshFans);
+
+        fanCtl.pushStandalone(sinks);
+        fanCtl.pushConfig(sinks);
+
+        if (fansOnly)
+        {
+            // same rules, same everything else: the running effect stays, and
+            // the two pointers into the old tree are re-aimed at their
+            // counterparts (the rules are identical, so indices carry over)
+            want = wantIdx >= 0 ? &rules[wantIdx] : nullptr;
+            activeSettings = activeRule >= 0 ? rules[activeRule].settings : nullptr;
+            fprintf(stderr, "config: reloaded (fans only — effect kept)\n");
+            return;
+        }
+
+        strip = Strip::fromConfig(cfg);
+        crossfadeMs = (uint16_t)cfg.getInt("crossfade_ms", 600);
+        strip.setTransitionMs(crossfadeMs);
+
+        // the boot/shutdown recordings are re-rendered and re-sent only when
+        // what they depend on changed (the receiver skips an unchanged upload
+        // anyway, but the ~second of transmit would still stall the strip)
+        if (recordings)
+            recordAndUpload(cfg, strip, sinks);
+
+        // the effect was built from the old tree: drop it and let the next
+        // evaluation pick and start the matching rule afresh (a crossfade on
+        // the receiver, like any other switch), with no hold in the way
+        effect.reset();
+        active.clear();
+        activeSettings = nullptr;
+        activeRule = -1;
+        want = nullptr;
+        lastSwitch = -1e9;
+
+        fprintf(stderr, "config: reloaded\n");
+    };
+
     while (!g_stop)
     {
         double now = now_seconds();
 
         fansTick();
 
+        if (g_reload)
+        {
+            g_reload = 0;
+            reload("SIGHUP");
+            cfgMtime = cfgSeen = fileMtime(cfgPath);
+        }
+
         if (now - lastEval >= evalInterval)
         {
             lastEval = now;
+
+            // the file watch: a changed mtime that has held still for two
+            // ticks (an editor may save in steps) triggers a reload. One stat
+            // per tick, whichever way it goes; a failed reload isn't retried
+            // until the file changes again.
+            double mt = fileMtime(cfgPath);
+            if (mt != cfgMtime && mt == cfgSeen && ++cfgStable >= 2)
+            {
+                reload("file changed");
+                cfgMtime = cfgSeen = fileMtime(cfgPath);
+                cfgStable = 0;
+            }
+            else if (mt != cfgSeen)
+            {
+                cfgSeen = mt;
+                cfgStable = 0;
+            }
 
             for (auto& r : rules)
             {
@@ -475,6 +637,7 @@ int main(int argc, char** argv)
             if (!activate(want->effect, want->settings))
                 return 1;
 
+            activeRule = (int)(want - rules.data());
             lastSwitch = now;
         }
 

@@ -292,6 +292,17 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
         // the daemon's fan curves' current duties, same hand-off
         fan::setLive(payload, len);
     }
+    else if (cmd == proto::CMD_FAN_CONFIG)
+    {
+        // the daemon's fan config as it runs it, held for the BLE dashboard
+        // (fan.hpp "the dashboard's view"); this side never interprets it
+        fan::setHostConfig(payload, len);
+    }
+    else if (cmd == proto::CMD_FAN_TELEM)
+    {
+        // and what its curves are reading right now, same
+        fan::setHostTelemetry(payload, len);
+    }
 }
 
 // the host endpoint: a proto::FrameHandler that drives the real strip. The
@@ -490,8 +501,9 @@ static void loop()
 
     // the receiver→host request channel (hostreq.hpp). This task owns link
     // writes, so an outstanding request — the power switch asking the host to
-    // shut itself down — is transmitted from here and nowhere else. A no-op
-    // unless one is pending, which is approximately always.
+    // shut itself down — or a queued message (the BLE dashboard's phone
+    // watching or editing the fans) is transmitted from here and nowhere
+    // else. A no-op unless one is pending, which is approximately always.
     hostreq::tick((uint32_t)now);
 
     // the power switch just asserted PS_ON# (button press while off, or the

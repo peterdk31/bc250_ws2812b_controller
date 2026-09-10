@@ -1,13 +1,26 @@
 <!doctype html>
-<!-- BLE power remote for the BC-250 receiver (firmware/main/ble.cpp).
+<!-- BLE power remote and dashboard for the BC-250 receiver (firmware/main/ble.cpp).
 
      A single-file Web Bluetooth client: connect to a receiver's GATT
      service, show the PSU state, and send the commands the firmware
      accepts, each prefixed with the shared token written at flash time
      (the config's ble_remote.token, baked by make flash).
 
-     The ring button IS the UI: its color is the PSU state, its label the
-     one action a tap performs. Text below it only appears for errors.
+     The ring button IS the power remote: its color is the PSU state, its
+     label the one action a tap performs. Text below it only appears for
+     errors.
+
+     Below the ring, once connected, the dashboard: the daemon's readings
+     (CPU temperature and load, GPU load), one card per fan header — the
+     duty the receiver applies and where it came from (boost / the daemon's
+     curve / fallback), the curve's own input, and the curve itself, with the
+     current operating point marked — and the receiver's build facts. Curves
+     are editable in place: drag the points (or type them), set boost and
+     fallback, save; the write goes to the receiver, which relays it to the
+     daemon, which validates and applies it, writes it into its config file
+     and pushes the config back — the page shows "saved" only when that
+     round trip lands. Names, sources and which headers are enabled stay
+     the config file's.
 
      Any number of receivers: every board the chooser has ever granted is
      listed in the dropdown above the ring (by its advertised name — the
@@ -41,17 +54,25 @@
      Chrome's "Add to Home screen", the service worker (sw.js) makes it work
      fully offline, which is the point: the machine travels.
 
-     Everything protocol-shaped must match ble.cpp:
+     Everything protocol-shaped must match ble.cpp (JSON shapes: daemon/fans.hpp):
        service a5f20001-8f11-4e0e-9b3a-0bc250e0c001
        control a5f20002-... : write  token(16, NUL-padded) + op(1)
                               op 0x01=on 0x02=graceful shutdown 0x03=hard off
-       status  a5f20003-... : read/notify  1 byte  0=off 1=booting 2=on -->
+       status  a5f20003-... : read/notify  1 byte  0=off 1=booting 2=on
+       fans    a5f20004-... : read/notify  the receiver's own fan view (parseFans)
+       fancfg  a5f20005-... : read/notify  the daemon's fan config, JSON text
+                              (daemon/fans.hpp documents the shape);
+                              write  token(16) + a partial edit, same shape
+       info    a5f20006-... : read  firmware version + heap (parseInfo)
+       telem   a5f20007-... : read/notify  the daemon's readings, JSON text
+     A receiver on older firmware has only the first two; the dashboard then
+     stays hidden and the power remote works as before. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0b0e14">
-<title>BC-250 Power</title>
+<title>BC-250</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <style>
@@ -139,10 +160,79 @@
   #tokenbox { display: none; flex-direction: column; gap: .75rem; align-items: center; }
   #tokenbox.show { display: flex; }
   #tokenbox p { font-size: .85rem; color: var(--muted); }
+
+  /* ---- the dashboard: left-aligned cards under the ring ---- */
+  #dash { display: none; width: 100%; max-width: 30rem; text-align: left;
+          flex-direction: column; gap: .75rem; }
+  #dash.show { display: flex; }
+  .card { background: var(--panel); border: 1px solid #232a3d; border-radius: .75rem;
+          padding: .8rem .9rem; }
+  .card h2 { font-size: .75rem; font-weight: 600; letter-spacing: .08em;
+             text-transform: uppercase; color: var(--muted); margin-bottom: .5rem; }
+  .card h2 .r { float: right; font-weight: 400; letter-spacing: 0; text-transform: none; }
+  .note { font-size: .85rem; color: var(--muted); }
+
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: .6rem; }
+  .tile { background: var(--bg); border-radius: .6rem; padding: .55rem .6rem; }
+  .tile .k { font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .tile .v { font-size: 1.35rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tile .v small { font-size: .75rem; font-weight: 400; color: var(--muted); margin-left: .15rem; }
+
+  /* one card per fan header */
+  .fan { display: grid; grid-template-columns: 1fr auto; gap: .2rem .75rem; align-items: baseline; }
+  .fan .name { font-weight: 600; }
+  .fan .duty { font-size: 1.6rem; font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+  .fan .duty small { font-size: .8rem; font-weight: 400; color: var(--muted); }
+  .fan .sub { grid-column: 1 / -1; display: flex; gap: .5rem; align-items: center;
+              font-size: .8rem; color: var(--muted); flex-wrap: wrap; }
+  .chip { border-radius: 999px; padding: .05rem .55rem; font-size: .72rem; font-weight: 600;
+          background: var(--off); color: var(--text); }
+  .chip.live { background: color-mix(in srgb, var(--on) 25%, var(--panel)); color: var(--on); }
+  .chip.boost { background: color-mix(in srgb, var(--booting) 25%, var(--panel)); color: var(--booting); }
+  .chip.hold { background: color-mix(in srgb, var(--danger) 25%, var(--panel)); color: var(--danger); }
+  .bar { grid-column: 1 / -1; height: 4px; border-radius: 2px; background: var(--off); overflow: hidden; margin: .3rem 0 .45rem; }
+  .bar i { display: block; height: 100%; background: var(--on); transition: width .4s; }
+  .bar.boost i { background: var(--booting); }
+  .bar.fallback i { background: var(--muted); }
+
+  /* the curve: an SVG the card owns; points drag when editing */
+  .curve { grid-column: 1 / -1; width: 100%; height: 7.5rem; display: block;
+           touch-action: none; user-select: none; -webkit-user-select: none; }
+  .curve .grid { stroke: #232a3d; stroke-width: 1; }
+  .curve .axis { fill: var(--muted); font-size: 9px; }
+  .curve .line { fill: none; stroke: var(--on); stroke-width: 2; stroke-linejoin: round; }
+  .curve.editing .line { stroke: var(--booting); }
+  .curve .pt { fill: var(--panel); stroke: var(--on); stroke-width: 2; }
+  .curve.editing .pt { stroke: var(--booting); r: 7; cursor: grab; }
+  .curve .now { stroke: var(--text); stroke-width: 1; stroke-dasharray: 3 3; }
+  .curve .nowpt { fill: var(--text); }
+
+  .fan .tools { grid-column: 1 / -1; display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-top: .3rem; }
+  .fan .tools button, .gl .tools button { padding: .35rem .8rem; font-size: .82rem; }
+  .fan .tools .msg { font-size: .8rem; color: var(--muted); }
+  .fan .tools .msg.ok { color: var(--on); }
+  .fan .tools .msg.err { color: var(--danger); }
+
+  /* the editor: point rows and the two standalone fields */
+  .editor { grid-column: 1 / -1; display: flex; flex-direction: column; gap: .4rem; margin-top: .2rem; }
+  .editor .row { justify-content: flex-start; gap: .4rem; align-items: center; }
+  .editor label { font-size: .78rem; color: var(--muted); min-width: 4.5rem; }
+  .editor input { width: 4.6rem; padding: .35rem .4rem; text-align: right; letter-spacing: 0; font-size: .9rem; }
+  .editor input:invalid { border-color: var(--danger); }
+  .editor .x { cursor: pointer; padding: .2rem .55rem; font-size: .9rem; line-height: 1; }
+  .editor .unit { font-size: .78rem; color: var(--muted); }
+
+  .gl .fields { display: grid; grid-template-columns: auto 1fr; gap: .4rem .75rem; align-items: center; font-size: .9rem; }
+  .gl .fields span { color: var(--muted); font-size: .85rem; }
+  .gl .fields input { width: 5.5rem; text-align: right; letter-spacing: 0; padding: .3rem .4rem; }
+  .gl .tools { display: flex; gap: .5rem; align-items: center; margin-top: .6rem; flex-wrap: wrap; }
+
+  .info { display: grid; grid-template-columns: auto 1fr; gap: .25rem .75rem; font-size: .85rem; }
+  .info span:nth-child(odd) { color: var(--muted); }
 </style>
 </head>
 <body>
-<h1>BC-250 Power</h1>
+<h1>BC-250</h1>
 
 <select id="picker" aria-label="Receiver" hidden></select>
 
@@ -169,12 +259,47 @@
   </div>
 </div>
 
+<!-- the dashboard; filled by renderDash() once the receiver's fans
+     characteristics are open -->
+<section id="dash" aria-label="Dashboard">
+  <div class="card" id="hostcard">
+    <h2>Host <span class="r" id="hostnote"></span></h2>
+    <div class="tiles">
+      <div class="tile"><div class="k">CPU temp</div><div class="v" id="t-temp">—</div></div>
+      <div class="tile"><div class="k">CPU load</div><div class="v" id="t-cpu">—</div></div>
+      <div class="tile"><div class="k">GPU load</div><div class="v" id="t-gpu">—</div></div>
+    </div>
+  </div>
+  <div id="fancards"></div>
+  <div class="card gl" id="globals" hidden>
+    <h2>Fan behaviour</h2>
+    <div class="fields">
+      <span>Hysteresis</span><div><input id="g-hyst" type="number" min="0" max="50" step="0.5"> <span class="unit">°C before slowing</span></div>
+      <span>Ramp down</span><div><input id="g-ramp" type="number" min="0" max="100" step="0.5"> <span class="unit">%/s (0 = instant)</span></div>
+      <span>Boost</span><div><input id="g-boost" type="number" min="0" max="255" step="1"> <span class="unit">s after power-on</span></div>
+    </div>
+    <div class="tools">
+      <button class="minor" id="g-save">Save</button>
+      <button class="minor" id="g-revert">Revert</button>
+      <span class="msg" id="g-msg"></span>
+    </div>
+  </div>
+  <div class="card" id="infocard">
+    <h2>Receiver</h2>
+    <div class="info" id="info"></div>
+  </div>
+</section>
+
 <script>
 'use strict';
 
-const SVC  = 'a5f20001-8f11-4e0e-9b3a-0bc250e0c001';
-const CTRL = 'a5f20002-8f11-4e0e-9b3a-0bc250e0c001';
-const STAT = 'a5f20003-8f11-4e0e-9b3a-0bc250e0c001';
+const SVC    = 'a5f20001-8f11-4e0e-9b3a-0bc250e0c001';
+const CTRL   = 'a5f20002-8f11-4e0e-9b3a-0bc250e0c001';
+const STAT   = 'a5f20003-8f11-4e0e-9b3a-0bc250e0c001';
+const FANS   = 'a5f20004-8f11-4e0e-9b3a-0bc250e0c001';
+const FANCFG = 'a5f20005-8f11-4e0e-9b3a-0bc250e0c001';
+const INFO   = 'a5f20006-8f11-4e0e-9b3a-0bc250e0c001';
+const TELEM  = 'a5f20007-8f11-4e0e-9b3a-0bc250e0c001';
 const OP_ON = 0x01, OP_SHUTDOWN = 0x02, OP_HARD_OFF = 0x03;
 const TOKEN_LEN = 16;
 const STATE_NAMES = ['off', 'booting', 'on'];
@@ -188,6 +313,7 @@ const hardoffBtn = $('hardoff'), tokenBtn = $('changetoken');
 const forgetBtn = $('forget'), picker = $('picker');
 
 let device = null, ctrl = null, stat = null; // the selected receiver + its live GATT
+let fansChr = null, cfgChr = null, telemChr = null; // the dashboard's (null on older firmware)
 let psu = -1;          // last status byte seen, -1 = unknown
 let busy = false;      // a user-initiated connect or write in flight
 let attempt = null;    // the device an auto-reconnect (watch or connect) is live for
@@ -285,6 +411,7 @@ function render() {
   renderPicker();
   if (!('bluetooth' in navigator)) { powerBtn.disabled = true; picker.hidden = true; return; }
   const connected = !!(device && device.gatt.connected);
+  $('dash').classList.toggle('show', connected && !!fansChr);
   const pending = !!device && attempt === device;
   powerBtn.className = (STATE_NAMES[psu] || 'off') +
                        (!connected && (pending || busy) ? ' wait' : '');
@@ -333,6 +460,7 @@ function attach(d) {
   ctrl = stat = null;
   psu = -1;
   editToken = false;
+  dashReset();
   store.set('ble-current', d.id);
   d.addEventListener('gattserverdisconnected', onDisconnected);
 }
@@ -351,6 +479,7 @@ async function open() {
   onStatus(first);
   remember(d);
   say('');
+  dashOpen(svc).catch(e => { dashNote(`Dashboard: ${e.message}`); });
 }
 
 function onStatus(v) {
@@ -362,6 +491,7 @@ function onDisconnected(e) {
   if (e.target !== device) return; // a stale device we already replaced
   ctrl = stat = null;
   psu = -1;
+  dashReset();
   render();
   scheduleReconnect(1000);
 }
@@ -489,6 +619,554 @@ async function write(op) {
   }
 }
 
+// ---- the dashboard ----
+// Four values off the receiver: `fans` (its own live view, binary, notified
+// once a second), `cfg` and `telem` (the daemon's config and readings, JSON
+// text relayed verbatim — daemon/fans.hpp documents the shape; notified when
+// the daemon sends a new one) and `info` (build facts, read once). The page
+// keeps the last of each and redraws from them; editing works on a copy of
+// one header (or the globals) and sends back just that as a partial edit.
+
+const KIND = { constant: 0, temp: 1, pwm: 2, cpu_load: 3, gpu_load: 4 }; // cfg's "s"
+const KINDS = ['fixed', 'temperature', 'board pwm', 'CPU load', 'GPU load'];
+const KIND_LABEL = ['', '', 'board pwm ', 'CPU ', 'GPU ']; // before a reading
+const KIND_CONST = 0, KIND_TEMP = 1;
+const NONE = 0xFF;
+const CHANNELS = 6, MAX_POINTS = 8;   // the page adds no more than this; the daemon has no cap
+const SRC_NAMES = ['', 'fallback', 'live', 'boost']; // fan::SRC_*
+const FANS_LEN = 4 + CHANNELS * 2 + 4;
+const SAVE_TIMEOUT_MS = 6000;
+const utf8 = new TextDecoder();
+
+let fans = null, cfg = null, telem = null, info = null;
+let edits = {};       // header slot (or 'g') -> working copy while being edited
+let saving = null;    // 'g' or a slot: a write waiting for the daemon's config to come back
+let saveTimer = 0;
+let dragging = null;  // { slot, idx } while a curve point is being dragged
+
+const u32 = (dv, o) => dv.getUint32(o, true);
+
+function parseFans(dv) {
+  if (dv.byteLength < FANS_LEN || dv.getUint8(0) !== 1) return null;
+  const f = dv.getUint8(1);
+  const out = {
+    active: !!(f & 1), boosting: !!(f & 2), hold: !!(f & 4), live: !!(f & 8),
+    host: !!(f & 16), telem: !!(f & 32),
+    psu: dv.getUint8(2), age: dv.getUint8(3), h: [], uptime: u32(dv, 4 + CHANNELS * 2),
+  };
+  for (let i = 0; i < CHANNELS; i++) {
+    const st = dv.getUint8(4 + i * 2);
+    out.h.push({ wired: !!(st & 1), src: (st >> 1) & 3, duty: dv.getUint8(5 + i * 2) });
+  }
+  return out;
+}
+
+// "45:35 60:55" (or "65" for a constant) -> [{x, y}], sorted; the daemon's notation
+function parseCurve(text, constant) {
+  const toks = String(text).trim().split(/[\s,]+/).filter(Boolean);
+  if (constant) return [{ x: 0, y: parseFloat(toks[0]) || 0 }];
+  return toks.map(t => { const [x, y] = t.split(':').map(parseFloat); return { x, y }; })
+             .filter(p => !isNaN(p.x) && !isNaN(p.y)).sort((a, b) => a.x - b.x);
+}
+const curveText = (pts, constant) => constant ? String(pts[0].y) : pts.map(p => `${p.x}:${p.y}`).join(' ');
+
+// the daemon's config JSON -> { editable, hyst, ramp, boostSecs, h[slot] }
+function parseCfg(text) {
+  let j;
+  try { j = JSON.parse(text); } catch { return null; }
+  if (!j || typeof j !== 'object') return null;
+  const c = { editable: !!j.editable, hyst: +j.hysteresis || 0, ramp: +j.ramp || 0,
+              boostSecs: +j.boost_seconds || 0, h: [] };
+  for (let i = 0; i < CHANNELS; i++) {
+    const h = j['header' + (i + 1)];
+    if (!h) { c.h.push(null); continue; }
+    const kind = KIND[h.s] ?? KIND_CONST;
+    c.h.push({ name: String(h.n || ''), kind, pts: parseCurve(h.c, kind === KIND_CONST),
+               boost: h.b === null || h.b === undefined ? NONE : +h.b, fallback: +h.f });
+  }
+  return c;
+}
+
+// the daemon's telemetry JSON -> { temp, cpu, gpu, h[slot]: { in, duty } }
+function parseTelem(text) {
+  let j;
+  try { j = JSON.parse(text); } catch { return null; }
+  if (!j || typeof j !== 'object') return null;
+  const t = { temp: j.temp, cpu: j.cpu, gpu: j.gpu, h: [] };
+  for (let i = 0; i < CHANNELS; i++) t.h.push(j['header' + (i + 1)] || null);
+  return t;
+}
+
+function parseInfo(dv) {
+  if (dv.byteLength < 41 || dv.getUint8(0) !== 1) return null;
+  let v = '';
+  for (let k = 1; k < 33; k++) { const ch = dv.getUint8(k); if (!ch) break; v += String.fromCharCode(ch); }
+  return { version: v, heap: u32(dv, 33), minHeap: u32(dv, 37) };
+}
+
+function dashReset() {
+  fansChr = cfgChr = telemChr = null;
+  fans = cfg = telem = info = null;
+  edits = {}; saving = null; dragging = null;
+  clearTimeout(saveTimer);
+  $('dash').classList.remove('show');
+}
+
+function dashNote(text) { $('hostnote').textContent = text; }
+
+// a notification is truncated to the ATT MTU; a read isn't. The fans value
+// fits any MTU, the two JSON values may not — so those are always re-read.
+const onFansEvent = e => {
+  if (e.target !== fansChr) return;
+  const f = parseFans(e.target.value);
+  if (f) { fans = f; renderDash(); }
+};
+const onCfgEvent = async e => {
+  if (e.target !== cfgChr) return;
+  try { onCfg(await cfgChr.readValue()); } catch {}
+};
+const onTelemEvent = async e => {
+  if (e.target !== telemChr) return;
+  try { telem = parseTelem(utf8.decode(await telemChr.readValue())); renderDash(); } catch {}
+};
+
+function onCfg(dv) {
+  cfg = dv.byteLength ? parseCfg(utf8.decode(dv)) : null;
+  if (saving !== null) {
+    // the daemon answered a save with its new config: that card is done
+    const key = saving;
+    saving = null;
+    clearTimeout(saveTimer);
+    delete edits[key];
+    flash(key, 'saved', 'ok');
+  }
+  renderDash();
+}
+
+async function dashOpen(svc) {
+  let f, c, t, i;
+  try {
+    f = await svc.getCharacteristic(FANS);
+    c = await svc.getCharacteristic(FANCFG);
+    t = await svc.getCharacteristic(TELEM);
+  } catch { return; } // older firmware: no dashboard, and nothing to say
+  try { i = await svc.getCharacteristic(INFO); } catch { i = null; }
+  if (!device || !device.gatt.connected) return;
+  fansChr = f; cfgChr = c; telemChr = t;
+  f.addEventListener('characteristicvaluechanged', onFansEvent);
+  c.addEventListener('characteristicvaluechanged', onCfgEvent);
+  t.addEventListener('characteristicvaluechanged', onTelemEvent);
+  await f.startNotifications();
+  await c.startNotifications();
+  await t.startNotifications(); // this one tells the daemon to start reporting
+  const fv = parseFans(await f.readValue());
+  if (fv) fans = fv;
+  onCfg(await c.readValue());
+  const tv = await t.readValue();
+  telem = tv.byteLength ? parseTelem(utf8.decode(tv)) : null;
+  if (i) { try { info = parseInfo(await i.readValue()); } catch { info = null; } }
+  renderDash();
+}
+
+// ---- rendering ----
+const fmt1 = v => (Math.round(v * 10) / 10).toString();
+const fmtIn = (kind, v) => kind === KIND_TEMP ? `${fmt1(v)} °C` : `${fmt1(v)} %`;
+const fmtUptime = s => s < 3600 ? `${Math.floor(s / 60)} min` :
+  s < 86400 ? `${Math.floor(s / 3600)} h ${Math.floor(s % 3600 / 60)} min` :
+  `${Math.floor(s / 86400)} d ${Math.floor(s % 86400 / 3600)} h`;
+
+function flash(key, text, cls) {
+  const el = key === 'g' ? $('g-msg') : document.querySelector(`.fan[data-slot="${key}"] .msg`);
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'msg ' + (cls || '');
+  if (cls === 'ok') setTimeout(() => { if (el.textContent === text) el.textContent = ''; }, 2500);
+}
+
+function renderDash() {
+  const show = !!(fansChr && device && device.gatt.connected);
+  $('dash').classList.toggle('show', show);
+  if (!show) return;
+
+  // host tiles: only while the receiver says the daemon's telemetry is fresh
+  const t = fans && fans.telem && telem;
+  $('t-temp').innerHTML = t && telem.temp !== undefined ? `${fmt1(telem.temp)}<small>°C</small>` : '—';
+  $('t-cpu').innerHTML = t && telem.cpu !== undefined ? `${telem.cpu}<small>%</small>` : '—';
+  $('t-gpu').innerHTML = t && telem.gpu !== undefined ? `${telem.gpu}<small>%</small>` : '—';
+  if (!fans) dashNote('');
+  else if (fans.telem) dashNote(`daemon live · ${fans.age}s ago`);
+  else if (fans.psu !== 2) dashNote('machine off');
+  else if (!fans.host) dashNote('no host on the link');
+  else dashNote(fans.age === 255 ? 'daemon not reporting' : `daemon quiet ${fans.age}s`);
+
+  renderFans();
+  renderGlobals();
+
+  const rows = [];
+  if (info) {
+    rows.push(['Firmware', info.version || '?']);
+    rows.push(['Free heap', `${Math.round(info.heap / 1024)} KB (min ${Math.round(info.minHeap / 1024)} KB)`]);
+  }
+  if (fans) {
+    rows.push(['Uptime', fmtUptime(fans.uptime)]);
+    rows.push(['Fan headers', fans.active ? `${fans.h.filter(h => h.wired).length} wired` : 'off (no fancfg)']);
+    rows.push(['Host link', fans.host ? 'present' : 'absent']);
+  }
+  $('info').replaceChildren(...rows.flatMap(([k, v]) => {
+    const a = document.createElement('span'), b = document.createElement('span');
+    a.textContent = k; b.textContent = v; return [a, b];
+  }));
+}
+
+// which headers get a card: every wired one (the receiver drives it) plus
+// any the daemon's config has (it lists enabled headers only), so a header
+// enabled in the config but not flashed still shows — with a note, since
+// that is a real misconfiguration
+function cardSlots() {
+  const slots = new Set();
+  if (fans) fans.h.forEach((h, i) => { if (h.wired) slots.add(i); });
+  if (cfg) cfg.h.forEach((h, i) => { if (h) slots.add(i); });
+  return [...slots].sort((a, b) => a - b);
+}
+
+function renderFans() {
+  const wrap = $('fancards');
+  const slots = cardSlots();
+  // keep cards across redraws so an open editor (and a drag) survives
+  const have = new Map([...wrap.children].map(el => [+el.dataset.slot, el]));
+  for (const el of have.values()) if (!slots.includes(+el.dataset.slot)) el.remove();
+  let anyNote = false;
+  for (const slot of slots) {
+    let el = have.get(slot);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'card fan';
+      el.dataset.slot = slot;
+      wrap.appendChild(el);
+    }
+    anyNote |= renderFanCard(el, slot);
+  }
+  // order the cards by slot (a header appearing later lands in place)
+  [...wrap.children].sort((a, b) => a.dataset.slot - b.dataset.slot).forEach(el => wrap.appendChild(el));
+  if (!slots.length) {
+    wrap.replaceChildren(Object.assign(document.createElement('div'), {
+      className: 'card note',
+      textContent: fans && !fans.active ? 'No fan headers wired on this receiver (the config’s fans block is off or unflashed).'
+                                        : 'No fan configuration from the daemon yet.' }));
+  }
+}
+
+// one header card. Returns true when it shows a misconfiguration note.
+function renderFanCard(el, slot) {
+  const f = fans && fans.h[slot];
+  const c = cfg && cfg.h[slot];
+  const tm = fans && fans.telem && telem && telem.h[slot];
+  const editing = slot in edits;
+  const work = editing ? edits[slot] : c;
+  const kind = c ? c.kind : KIND_CONST;
+  const name = (c && c.name) || `header${slot + 1}`;
+  const editable = !!(cfg && cfg.editable) && !!c;
+
+  let src = f && f.wired ? SRC_NAMES[f.src] : '';
+  if (f && f.hold) src = 'hold';
+  const duty = f && f.wired && f.duty !== NONE ? f.duty : null;
+
+  let sub = '';
+  if (c) {
+    if (kind === KIND_CONST) sub = 'fixed speed';
+    else if (tm && tm.in !== undefined) sub = `${KIND_LABEL[kind]}${fmtIn(kind, tm.in)}`;
+    else sub = fans && fans.telem ? 'no reading' : `curve on ${KINDS[kind]}`;
+  } else if (f && f.wired) sub = 'not driven by the daemon — runs its fallback';
+  let note = '';
+  if (c && f && !f.wired) note = 'enabled in the config but not wired on the receiver: run make flash-fan';
+
+  // first paint builds the skeleton; later paints only update text/attrs so
+  // an open editor's inputs (and the drag) aren't torn down under the finger
+  if (!el.firstChild) {
+    el.innerHTML = `
+      <div class="name"></div><div class="duty"><span class="d"></span><small>%</small></div>
+      <div class="sub"><span class="chip"></span><span class="what"></span><span class="note" hidden></span></div>
+      <div class="bar"><i></i></div>
+      <svg class="curve" viewBox="0 0 320 120" preserveAspectRatio="none"></svg>
+      <div class="editor" hidden></div>
+      <div class="tools"><button class="minor edit">Edit curve</button>
+        <button class="minor save" hidden>Save</button><button class="minor cancel" hidden>Cancel</button>
+        <span class="msg"></span></div>`;
+    el.querySelector('.edit').addEventListener('click', () => beginEdit(slot));
+    el.querySelector('.cancel').addEventListener('click', () => { delete edits[slot]; renderDash(); });
+    el.querySelector('.save').addEventListener('click', () => saveEdit(slot));
+    bindCurveDrag(el.querySelector('.curve'), slot);
+  }
+
+  el.querySelector('.name').textContent = name;
+  el.querySelector('.d').textContent = duty === null ? '—' : duty;
+  const chip = el.querySelector('.chip');
+  chip.textContent = src;
+  chip.className = 'chip ' + (src === 'live' ? 'live' : src === 'boost' ? 'boost' : src === 'hold' ? 'hold' : '');
+  chip.hidden = !chip.textContent;
+  el.querySelector('.what').textContent = sub;
+  const noteEl = el.querySelector('.note');
+  noteEl.textContent = note; noteEl.hidden = !note;
+  const bar = el.querySelector('.bar');
+  bar.className = 'bar ' + (src === 'boost' ? 'boost' : src === 'fallback' ? 'fallback' : '');
+  bar.firstChild.style.width = `${duty === null ? 0 : duty}%`;
+
+  const svg = el.querySelector('.curve');
+  svg.hidden = !work || !work.pts.length;
+  if (work && work.pts.length) drawCurve(svg, work, tm && tm.in !== undefined ? tm.in : null, editing);
+  svg.classList.toggle('editing', editing);
+
+  const ed = el.querySelector('.editor');
+  ed.hidden = !editing;
+  if (editing) renderEditor(ed, slot);
+  el.querySelector('.edit').hidden = editing || !editable;
+  el.querySelector('.save').hidden = !editing;
+  el.querySelector('.cancel').hidden = !editing;
+  el.querySelector('.save').disabled = saving !== null;
+  return !!note;
+}
+
+// ---- the curve chart ----
+// x spans the curve's points with a margin (percent kinds always 0..100), y
+// is 0..100 duty; the polyline is flat beyond the end points, as the daemon
+// evaluates it. `now` marks the current input on the curve.
+const PAD = { l: 26, r: 8, t: 6, b: 16 }, W = 320, H = 120;
+
+function xDomain(h) {
+  if (h.kind !== KIND_TEMP) return [0, 100];
+  const xs = h.pts.map(p => p.x);
+  let lo = Math.min(20, ...xs) - 5, hi = Math.max(90, ...xs) + 5;
+  lo = Math.floor(lo / 10) * 10; hi = Math.ceil(hi / 10) * 10;
+  return [lo, hi];
+}
+const sx = (x, d) => PAD.l + (x - d[0]) / (d[1] - d[0]) * (W - PAD.l - PAD.r);
+const sy = y => PAD.t + (1 - y / 100) * (H - PAD.t - PAD.b);
+const ux = (px, d) => d[0] + (px - PAD.l) / (W - PAD.l - PAD.r) * (d[1] - d[0]);
+const uy = py => (1 - (py - PAD.t) / (H - PAD.t - PAD.b)) * 100;
+
+function evalCurve(h, x) {
+  const p = h.pts;
+  if (x <= p[0].x) return p[0].y;
+  if (x >= p[p.length - 1].x) return p[p.length - 1].y;
+  for (let i = 1; i < p.length; i++)
+    if (x <= p[i].x) { const a = p[i - 1], b = p[i]; return a.y + (x - a.x) / (b.x - a.x) * (b.y - a.y); }
+  return p[p.length - 1].y;
+}
+
+function drawCurve(svg, h, now, editing) {
+  const d = xDomain(h);
+  const el = (tag, attrs, text) => {
+    const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (text !== undefined) e.textContent = text;
+    return e;
+  };
+  const kids = [];
+  for (const y of [0, 25, 50, 75, 100]) {
+    kids.push(el('line', { class: 'grid', x1: PAD.l, x2: W - PAD.r, y1: sy(y), y2: sy(y) }));
+    if (y % 50 === 0) kids.push(el('text', { class: 'axis', x: PAD.l - 4, y: sy(y) + 3, 'text-anchor': 'end' }, y));
+  }
+  const step = h.kind === KIND_TEMP ? 10 : 25;
+  for (let x = d[0]; x <= d[1]; x += step)
+    kids.push(el('text', { class: 'axis', x: sx(x, d), y: H - 4, 'text-anchor': 'middle' }, x));
+
+  if (h.kind === KIND_CONST) {
+    const y = sy(h.pts[0].y);
+    kids.push(el('polyline', { class: 'line', points: `${PAD.l},${y} ${W - PAD.r},${y}` }));
+    kids.push(el('circle', { class: 'pt', 'data-idx': 0, cx: (PAD.l + W - PAD.r) / 2, cy: y, r: 5 }));
+  } else {
+    const pts = h.pts.map(p => [sx(p.x, d), sy(p.y)]);
+    const line = [[PAD.l, pts[0][1]], ...pts, [W - PAD.r, pts[pts.length - 1][1]]];
+    kids.push(el('polyline', { class: 'line', points: line.map(p => p.join(',')).join(' ') }));
+    if (now !== null && !editing) {
+      const nx = Math.max(d[0], Math.min(d[1], now)), ny = evalCurve(h, now);
+      kids.push(el('line', { class: 'now', x1: sx(nx, d), x2: sx(nx, d), y1: PAD.t, y2: H - PAD.b }));
+      kids.push(el('circle', { class: 'nowpt', cx: sx(nx, d), cy: sy(ny), r: 3.5 }));
+    }
+    pts.forEach(([x, y], i) => kids.push(el('circle', { class: 'pt', 'data-idx': i, cx: x, cy: y, r: 5 })));
+  }
+  svg.replaceChildren(...kids);
+}
+
+// dragging a point while editing: x stays between its neighbours (and in the
+// chart), y in 0..100; a constant only moves in y. Pointer events cover mouse
+// and touch alike; the svg's touch-action: none keeps the page from scrolling.
+function bindCurveDrag(svg, slot) {
+  const pos = e => {
+    const r = svg.getBoundingClientRect();
+    return [(e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H];
+  };
+  svg.addEventListener('pointerdown', e => {
+    if (!(slot in edits)) return;
+    const t = e.target.closest('.pt');
+    if (!t) return;
+    dragging = { slot, idx: +t.dataset.idx };
+    svg.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  svg.addEventListener('pointermove', e => {
+    if (!dragging || dragging.slot !== slot) return;
+    const h = edits[slot], p = h.pts[dragging.idx], d = xDomain(h);
+    const [px, py] = pos(e);
+    p.y = Math.round(Math.max(0, Math.min(100, uy(py))));
+    if (h.kind !== KIND_CONST) {
+      let x = ux(px, d);
+      const lo = dragging.idx > 0 ? h.pts[dragging.idx - 1].x + 0.5 : d[0];
+      const hi = dragging.idx < h.pts.length - 1 ? h.pts[dragging.idx + 1].x - 0.5 : d[1];
+      x = Math.max(lo, Math.min(hi, x));
+      p.x = h.kind === KIND_TEMP ? Math.round(x * 2) / 2 : Math.round(x);
+    }
+    renderDash();
+  });
+  const end = () => { if (dragging && dragging.slot === slot) { dragging = null; renderDash(); } };
+  svg.addEventListener('pointerup', end);
+  svg.addEventListener('pointercancel', end);
+}
+
+// ---- editing ----
+function beginEdit(slot) {
+  if (!cfg || !cfg.h[slot]) return;
+  const h = cfg.h[slot];
+  edits[slot] = { ...h, pts: h.pts.map(p => ({ ...p })) };
+  renderDash();
+}
+
+// the numeric side of the editor: one row per point, add/remove, then boost
+// and fallback. Rebuilt only when the point count changes, otherwise the
+// inputs' values are refreshed in place (typing must not lose focus).
+function renderEditor(ed, slot) {
+  const h = edits[slot];
+  const unit = h.kind === KIND_TEMP ? '°C' : '%';
+  const rows = h.kind === KIND_CONST ? 1 : h.pts.length;
+  if (+ed.dataset.rows !== rows || ed.dataset.kind !== String(h.kind)) {
+    ed.dataset.rows = rows; ed.dataset.kind = h.kind;
+    const parts = [];
+    for (let i = 0; i < rows; i++) {
+      parts.push(`<div class="row">
+        ${h.kind === KIND_CONST ? '<label>duty</label>' :
+          `<label>point ${i + 1}</label><input type="number" class="px" data-i="${i}" step="${h.kind === KIND_TEMP ? 0.5 : 1}"><span class="unit">${unit} →</span>`}
+        <input type="number" class="py" data-i="${i}" min="0" max="100" step="1"><span class="unit">%</span>
+        ${h.kind !== KIND_CONST && rows > 1 ? `<button class="minor x" data-i="${i}" title="remove point">×</button>` : ''}
+      </div>`);
+    }
+    if (h.kind !== KIND_CONST && rows < MAX_POINTS)
+      parts.push('<div class="row"><label></label><button class="minor add">+ point</button></div>');
+    parts.push(`<div class="row"><label>boost</label><input type="number" class="boost" min="0" max="100" step="1" placeholder="none"><span class="unit">% at power-on, blank = none</span></div>`);
+    parts.push(`<div class="row"><label>fallback</label><input type="number" class="fb" min="0" max="100" step="1"><span class="unit">% without the daemon</span></div>`);
+    ed.innerHTML = parts.join('');
+    ed.querySelectorAll('.px').forEach(inp => inp.addEventListener('input', () => {
+      const v = parseFloat(inp.value); if (!isNaN(v)) h.pts[+inp.dataset.i].x = v; renderDash(); }));
+    ed.querySelectorAll('.py').forEach(inp => inp.addEventListener('input', () => {
+      const v = parseFloat(inp.value); if (!isNaN(v)) h.pts[+inp.dataset.i].y = Math.max(0, Math.min(100, v)); renderDash(); }));
+    ed.querySelectorAll('.x').forEach(btn => btn.addEventListener('click', () => {
+      h.pts.splice(+btn.dataset.i, 1); renderDash(); }));
+    ed.querySelector('.add')?.addEventListener('click', () => {
+      // a new point halfway along the widest gap (or past the end)
+      const p = h.pts;
+      let at = p.length, x, y;
+      if (p.length === 1) { x = p[0].x + 10; y = Math.min(100, p[0].y + 10); }
+      else {
+        let best = 0;
+        for (let i = 1; i < p.length; i++) if (p[i].x - p[i - 1].x > p[best + 1].x - p[best].x) best = i - 1;
+        at = best + 1; x = (p[best].x + p[best + 1].x) / 2; y = Math.round((p[best].y + p[best + 1].y) / 2);
+      }
+      p.splice(at, 0, { x, y });
+      renderDash();
+    });
+    ed.querySelector('.boost').addEventListener('input', e => {
+      h.boost = e.target.value === '' ? NONE : Math.max(0, Math.min(100, Math.round(+e.target.value))); });
+    ed.querySelector('.fb').addEventListener('input', e => {
+      if (e.target.value !== '') h.fallback = Math.max(0, Math.min(100, Math.round(+e.target.value))); });
+  }
+  // refresh values without clobbering the field being typed in
+  const set = (inp, v) => { if (document.activeElement !== inp && inp.value !== String(v)) inp.value = v; };
+  ed.querySelectorAll('.px').forEach(inp => set(inp, h.pts[+inp.dataset.i].x));
+  ed.querySelectorAll('.py').forEach(inp => set(inp, h.pts[+inp.dataset.i].y));
+  set(ed.querySelector('.boost'), h.boost === NONE ? '' : h.boost);
+  set(ed.querySelector('.fb'), h.fallback);
+}
+
+// what the daemon will refuse, said here first (it also validates)
+function checkEdit(h) {
+  if (!h.pts.length) return 'a curve needs at least one point';
+  const xs = new Set();
+  for (const p of h.pts) {
+    if (!(p.y >= 0 && p.y <= 100)) return 'duty must be 0–100 %';
+    if (h.kind !== KIND_CONST && xs.has(p.x)) return `two points at ${p.x}`;
+    xs.add(p.x);
+  }
+  if (h.boost !== NONE && !(h.boost >= 0 && h.boost <= 100)) return 'boost must be 0–100 % or blank';
+  if (!(h.fallback >= 0 && h.fallback <= 100)) return 'fallback must be 0–100 %';
+  return '';
+}
+
+// write a partial edit (one header, or the globals — the daemon's JSON
+// shape), then wait for the daemon's config to come back (onCfg) — that is
+// what "saved" means here
+async function writeCfg(key, edit) {
+  if (!cfgChr || saving !== null) return;
+  const text = new TextEncoder().encode(JSON.stringify(edit));
+  const buf = new Uint8Array(TOKEN_LEN + text.length);
+  buf.set(tokenBytes()); buf.set(text, TOKEN_LEN);
+  saving = key;
+  flash(key, 'saving…');
+  renderDash();
+  try {
+    await cfgChr.writeValueWithResponse(buf);
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      if (saving !== key) return;
+      saving = null;
+      flash(key, 'no answer from the daemon — is it running, and can it write its config?', 'err');
+      renderDash();
+    }, SAVE_TIMEOUT_MS);
+  } catch (e) {
+    saving = null;
+    if (/auth|not permitted|gatt/i.test(e.message)) {
+      flash(key, 'token rejected', 'err');
+      editToken = true;
+    } else flash(key, `write failed: ${e.message}`, 'err');
+    renderDash();
+  }
+}
+
+function saveEdit(slot) {
+  const h = edits[slot];
+  if (!h || !cfg) return;
+  h.pts.sort((a, b) => a.x - b.x);
+  const bad = checkEdit(h);
+  if (bad) { flash(slot, bad, 'err'); return; }
+  writeCfg(slot, { ['header' + (slot + 1)]: {
+    c: curveText(h.pts, h.kind === KIND_CONST), b: h.boost === NONE ? null : h.boost, f: h.fallback } });
+}
+
+// ---- the global card: hysteresis, ramp, boost seconds ----
+function renderGlobals() {
+  const card = $('globals');
+  const editable = !!(cfg && cfg.editable);
+  card.hidden = !cfg;
+  if (card.hidden) return;
+  const g = edits.g || cfg;
+  const set = (inp, v) => { if (document.activeElement !== inp && inp.value !== String(v)) inp.value = v; };
+  set($('g-hyst'), g.hyst); set($('g-ramp'), g.ramp); set($('g-boost'), g.boostSecs);
+  for (const id of ['g-hyst', 'g-ramp', 'g-boost']) $(id).disabled = !editable || saving !== null;
+  $('g-save').hidden = $('g-revert').hidden = !('g' in edits);
+  $('g-save').disabled = saving !== null;
+}
+for (const [id, key] of [['g-hyst', 'hyst'], ['g-ramp', 'ramp'], ['g-boost', 'boostSecs']])
+  $(id).addEventListener('input', e => {
+    if (!cfg) return;
+    edits.g ||= { hyst: cfg.hyst, ramp: cfg.ramp, boostSecs: cfg.boostSecs };
+    const v = parseFloat(e.target.value);
+    if (!isNaN(v)) edits.g[key] = key === 'boostSecs' ? Math.max(0, Math.min(255, Math.round(v))) : Math.max(0, v);
+    renderGlobals();
+  });
+$('g-revert').addEventListener('click', () => { delete edits.g; renderDash(); });
+$('g-save').addEventListener('click', () => {
+  if (!edits.g || !cfg) return;
+  writeCfg('g', { hysteresis: edits.g.hyst, ramp: edits.g.ramp, boost_seconds: edits.g.boostSecs });
+});
+
 // ---- wiring ----
 picker.addEventListener('change', async () => {
   const id = picker.value;
@@ -571,6 +1249,7 @@ forgetBtn.addEventListener('click', async () => {
   watchAbort?.abort();
   if (d.gatt.connected) d.gatt.disconnect();
   device = null; ctrl = stat = null; psu = -1; editToken = false;
+  dashReset();
   delete receivers[d.id];
   known.delete(d.id);
   saveReceivers();
@@ -588,7 +1267,48 @@ document.addEventListener('visibilitychange', () => {
   else watchAbort?.abort();
 });
 
-if (!('bluetooth' in navigator))
+// ?demo: the dashboard on sample data, no receiver needed — to see the layout
+// on a desktop, or to try the curve editor before wiring anything. Saves land
+// locally after a moment, the way a daemon round trip would.
+function demo() {
+  cfg = parseCfg(JSON.stringify({ editable: true, hysteresis: 3, ramp: 5, boost_seconds: 5,
+    header1: { n: 'pump', s: 'constant', c: '65', b: 100, f: 100 },
+    header2: { n: 'radiator', s: 'temp', c: '45:35 60:55 75:100', b: null, f: 100 },
+    header3: { n: 'exhaust', s: 'pwm', c: '0:25 100:80', b: null, f: 100 },
+    header4: { n: 'intake', s: 'gpu_load', c: '0:20 40:20 100:60', b: null, f: 60 } }));
+  telem = parseTelem(JSON.stringify({ temp: 58.3, cpu: 37, gpu: 62,
+    header1: { duty: 65 }, header2: { in: 58.3, duty: 52 }, header3: { in: 65.4, duty: 61 }, header4: { in: 62, duty: 45 } }));
+  const f = new Uint8Array(FANS_LEN), dv = new DataView(f.buffer);
+  f[0] = 1; f[1] = 0x01 | 0x08 | 0x10 | 0x20; f[2] = 2; f[3] = 1;
+  // state: wired | src<<1 (2 = live)
+  [[0x05, 65], [0x05, 52], [0x05, 61], [0x05, 45], [0, NONE], [0, NONE]].forEach(([st, d], k) => { f[4 + k * 2] = st; f[5 + k * 2] = d; });
+  dv.setUint32(4 + CHANNELS * 2, 5 * 3600 + 17 * 60, true);
+  fans = parseFans(dv);
+  info = { version: 'v1.20.0-demo', heap: 143 * 1024, minHeap: 121 * 1024 };
+  psu = 2;
+  // stand-ins for the GATT objects so the page believes it is connected
+  device = { id: 'demo', gatt: { connected: true } };
+  receivers.demo = { name: 'BC250 (demo)', token: 'demo-token' };
+  fansChr = telemChr = {};
+  cfgChr = { writeValueWithResponse: async buf => {
+    // merge the partial edit the way the daemon would
+    const edit = JSON.parse(utf8.decode(buf.subarray(TOKEN_LEN)));
+    const cur = cfg, out = { editable: true, hysteresis: edit.hysteresis ?? cur.hyst, ramp: edit.ramp ?? cur.ramp,
+                             boost_seconds: edit.boost_seconds ?? cur.boostSecs };
+    cur.h.forEach((h, i) => { if (!h) return; const k = 'header' + (i + 1), e = edit[k] || {};
+      out[k] = { n: h.name, s: Object.keys(KIND)[h.kind], c: e.c ?? curveText(h.pts, h.kind === KIND_CONST),
+                 b: 'b' in e ? e.b : (h.boost === NONE ? null : h.boost), f: e.f ?? h.fallback }; });
+    setTimeout(() => onCfg(new DataView(new TextEncoder().encode(JSON.stringify(out)).buffer)), 600); } };
+  powerBtn.disabled = true;
+  render();
+  renderDash();
+  if (location.search.includes('edit')) beginEdit(1);
+  say('Demo data — not connected to a receiver.', true);
+}
+
+if (location.search.includes('demo'))
+  demo();
+else if (!('bluetooth' in navigator))
   say('No Web Bluetooth here — use Chrome or Edge (not on iOS).');
 else
   resume();

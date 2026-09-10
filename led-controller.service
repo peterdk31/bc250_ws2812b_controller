@@ -8,6 +8,9 @@ StartLimitIntervalSec=0
 
 [Service]
 ExecStart=/usr/local/bin/led /etc/led-controller/config.json
+# the daemon also watches the file and reloads a save on its own (README
+# "Configuration"); this makes `systemctl reload led-controller` do it now
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=2
 

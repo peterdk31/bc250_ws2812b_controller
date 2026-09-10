@@ -19,10 +19,16 @@
 //   an older peer on either end simply never exchanges these.
 //
 // req frame:     SYNC0 REQ_SYNC req(1) nonce(4) checksum
-//   The other receiver→host frame, and the only one the receiver sends
-//   unsolicited: something only the host can do (see REQ_HOST_SHUTDOWN). The
-//   daemon answers with CMD_REQ_ACK echoing req and nonce. Little-endian
-//   nonce, checksum is the XOR of req and the four nonce bytes.
+//   A receiver→host frame the receiver sends unsolicited: something only the
+//   host can do (see REQ_HOST_SHUTDOWN). The daemon answers with CMD_REQ_ACK
+//   echoing req and nonce. Little-endian nonce, checksum is the XOR of req and
+//   the four nonce bytes.
+//
+// msg frame:     SYNC0 MSG_SYNC kind(1) len(1) <payload[len]> checksum
+//   The third receiver→host frame: a message *with a payload*, sent once, no
+//   ack of its own (see MSG_FAN_CONFIG / MSG_FAN_WATCH for what answers it).
+//   Carries what the phone on the BLE dashboard asks of the daemon. Checksum
+//   is the XOR of kind, len and the payload bytes.
 //
 // the deep pixel frame is what the daemon sends: each channel is a
 // little-endian 8.8 fixed-point value (the 8-bit strip code × 256, so
@@ -56,6 +62,7 @@ static const uint8_t CMD_SYNC = 0x56; // ...or this for a command frame
 static const uint8_t SYNC1_16 = 0x57; // ...or this for an 8.8 deep pixel frame
 static const uint8_t LOG_SYNC = 0x58; // ...or this for a receiver→host log frame
 static const uint8_t REQ_SYNC = 0x59; // ...or this for a receiver→host request
+static const uint8_t MSG_SYNC = 0x5A; // ...or this for a receiver→host message
 
 // bytes a pixel frame (either depth) carries before the pixel data: SYNC0
 // SYNC1/SYNC1_16 pin count(2) anim(2) xms(2). Use this rather than a literal
@@ -162,6 +169,46 @@ static const uint8_t CMD_FAN_LIVE = 0x09;
 // 0x07 was CMD_FAN_DUTY, the flat percent array this replaced; retired, never
 // reused (a receiver on that firmware ignores the two above and keeps its
 // flash-time duties).
+
+// The BLE dashboard (firmware/main/ble.cpp, docs/index.html, README "BLE
+// remote"): the phone sees what the fans are doing and edits the curves live.
+// The receiver is a relay — it holds the daemon's last word on both and serves
+// it over GATT; the daemon stays the only place curves are evaluated or stored.
+// All three payloads below are JSON text (UTF-8, no NUL), in the shape
+// daemon/fans.hpp documents; the receiver never parses them.
+
+// CMD_FAN_CONFIG: the fan config as the daemon runs it — per enabled header
+// its name, source kind, curve, boost and fallback, plus hysteresis, ramp,
+// boost_seconds and whether edits are accepted (the config file is writable).
+// At most 512 bytes (a GATT
+// attribute's ceiling; the daemon refuses to send a larger one and says so).
+// Sent once at startup after CMD_FAN_STANDALONE and again whenever it changes
+// (a phone edit was applied), which is also how a MSG_FAN_CONFIG gets its
+// answer: the receiver notifies the phone with the new truth. Unknown to older
+// firmware, which ignores it.
+static const uint8_t CMD_FAN_CONFIG = 0x0A;
+
+// CMD_FAN_TELEM: what the curves are reading right now — the top-level
+// `sensors` temperature, CPU and GPU load, and per header its input and the
+// duty the curve produced. At most 384 bytes. Only sent while a phone is
+// watching (MSG_FAN_WATCH keeps that alive), on the fan tick when a value
+// changed plus a slow refresh — nothing is read or sent for a dashboard
+// nobody has open.
+static const uint8_t CMD_FAN_TELEM = 0x0B;
+
+// MSG_FAN_CONFIG (msg frame): a phone's edit — a partial object of the same
+// shape holding only what changed (one header's curve/boost/fallback, or the
+// three globals). The daemon validates it exactly as it validates the config,
+// applies it live, writes it into its config file's fans block (README
+// "Fans"), and answers with CMD_FAN_CONFIG. An invalid or read-only edit is
+// dropped with a journal line; the phone's timeout on the answering
+// CMD_FAN_CONFIG is what tells its user.
+static const uint8_t MSG_FAN_CONFIG = 0x01;
+
+// MSG_FAN_WATCH (msg frame): payload one byte, 1 = a phone is subscribed to
+// the dashboard (repeated every ~10 s while it is), 0 = it left. The daemon
+// sends CMD_FAN_TELEM only within ~30 s of a 1.
+static const uint8_t MSG_FAN_WATCH = 0x02;
 
 // REQ_HOST_SHUTDOWN: "power yourself down, gracefully." The receiver's power
 // switch sends this on a short button press while the machine is up — the

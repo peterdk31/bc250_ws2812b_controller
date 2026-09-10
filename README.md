@@ -225,7 +225,7 @@ running — the second half the host's rendering:
         "short_press": null         // what the daemon runs on a short press,
                                     // e.g. "systemctl poweroff"; null = ignore it
     },
-    "ble_remote": {             // the phone power button, see BLE remote
+    "ble_remote": {             // the phone power button + dashboard, see BLE remote
         "enabled": false,
         "name": "BC250",
         "token": ""                 // 8-16 chars; readable by anyone with a shell here
@@ -255,6 +255,23 @@ running — the second half the host's rendering:
 Configs from before September 2026 had an `esp32` block and a `sinks.serial`
 one; the daemon names the old key and what it became, and exits, rather than
 run on a half-read file.
+
+### Live reload
+
+The running daemon watches its config file and picks up a save within a
+second or two — rules, effects, sensors, strip settings, the fans block —
+with no restart. A change confined to the `fans` block leaves the running
+effect alone; anything else drops the current effect and the matching rule
+starts afresh (a crossfade on the strip, like any other switch). `systemctl reload
+led-controller` (SIGHUP) does the same immediately. A file that doesn't parse
+or validate is reported in the journal and the running config is kept, so a
+typo costs a log line rather than a crash loop; fix it and save again. Two
+things still need a restart: the `serial` block, because the port is opened
+once (the daemon says so when it changes), and anything flash-time on the
+receiver — `power_switch`, the fans' pins, `ble_remote` — which is `make
+flash`'s business. Editing `power_on`, `shutdown` or `strip` re-renders and
+re-sends the boot and shutdown recordings, which holds the strip for about a
+second.
 
 ### Tuning the colors
 
@@ -822,7 +839,33 @@ led /etc/led-controller/config.json --fan-status   # what each header resolves t
 
 `--fan-status` prints every header's source, the sysfs file it resolved to,
 its current reading and the duty it would run — the first thing to run when a
-fan isn't doing what the curve says.
+fan isn't doing what the curve says, and whether dashboard edits can be
+written back to the config.
+
+### Editing curves from the phone
+
+With the BLE remote on, the web page shows every header live and lets you
+redraw its curve, set boost and fallback, and change hysteresis, ramp and
+boost length — see the dashboard under [BLE remote](#ble-remote). An edit
+travels phone → receiver → daemon, which validates it exactly as it validates
+the config, applies it on its next tick, and **writes it into the config
+file** — `/etc/led-controller/config.json` on a deployed box. Only the bytes
+of the `fans` block are replaced (re-printed in the file's own four-space
+style, every key and header in the order you wrote them); everything around
+it stays byte for byte as it was, and the first rewrite of a daemon's run
+leaves the file as it found it in `config.json.bak` beside it. So the config
+remains the one place the box is described: back it up, move it to a new
+install, diff it, and the phone's edits come along. The same file watch that reloads a hand edit
+([Live reload](#live-reload)) works the other way too: edit a curve in the
+file, and the phone's dashboard shows the new curve a moment later.
+
+Names, sources and `enabled` are yours alone — the phone can't add a header or
+point one at a different sensor. The dashboard is read-only when the daemon
+can't write its config (the page hides the edit buttons); a write that fails
+mid-way is reported in the journal and the edit runs until the next restart.
+The daemon takes edits only from the receiver's link, which only the
+receiver's BLE service writes, and that only with the flash-time token — the
+same trust the power button has.
 
 Wiring (channel order = header order):
 
@@ -898,8 +941,9 @@ first; if that board was flashed with a different one, its first command is
 rejected and the page asks for that board's token. Give each board its own
 `name` so the dropdown reads as more than `BC250`, `BC250 (2)`.
 
-What the remote can do is deliberately narrow — the same gestures as the
-physical button, and nothing else:
+What the remote can *do* to the machine is deliberately narrow — the same
+gestures as the physical button, and nothing else (the fan dashboard below
+edits the daemon's curves, never the power):
 
 - **Power on** (the press-while-off edge, `pwr::remoteRequest`), taking the
   exact same path as a real press: the fan boost arms, the power-on
@@ -911,6 +955,38 @@ physical button, and nothing else:
   crash rescue, which is the one moment a *remote* power button really earns
   its keep. The page double-confirms it; the firmware accepts it while
   booting too (a boot that never comes up is exactly a case for it).
+
+### The dashboard
+
+Under the power ring, once connected, the page shows what the box is doing:
+
+- **Host tiles** — CPU temperature (the top-level `sensors` pick), CPU load
+  and GPU load, with how long ago the daemon last reported. Blank when the
+  machine is off or the daemon isn't running.
+- **One card per fan header** — the duty the receiver is actually applying
+  and where it came from (a `live` chip for the daemon's curve, `boost` for
+  the power-on boost, `fallback` when nothing is driving it, `hold` while the
+  machine powers down), the curve's own input (`58.3 °C`, `GPU 62 %`, …), and
+  the curve itself with the current operating point marked on it. "Edit
+  curve" makes the points draggable (or type them; add and remove up to six)
+  and opens boost and fallback; **Save** sends just that header's change and
+  the card says `saved` only when the daemon has applied it, written it into
+  the config and pushed the config back — see
+  [Editing curves from the phone](#editing-curves-from-the-phone). A header
+  enabled in the config but not flashed onto the receiver is called out on
+  its card.
+- **Fan behaviour** — hysteresis, ramp-down rate and boost length, editable
+  the same way.
+- **Receiver** — firmware version, uptime, free heap, whether a host is on
+  the link.
+
+Nothing about the dashboard costs anything while no phone has it open: the
+receiver only assembles its view while a page is subscribed, and only then
+tells the daemon to read and send the readings (a keepalive every 10 s; the
+daemon stops 30 s after the last). A receiver on firmware from before the
+dashboard shows the ring alone. Open `docs/index.html?demo` (or the hosted
+page with `?demo`) to see the dashboard on sample data with no receiver at
+all.
 
 Radio policy: the receiver advertises in both PSU states — a crashed machine
 must be reachable, and it counts as "on" — but at two paces: 300 ms intervals
@@ -1002,6 +1078,17 @@ Command frame (distinct second sync byte, so the pixel parser skips it):
 | 2 | payload length (LE) |
 | n | payload |
 | 1 | checksum: XOR of command, length, and payload bytes |
+
+Receiver → host, three frame types on the same line, each with its own second
+sync byte: a **log** frame (`0xAA 0x58`, the debug backchannel), a **request**
+frame (`0xAA 0x59`, the power button asking for a graceful shutdown; answered
+with command `0x06`), and a **message** frame (`0xAA 0x5A`) for the BLE
+dashboard — `kind(1) len(1) payload checksum`, sent once, carrying a phone's
+fan-curve edit (`0x01`) or "a phone is watching" (`0x02`). The dashboard's
+host → receiver commands are `0x0A` (the fan config as the daemon runs it) and
+`0x0B` (its live readings). All three payloads are small JSON texts in the
+shape `daemon/fans.hpp` documents — the receiver relays them to the phone
+without parsing them.
 
 Byte values and payload formats live in `common/protocol.hpp`, shared by host
 and firmware. The receiver drops bad-checksum frames and rescans for sync, so a

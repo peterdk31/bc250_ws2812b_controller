@@ -10,7 +10,7 @@ idf_component_register(
          "led_service.cpp" "power_switch.cpp" "dbglog.cpp" "hostreq.cpp"
          "fan.cpp" "ble.cpp"
     INCLUDE_DIRS "." "${CMAKE_CURRENT_LIST_DIR}/../../common"
-    REQUIRES driver nvs_flash esp_timer esp_adc esp_partition bt
+    REQUIRES driver nvs_flash esp_timer esp_adc esp_partition esp_app_format bt
 )
 
 # HOST_BAUD and HOST_TIMEOUT_MS are baked in so the receiver and daemon agree on

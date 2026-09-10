@@ -11,7 +11,9 @@
 #include <sys/wait.h>
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -47,9 +49,8 @@ public:
         int baud = cfg.getInt("serial.baud", 921600);
 
         // opt-in debug backchannel: when set, the receiver's in-RAM log
-        // (firmware/main/dbglog.*) is drained over the return direction of the
-        // link and forwarded to stderr, i.e. journalctl. Off = today's
-        // behavior exactly (write-only, no reads, nothing polled).
+        // (firmware/main/dbglog.*) is asked for and forwarded to stderr, i.e.
+        // journalctl. Off = nothing is ever asked for.
         bool debug = cfg.getBool("serial.debug_log", false);
 
         // opt-in power button: the receiver's power switch (firmware/main/
@@ -76,6 +77,13 @@ public:
             new SerialSink(port.c_str(), baud, debug, button, buttonCmd));
     }
 
+    // The link is opened read/write and a reader thread always listens for the
+    // receiver's frames (protocol.hpp: log, request and message frames) — one
+    // path, whatever the config enables. The features only decide what is
+    // done with what arrives: the debug log is forwarded when asked for, a
+    // shutdown request acted on when the button is opted in, the dashboard's
+    // messages queued for the main thread always (daemon/fans.hpp ignores
+    // them when it has no fans). An idle reader is a 200 ms poll timeout.
     SerialSink(const char* port, int baud = 921600, bool debug = false,
                bool powerButton = false,
                const std::string& powerCmd = "systemctl poweroff")
@@ -89,10 +97,7 @@ public:
             exit(1);
         }
 
-        // both backchannel features need the return direction, so open
-        // read/write for them; with neither on, keep the port write-only and
-        // nothing is ever read or parsed
-        fd = open(port, (reading() ? O_RDWR : O_WRONLY) | O_NOCTTY);
+        fd = open(port, O_RDWR | O_NOCTTY);
 
         if (fd < 0)
         {
@@ -129,8 +134,7 @@ public:
             fprintf(stderr, "serial: receiver power button on, will run \"%s\"\n",
                     powerCmd_.c_str());
 
-        if (reading())
-            reader_ = std::thread(&SerialSink::readerLoop, this);
+        reader_ = std::thread(&SerialSink::readerLoop, this);
     }
 
     SerialSink(const SerialSink&) = delete;
@@ -253,7 +257,34 @@ private:
         writeAll(f, sizeof f); // best-effort; a real fault stops us via send()
     }
 
-    bool reading() const { return debug_ || powerButton_; }
+public:
+    // the dashboard's messages, for the main thread (see Sink::takeMessage)
+    bool takeMessage(uint8_t& kind, std::vector<uint8_t>& payload) override
+    {
+        if (inboxCount_.load(std::memory_order_relaxed) == 0)
+            return false; // the common case, without taking the lock
+
+        std::lock_guard<std::mutex> lock(inboxMx_);
+        if (inbox_.empty())
+            return false;
+        kind = inbox_.front().first;
+        payload = std::move(inbox_.front().second);
+        inbox_.pop_front();
+        inboxCount_.store((int)inbox_.size(), std::memory_order_relaxed);
+        return true;
+    }
+
+private:
+    // a msg frame from the receiver: queue it for the main thread. Reader
+    // thread only. Bounded — a receiver gone chatty can't grow the heap.
+    void onMessage(uint8_t kind, const uint8_t* payload, int len)
+    {
+        std::lock_guard<std::mutex> lock(inboxMx_);
+        if (inbox_.size() >= 8)
+            inbox_.pop_front();
+        inbox_.emplace_back(kind, std::vector<uint8_t>(payload, payload + len));
+        inboxCount_.store((int)inbox_.size(), std::memory_order_relaxed);
+    }
 
     // Act on a request frame from the receiver. Reader thread only.
     void onRequest(uint8_t req, uint32_t nonce)
@@ -263,10 +294,9 @@ private:
 
         if (!powerButton_)
         {
-            // we parse the return direction whenever we read at all (i.e. for
-            // debug_log alone too), but acting is opt-in. Say so once: from the
-            // button's end an ignored press is indistinguishable from a broken
-            // wire, and this line is the difference.
+            // the return direction is always read, but acting is opt-in. Say so
+            // once: from the button's end an ignored press is indistinguishable
+            // from a broken wire, and this line is the difference.
             if (!warnedOff_)
             {
                 warnedOff_ = true;
@@ -322,10 +352,11 @@ private:
 
     // read the return direction and dispatch each valid receiver→host frame
     // (protocol.hpp): LOG frames to stderr -> journald, request frames to
-    // onRequest. Runs only when one of the two backchannel features is on.
+    // onRequest, msg frames to the inbox.
     void readerLoop()
     {
-        enum { SCAN, TYPE, LOG_HDR, LOG_DATA, LOG_SUM, REQ_BODY } st = SCAN;
+        enum { SCAN, TYPE, LOG_HDR, LOG_DATA, LOG_SUM, REQ_BODY,
+               MSG_KIND, MSG_LEN, MSG_DATA, MSG_SUM } st = SCAN;
         uint8_t hdr[9];
         int hn = 0, len = 0, have = 0;
         uint32_t seq = 0, ms = 0;
@@ -334,6 +365,8 @@ private:
         uint8_t buf[256];
         uint8_t rq[6];
         int rn = 0;
+        uint8_t mkind = 0;
+        uint8_t mdata[256];
 
         while (!stop_.load(std::memory_order_relaxed))
         {
@@ -362,7 +395,30 @@ private:
                 case TYPE:
                     if (b == proto::LOG_SYNC) { st = LOG_HDR; hn = 0; }
                     else if (b == proto::REQ_SYNC) { st = REQ_BODY; rn = 0; }
+                    else if (b == proto::MSG_SYNC) st = MSG_KIND;
                     else if (b != proto::SYNC0) st = SCAN;
+                    break;
+                case MSG_KIND:
+                    // kind(1) len(1) payload checksum
+                    mkind = b;
+                    sum = b;
+                    st = MSG_LEN;
+                    break;
+                case MSG_LEN:
+                    len = b;
+                    sum ^= b;
+                    have = 0;
+                    st = len ? MSG_DATA : MSG_SUM;
+                    break;
+                case MSG_DATA:
+                    mdata[have++] = b;
+                    sum ^= b;
+                    if (have == len) st = MSG_SUM;
+                    break;
+                case MSG_SUM:
+                    if (b == sum)
+                        onMessage(mkind, mdata, len);
+                    st = SCAN;
                     break;
                 case REQ_BODY:
                     // req(1) nonce(4) checksum
@@ -470,6 +526,12 @@ private:
     std::string powerCmd_;
     std::atomic<bool> poweringOff_{false}; // the command has been run once
     bool warnedOff_ = false;               // reader thread only
+
+    // the dashboard's messages: the reader thread queues them, the main
+    // thread takes them (takeMessage)
+    std::mutex inboxMx_;
+    std::deque<std::pair<uint8_t, std::vector<uint8_t>>> inbox_;
+    std::atomic<int> inboxCount_{0};
 
     // the reader thread's return direction, in both senses: it reads frames,
     // and hands acks back to the writer (see send())
