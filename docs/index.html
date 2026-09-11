@@ -87,6 +87,7 @@
     --danger: #d15252;
   }
   * { box-sizing: border-box; margin: 0; }
+  [hidden] { display: none !important; } /* wins over .editor/.curve display rules */
   body {
     background: var(--bg);
     color: var(--text);
@@ -97,7 +98,7 @@
     align-items: center;
     justify-content: center;
     gap: 1.25rem;
-    padding: 2rem 1.5rem;
+    padding: 1.5rem .75rem 2rem;
     text-align: center;
   }
   h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: .08em;
@@ -161,12 +162,18 @@
   #tokenbox.show { display: flex; }
   #tokenbox p { font-size: .85rem; color: var(--muted); }
 
-  /* ---- the dashboard: left-aligned cards under the ring ---- */
-  #dash { display: none; width: 100%; max-width: 30rem; text-align: left;
-          flex-direction: column; gap: .75rem; }
-  #dash.show { display: flex; }
+  /* ---- the dashboard: left-aligned cards under the ring. One column on a
+     phone; as many as fit (19rem each) on anything wider, the host card
+     always spanning the row. The fan cards' wrapper is transparent to the
+     grid (display: contents) so they flow with the rest. ---- */
+  #dash { display: none; width: 100%; max-width: 64rem; text-align: left;
+          grid-template-columns: repeat(auto-fill, minmax(min(100%, 19rem), 1fr));
+          gap: .75rem; align-items: start; }
+  #dash.show { display: grid; }
+  #fancards { display: contents; }
+  #hostcard { grid-column: 1 / -1; }
   .card { background: var(--panel); border: 1px solid #232a3d; border-radius: .75rem;
-          padding: .8rem .9rem; }
+          padding: .75rem .8rem; min-width: 0; }
   .card h2 { font-size: .75rem; font-weight: 600; letter-spacing: .08em;
              text-transform: uppercase; color: var(--muted); margin-bottom: .5rem; }
   .card h2 .r { float: right; font-weight: 400; letter-spacing: 0; text-transform: none; }
@@ -209,23 +216,41 @@
 
   .fan .tools { grid-column: 1 / -1; display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-top: .3rem; }
   .fan .tools button, .gl .tools button { padding: .35rem .8rem; font-size: .82rem; }
-  .fan .tools .msg { font-size: .8rem; color: var(--muted); }
+  .fan .tools .msg { font-size: .8rem; color: var(--muted); flex: 1 1 8rem; min-width: 0; }
   .fan .tools .msg.ok { color: var(--on); }
   .fan .tools .msg.err { color: var(--danger); }
 
-  /* the editor: point rows and the two standalone fields */
-  .editor { grid-column: 1 / -1; display: flex; flex-direction: column; gap: .4rem; margin-top: .2rem; }
-  .editor .row { justify-content: flex-start; gap: .4rem; align-items: center; }
-  .editor label { font-size: .78rem; color: var(--muted); min-width: 4.5rem; }
-  .editor input { width: 4.6rem; padding: .35rem .4rem; text-align: right; letter-spacing: 0; font-size: .9rem; }
+  /* the editor: point rows on a fixed grid (label · x · unit · y · % · remove)
+     so a row never wraps at phone width; the two standalone fields are
+     label · input · hint, the hint taking whatever is left */
+  .editor { --lbl: 3.4rem; --inp: 4.2rem; /* label and number-field widths, shared by both row kinds */
+            grid-column: 1 / -1; display: flex; flex-direction: column; gap: .4rem; margin-top: .2rem; }
+  .editor .prow { display: grid; grid-template-columns: var(--lbl) var(--inp) auto var(--inp) auto 2rem;
+                  gap: .3rem; align-items: center; }
+  .editor .prow.const { grid-template-columns: var(--lbl) var(--inp) auto; }
+  .editor .row { justify-content: flex-start; gap: .3rem; align-items: center; flex-wrap: nowrap; }
+  .editor .row label { flex: 0 0 var(--lbl); }
+  .editor .row .unit { flex: 1 1 0; min-width: 0; }
+  .editor label { font-size: .78rem; color: var(--muted); }
+  .editor input { width: var(--inp); padding: .35rem .4rem; text-align: right; letter-spacing: 0; font-size: .9rem; }
   .editor input:invalid { border-color: var(--danger); }
-  .editor .x { cursor: pointer; padding: .2rem .55rem; font-size: .9rem; line-height: 1; }
-  .editor .unit { font-size: .78rem; color: var(--muted); }
+  .editor input::placeholder { font-size: .8rem; letter-spacing: -.01em; }
+  .editor .x { cursor: pointer; padding: .2rem 0; font-size: .9rem; line-height: 1; width: 2rem; }
+  .editor .unit { font-size: .78rem; color: var(--muted); white-space: nowrap; }
+  .editor .row .unit { white-space: normal; }
+  /* the narrowest phones (320 px): the point row's fixed columns must shrink
+     with the card rather than push out of it */
+  @media (max-width: 340px) {
+    .editor { --lbl: 3rem; --inp: 3.6rem; }
+    .editor .prow { grid-template-columns: var(--lbl) var(--inp) auto var(--inp) auto 1.8rem; }
+    .editor input { padding-inline: .25rem; }
+  }
 
   .gl .fields { display: grid; grid-template-columns: auto 1fr; gap: .4rem .75rem; align-items: center; font-size: .9rem; }
   .gl .fields span { color: var(--muted); font-size: .85rem; }
   .gl .fields input { width: 5.5rem; text-align: right; letter-spacing: 0; padding: .3rem .4rem; }
   .gl .tools { display: flex; gap: .5rem; align-items: center; margin-top: .6rem; flex-wrap: wrap; }
+  .gl .tools .msg { flex: 1 1 8rem; min-width: 0; }
 
   .info { display: grid; grid-template-columns: auto 1fr; gap: .25rem .75rem; font-size: .85rem; }
   .info span:nth-child(odd) { color: var(--muted); }
@@ -413,8 +438,9 @@ function render() {
   const connected = !!(device && device.gatt.connected);
   $('dash').classList.toggle('show', connected && !!fansChr);
   const pending = !!device && attempt === device;
-  powerBtn.className = (STATE_NAMES[psu] || 'off') +
-                       (!connected && (pending || busy) ? ' wait' : '');
+  // breathe while connecting AND while a tap's write is queued behind other
+  // link traffic (the dashboard's opening reads can hold it for a second or two)
+  powerBtn.className = (STATE_NAMES[psu] || 'off') + (pending || busy ? ' wait' : '');
   // graceful shutdown needs a running OS to ask; the hard cut only needs the
   // PSU to be up — it's the crash rescue, so it shows while booting too
   shutdownBtn.hidden = !(connected && psu === 2);
@@ -448,6 +474,36 @@ function render() {
 }
 
 // ---- BLE ----
+// Chrome does not queue GATT operations: on Android a read or write started
+// while another is still in flight on the same device fails outright ("GATT
+// operation failed for unknown reason"), whatever the characteristic. Every
+// operation on the link goes through this one chain, so a tap on the power
+// button can't land in the middle of a dashboard read. An operation that
+// never settles (Android occasionally loses one when the link drops without
+// saying so) would otherwise park everything behind it — including the power
+// button — so each gets a deadline, and a disconnect or a receiver switch
+// starts a fresh chain (whatever was queued belonged to the old link). A
+// deadline that fires is taken at its word: the link is dropped, so an
+// operation Chrome may still have in flight can't collide with the next
+// one, and the usual auto-reconnect brings the board back.
+const GATT_OP_TIMEOUT_MS = 10000;
+let gattChain = Promise.resolve();
+function gattQueue(op) {
+  const p = gattChain.then(() => new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      reject(new Error('Bluetooth operation timed out — the link may be gone'));
+      try { device?.gatt.disconnect(); } catch {}
+    }, GATT_OP_TIMEOUT_MS);
+    Promise.resolve().then(op).then(resolve, reject).finally(() => clearTimeout(t));
+  }));
+  gattChain = p.then(() => {}, () => {});
+  return p;
+}
+const gattReset = () => { gattChain = Promise.resolve(); };
+const gattRead = c => gattQueue(() => c.readValue());
+const gattWrite = (c, v) => gattQueue(() => c.writeValueWithResponse(v));
+const gattSubscribe = c => gattQueue(() => c.startNotifications());
+
 // top-level named handlers: addEventListener dedupes identical refs, so
 // re-attaching across reconnects can't stack them
 const onStatusEvent = e => { if (e.target === stat) onStatus(e.target.value.getUint8(0)); };
@@ -460,6 +516,7 @@ function attach(d) {
   ctrl = stat = null;
   psu = -1;
   editToken = false;
+  gattReset();
   dashReset();
   store.set('ble-current', d.id);
   d.addEventListener('gattserverdisconnected', onDisconnected);
@@ -471,8 +528,8 @@ async function open() {
   const svc = await gatt.getPrimaryService(SVC);
   const c = await svc.getCharacteristic(CTRL);
   const s = await svc.getCharacteristic(STAT);
-  await s.startNotifications();
-  const first = (await s.readValue()).getUint8(0);
+  await gattSubscribe(s);
+  const first = (await gattRead(s)).getUint8(0);
   if (device !== d) { gatt.disconnect(); return; } // superseded while we were at it
   ctrl = c; stat = s;
   s.addEventListener('characteristicvaluechanged', onStatusEvent);
@@ -491,6 +548,7 @@ function onDisconnected(e) {
   if (e.target !== device) return; // a stale device we already replaced
   ctrl = stat = null;
   psu = -1;
+  gattReset();
   dashReset();
   render();
   scheduleReconnect(1000);
@@ -605,19 +663,31 @@ async function write(op) {
   buf.set(tokenBytes());
   buf[TOKEN_LEN] = op;
   try {
-    await ctrl.writeValueWithResponse(buf);
+    await gattWrite(ctrl, buf);
     say('');
   } catch (e) {
-    // NimBLE answers a wrong token with "insufficient authentication"
-    if (/auth|not permitted|gatt/i.test(e.message)) {
+    if (tokenRejected(e)) {
       say(`Token rejected by ${label(device.id)} — enter the one it was flashed with.`);
       editToken = true;
     } else {
-      say(`Write failed: ${e.message}`);
+      say(`Write failed: ${e.message}${writeHint(e)}`);
     }
     throw e;
   }
 }
+
+// What a failed write means. The firmware answers a wrong token with "write
+// not permitted" — the ATT code for an application-level refusal, and the
+// one every platform reports distinctly. On Android, Chrome folds almost
+// everything else into "GATT Error Unknown.": the receiver's other refusals
+// (a full message queue, a bad length), the Android stack's own link-loss
+// status, and the "insufficient authentication" that firmware before Sep
+// 2026 answered a wrong token with. So that text is not proof of anything
+// in particular, and is worded that way.
+const tokenRejected = e => /not permitted|not authori[sz]ed|not paired|authentication/i.test(e.message);
+const writeHint = e => /GATT Error Unknown/i.test(e.message)
+  ? ' — Android reports several things this way: the link dropping, the receiver’s queue being full, or a wrong token on older firmware'
+  : '';
 
 // ---- the dashboard ----
 // Four values off the receiver: `fans` (its own live view, binary, notified
@@ -715,20 +785,43 @@ function dashReset() {
 function dashNote(text) { $('hostnote').textContent = text; }
 
 // a notification is truncated to the ATT MTU; a read isn't. The fans value
-// fits any MTU, the two JSON values may not — so those are always re-read.
+// fits any MTU; the two JSON values may not. Both are JSON objects, so a
+// value that parses arrived whole and is used as it is; one cut short is
+// re-read. One read at a time: notifications that land while a read is in
+// flight don't each start another (reading on every notification, as this
+// once did, kept the link busy whenever telemetry moved and made the user's
+// own writes fail) — they mark the read stale, so it runs once more and the
+// newest value is never dropped.
+const whole = text => { try { JSON.parse(text); return true; } catch { return false; } };
+function jsonNotifier(current, apply) {
+  let reading = false, stale = false;
+  return async e => {
+    const chr = e.target;
+    if (chr !== current()) return;
+    const dv = chr.value;
+    if (!dv.byteLength || whole(utf8.decode(dv))) { apply(dv); return; }
+    if (reading) { stale = true; return; }
+    reading = true;
+    try {
+      do {
+        stale = false;
+        const v = await gattRead(chr);
+        if (chr !== current()) return; // the dashboard closed or moved on meanwhile
+        apply(v);
+      } while (stale);
+    } catch {} finally { reading = false; }
+  };
+}
 const onFansEvent = e => {
   if (e.target !== fansChr) return;
   const f = parseFans(e.target.value);
   if (f) { fans = f; renderDash(); }
 };
-const onCfgEvent = async e => {
-  if (e.target !== cfgChr) return;
-  try { onCfg(await cfgChr.readValue()); } catch {}
-};
-const onTelemEvent = async e => {
-  if (e.target !== telemChr) return;
-  try { telem = parseTelem(utf8.decode(await telemChr.readValue())); renderDash(); } catch {}
-};
+const onCfgEvent = jsonNotifier(() => cfgChr, onCfg);
+const onTelemEvent = jsonNotifier(() => telemChr, dv => {
+  telem = dv.byteLength ? parseTelem(utf8.decode(dv)) : null;
+  renderDash();
+});
 
 function onCfg(dv) {
   cfg = dv.byteLength ? parseCfg(utf8.decode(dv)) : null;
@@ -756,15 +849,15 @@ async function dashOpen(svc) {
   f.addEventListener('characteristicvaluechanged', onFansEvent);
   c.addEventListener('characteristicvaluechanged', onCfgEvent);
   t.addEventListener('characteristicvaluechanged', onTelemEvent);
-  await f.startNotifications();
-  await c.startNotifications();
-  await t.startNotifications(); // this one tells the daemon to start reporting
-  const fv = parseFans(await f.readValue());
+  await gattSubscribe(f);
+  await gattSubscribe(c);
+  await gattSubscribe(t); // this one tells the daemon to start reporting
+  const fv = parseFans(await gattRead(f));
   if (fv) fans = fv;
-  onCfg(await c.readValue());
-  const tv = await t.readValue();
+  onCfg(await gattRead(c));
+  const tv = await gattRead(t);
   telem = tv.byteLength ? parseTelem(utf8.decode(tv)) : null;
-  if (i) { try { info = parseInfo(await i.readValue()); } catch { info = null; } }
+  if (i) { try { info = parseInfo(await gattRead(i)); } catch { info = null; } }
   renderDash();
 }
 
@@ -912,7 +1005,7 @@ function renderFanCard(el, slot) {
   bar.firstChild.style.width = `${duty === null ? 0 : duty}%`;
 
   const svg = el.querySelector('.curve');
-  svg.hidden = !work || !work.pts.length;
+  svg.toggleAttribute('hidden', !work || !work.pts.length); // SVG elements have no .hidden property
   if (work && work.pts.length) drawCurve(svg, work, tm && tm.in !== undefined ? tm.in : null, editing);
   svg.classList.toggle('editing', editing);
 
@@ -1042,16 +1135,16 @@ function renderEditor(ed, slot) {
     ed.dataset.rows = rows; ed.dataset.kind = h.kind;
     const parts = [];
     for (let i = 0; i < rows; i++) {
-      parts.push(`<div class="row">
+      parts.push(`<div class="prow${h.kind === KIND_CONST ? ' const' : ''}">
         ${h.kind === KIND_CONST ? '<label>duty</label>' :
           `<label>point ${i + 1}</label><input type="number" class="px" data-i="${i}" step="${h.kind === KIND_TEMP ? 0.5 : 1}"><span class="unit">${unit} →</span>`}
         <input type="number" class="py" data-i="${i}" min="0" max="100" step="1"><span class="unit">%</span>
-        ${h.kind !== KIND_CONST && rows > 1 ? `<button class="minor x" data-i="${i}" title="remove point">×</button>` : ''}
+        ${h.kind !== KIND_CONST ? (rows > 1 ? `<button class="minor x" data-i="${i}" title="remove point">×</button>` : '<span></span>') : ''}
       </div>`);
     }
     if (h.kind !== KIND_CONST && rows < MAX_POINTS)
       parts.push('<div class="row"><label></label><button class="minor add">+ point</button></div>');
-    parts.push(`<div class="row"><label>boost</label><input type="number" class="boost" min="0" max="100" step="1" placeholder="none"><span class="unit">% at power-on, blank = none</span></div>`);
+    parts.push(`<div class="row"><label>boost</label><input type="number" class="boost" min="0" max="100" step="1" placeholder="none"><span class="unit">% at power-on</span></div>`);
     parts.push(`<div class="row"><label>fallback</label><input type="number" class="fb" min="0" max="100" step="1"><span class="unit">% without the daemon</span></div>`);
     ed.innerHTML = parts.join('');
     ed.querySelectorAll('.px').forEach(inp => inp.addEventListener('input', () => {
@@ -1112,7 +1205,7 @@ async function writeCfg(key, edit) {
   flash(key, 'saving…');
   renderDash();
   try {
-    await cfgChr.writeValueWithResponse(buf);
+    await gattWrite(cfgChr, buf);
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       if (saving !== key) return;
@@ -1122,10 +1215,10 @@ async function writeCfg(key, edit) {
     }, SAVE_TIMEOUT_MS);
   } catch (e) {
     saving = null;
-    if (/auth|not permitted|gatt/i.test(e.message)) {
+    if (tokenRejected(e)) {
       flash(key, 'token rejected', 'err');
       editToken = true;
-    } else flash(key, `write failed: ${e.message}`, 'err');
+    } else flash(key, `write failed: ${e.message}${writeHint(e)}`, 'err');
     renderDash();
   }
 }

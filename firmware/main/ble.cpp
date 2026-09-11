@@ -40,9 +40,9 @@
 //                           on, 0x02 = graceful shutdown, 0x03 = hard off
 //                           (release PS_ON#: the remote form of holding the
 //                           button, for a crashed machine). A wrong token is
-//                           rejected with "insufficient authentication"; a
-//                           right one stages the request with the pwr task
-//                           and succeeds even if the state makes it moot
+//                           rejected with "write not permitted" (TOKEN_ERR,
+//                           below); a right one stages the request with the
+//                           pwr task and succeeds even if the state makes it moot
 //                           (the status characteristic is how a client sees
 //                           what actually happened).
 //   status (read + notify): one byte, pwr's coarse PSU state: 0 = off,
@@ -82,13 +82,24 @@ static const uint32_t POLL_MS = 250; // policy task cadence
 // machine that crashed, which is precisely when the host is "up" — but at
 // two paces: quick to find while the machine is off (the everyday power-on
 // case, and 300 ms is still gentle on the 5VSB budget), slow while it is on,
-// where reaching us is the rare rescue case and every radio interrupt is one
-// the RMT strip refills don't need to compete with.
+// where reaching us is the rare rescue case and the radio should stay a
+// rounding error next to the strip's latch cadence.
 static const uint16_t ADV_ITVL_OFF = 0x01E0; // 480 × 0.625 ms = 300 ms
 static const uint16_t ADV_ITVL_ON = 0x0800;  // 2048 × 0.625 ms = 1.28 s
 
 static const uint16_t TOKEN_LEN = 16;
 static const uint16_t NAME_LEN = 16;
+
+// the ATT error a wrong token gets. "Insufficient authentication" (what this
+// returned until Sep 2026) is the ATT code for "encrypt/pair the link first",
+// which is not what a bad application-level secret means — and on Android
+// Chrome reports it, like nearly every other ATT error, to the web page as one
+// opaque "GATT Error Unknown.", so the page could not tell a bad token from
+// anything else. "Write not permitted" is one of the few codes every platform
+// passes through distinctly ("GATT operation not permitted."); the page keys
+// on it. The other errors below (bad length, unknown op, queue full) still
+// reach an Android page as "Unknown"; the page words that honestly.
+static const int TOKEN_ERR = BLE_ATT_ERR_WRITE_NOT_PERMITTED;
 
 static const ble_uuid128_t SVC_UUID = BLE_UUID128_INIT(
     0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
@@ -281,7 +292,7 @@ static int ctrlAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     if (diff)
     {
         BLOG("command with a wrong token rejected");
-        return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+        return TOKEN_ERR;
     }
 
     uint8_t op = buf[TOKEN_LEN];
@@ -366,7 +377,7 @@ static int fancfgAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     if (!tokenOk(buf))
     {
         BLOG("fan edit with a wrong token rejected");
-        return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+        return TOKEN_ERR;
     }
 
     if (!hostreq::post(proto::MSG_FAN_CONFIG, buf + TOKEN_LEN, len - TOKEN_LEN))
