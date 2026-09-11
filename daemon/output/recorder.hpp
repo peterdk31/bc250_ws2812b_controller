@@ -7,6 +7,7 @@
 #include <memory>
 #include "config_loader.hpp"
 #include "effect.hpp"
+#include <functional>
 #include "strip.hpp"
 #include "sink.hpp"
 #include "protocol.hpp"
@@ -141,8 +142,15 @@ inline bool record(const Config& cfg, Strip canvas, const std::string& slot,
 // Stream a Recording to every sink as CMD_REC_BEGIN / N×CMD_REC_FRAME /
 // CMD_REC_END (common/protocol.hpp). Only the serial transport acts on
 // commands; the viewer and any other sink no-op (see host/sink.hpp).
+//
+// `keepalive`, when given, is called every KEEPALIVE_FRAMES recorded frames.
+// An upload of a long recording paces out over seconds, and the receiver
+// counts only pixel frames as the host being alive (it blanks the strip after
+// its host timeout) — a caller uploading while an effect is running passes
+// something that re-sends the current pixel frame.
+static const uint16_t KEEPALIVE_FRAMES = 32; // ~64 ms of paced frames apart
 inline void upload(std::vector<std::unique_ptr<Sink>>& sinks, uint8_t slotId,
-                   const Recording& r)
+                   const Recording& r, const std::function<void()>& keepalive = {})
 {
     uint8_t begin[Recording::kBeginLen];
     r.encodeBegin(begin, slotId);
@@ -151,9 +159,13 @@ inline void upload(std::vector<std::unique_ptr<Sink>>& sinks, uint8_t slotId,
         s->sendCommand(proto::CMD_REC_BEGIN, begin, sizeof begin);
 
     for (uint16_t i = 0; i < r.frameCount; i++)
+    {
         for (auto& s : sinks)
             s->sendCommand(proto::CMD_REC_FRAME, r.frame(i),
                            (uint16_t)r.frameBytes());
+        if (keepalive && (i + 1) % KEEPALIVE_FRAMES == 0)
+            keepalive();
+    }
 
     for (auto& s : sinks)
         s->sendCommand(proto::CMD_REC_END, &slotId, 1);

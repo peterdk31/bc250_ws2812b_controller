@@ -116,6 +116,15 @@
     ],
     "rules": [
         {
+            "if": "file:/tmp/led-static-color",
+            "effect": "solid",
+            "hold": 0,
+            "settings": {
+                "color": "ffffff",
+                "level": 1.0
+            }
+        },
+        {
             "if": "temp>85",
             "effect": "alarm",
             "hold": 0,

@@ -203,18 +203,6 @@ static uint8_t g_pendLive[MAX_FANS];
 static bool g_pendLiveSet = false;
 static bool g_pendShutdown = false;
 
-// the daemon's two dashboard payloads (fan.hpp, "the BLE dashboard's view"),
-// kept verbatim under their own lock — the fan task never reads them, so
-// they can't contend with its pending-push section
-static portMUX_TYPE g_dashMux = portMUX_INITIALIZER_UNLOCKED;
-static uint8_t g_hostCfg[HOST_CONFIG_MAX];
-static uint16_t g_hostCfgLen = 0;
-static uint32_t g_hostCfgSeq = 0;
-static uint8_t g_hostTel[HOST_TELEM_MAX];
-static uint16_t g_hostTelLen = 0;
-static uint32_t g_hostTelSeq = 0;
-static uint32_t g_hostTelMs = 0;
-
 // boost state (see boostCheck): with the power switch present, an armed
 // one-shot keyed to its power-on events; without it, an edge detector on USB
 // SOF presence (which the UART build hardcodes true, so the boost fires once
@@ -540,61 +528,6 @@ void hostShutdown()
 }
 
 // ---- the dashboard's view ----
-
-void setHostConfig(const uint8_t* payload, uint16_t len)
-{
-    // a payload this build can't hold is a newer daemon's; drop it rather
-    // than serve a truncated one the phone would misread
-    if (len == 0 || len > sizeof g_hostCfg)
-        return;
-
-    taskENTER_CRITICAL(&g_dashMux);
-    memcpy(g_hostCfg, payload, len);
-    g_hostCfgLen = len;
-    g_hostCfgSeq++;
-    taskEXIT_CRITICAL(&g_dashMux);
-}
-
-void setHostTelemetry(const uint8_t* payload, uint16_t len)
-{
-    if (len == 0 || len > sizeof g_hostTel)
-        return;
-
-    uint32_t now = millis();
-    taskENTER_CRITICAL(&g_dashMux);
-    memcpy(g_hostTel, payload, len);
-    g_hostTelLen = len;
-    g_hostTelSeq++;
-    g_hostTelMs = now ? now : 1;
-    taskEXIT_CRITICAL(&g_dashMux);
-}
-
-uint16_t hostConfig(uint8_t* out, uint16_t max, uint32_t* seq)
-{
-    taskENTER_CRITICAL(&g_dashMux);
-    uint16_t n = g_hostCfgLen <= max ? g_hostCfgLen : 0;
-    if (n)
-        memcpy(out, g_hostCfg, n);
-    if (seq)
-        *seq = g_hostCfgSeq;
-    taskEXIT_CRITICAL(&g_dashMux);
-    return n;
-}
-
-uint16_t hostTelemetry(uint8_t* out, uint16_t max, uint32_t* seq, uint32_t* ageMs)
-{
-    uint32_t now = millis();
-    taskENTER_CRITICAL(&g_dashMux);
-    uint16_t n = g_hostTelLen <= max ? g_hostTelLen : 0;
-    if (n)
-        memcpy(out, g_hostTel, n);
-    if (seq)
-        *seq = g_hostTelSeq;
-    if (ageMs)
-        *ageMs = g_hostTelMs ? now - g_hostTelMs : 0xFFFFFFFFu;
-    taskEXIT_CRITICAL(&g_dashMux);
-    return n;
-}
 
 void snapshot(Snapshot& s)
 {

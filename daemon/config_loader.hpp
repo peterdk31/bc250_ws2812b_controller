@@ -38,6 +38,14 @@ public:
 
     const json::Value& root() const { return rootValue; }
 
+    // the tree, writable — for the dashboard's edits (daemon/config_edit.hpp),
+    // which change a value in place so the running config matches the file
+    // they just rewrote. Mind who holds pointers into it: a Rule's `settings`
+    // points at a member of a rule object, so growing a RULE object (adding a
+    // member) would move it — growing the strip block or a settings object is
+    // fine, nothing points inside those.
+    json::Value& root() { return rootValue; }
+
     // dotted path into nested objects, e.g. "sinks.serial.port"
     const json::Value* find(const std::string& path) const
     {

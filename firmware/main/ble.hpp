@@ -35,8 +35,7 @@
 //
 // Runs as its own task beside the NimBLE host task; its seams into the rest
 // of the firmware are pwr::psuState() / pwr::remoteRequest() for the remote,
-// and fan::snapshot() / fan::hostConfig() / fan::hostTelemetry() plus
-// hostreq::post() for the dashboard. Removing the feature is deleting ble.*
+// and fan::snapshot() / dash::get() plus hostreq::post() for the dashboard. Removing the feature is deleting ble.*
 // and unhooking those lines.
 namespace ble
 {

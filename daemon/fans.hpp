@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "config_edit.hpp"
 #include "config_loader.hpp"
 #include "hwmon.hpp"
 #include "protocol.hpp"
@@ -65,22 +66,26 @@
 // telemetryJson); a phone edit comes back as MSG_FAN_CONFIG — a partial
 // object of just the fields it changed — is validated exactly like the config
 // (applyJson) and, once live, is written back into the config file itself:
-// only the bytes of the `fans` block are replaced (writeConfig), everything
-// around it stays as the user wrote it. So the config stays the one source of
-// truth — there is no second file to migrate — and a restart reads the edit
-// like any other setting.
+// only the bytes of the `fans` block are replaced (writeConfig, through
+// daemon/config_edit.hpp), everything around it stays as the user wrote it.
+// So the config stays the one source of truth — there is no second file to
+// migrate — and a restart reads the edit like any other setting.
 //
 // The JSON shape the wire and the phone's edits use:
 //
 //     { "editable": true,        // the config file is writable
 //       "hysteresis": 3, "ramp": 5, "boost_seconds": 5,
-//       "header2": { "n": "radiator", "s": "temp",   // read-only
-//                    "c": "45:35 60:55 75:100", "b": null, "f": 100 }, ... }
+//       "header2": { "n": "radiator", "s": "temp",   // s is read-only
+//                    "c": "45:35 60:55 75:100", "f": 100 },
+//       "header5": { "n": "spare", "s": "constant", "en": false }, ... }
 //
-// c/b/f are curve, boost and fallback in the config's own notation; s is the
-// source's kind (constant, temp, pwm, cpu_load, gpu_load). Only enabled
-// headers appear. Keys are short because a GATT attribute holds 512 bytes at
-// most and six headers have to fit.
+// c/b/f are curve, boost and fallback in the config's own notation (b absent
+// = null, no boost), n the name, en whether the header is enabled (absent =
+// true). A disabled header is listed by name and kind only, so the phone can
+// switch it on (its curve then follows); s is the source's kind (constant,
+// temp, pwm, cpu_load, gpu_load) and the one thing the phone can't change.
+// Keys are short because a GATT attribute holds 512 bytes at most and six
+// headers have to fit — pushConfig says so in the journal when they don't.
 namespace fans
 {
 static const int CHANNELS = proto::FAN_CHANNELS;
@@ -181,9 +186,9 @@ public:
     // refuse to start the way it does for a bad rule; true with no block or no
     // enabled header, in which case active() is false and nothing is ever
     // sent.
-    // configPath is the file cfg came from — where a dashboard edit is
-    // written back (see the header comment); "" = edits are refused.
-    bool load(const Config& cfg, const std::string& configPath = "")
+    // writer is the config file's editor (config_edit.hpp), where a dashboard
+    // edit is written back (see the header comment); null = edits are refused.
+    bool load(const Config& cfg, cfgedit::Writer* writer = nullptr)
     {
         const json::Value* block = cfg.root().find("fans");
 
@@ -256,23 +261,14 @@ public:
 
         sensors_ = sensors;
         block_ = *block; // the block as written, for writeConfig to update in place
-        configPath_ = configPath;
-        writable_ = !configPath.empty() && access(configPath.c_str(), W_OK) == 0;
+        writer_ = writer;
 
         return true;
     }
 
     bool active() const { return enabled_ > 0; }
 
-    // did writeConfig rewrite the config file since the last call? The main
-    // loop's file watch (main.cpp) uses this to tell our own write from an
-    // edit it should reload.
-    bool takeWrote()
-    {
-        bool w = wrote_;
-        wrote_ = false;
-        return w;
-    }
+    bool writable() const { return writer_ && writer_->writable(); }
 
     // the receiver's standalone settings — once, at startup
     void pushStandalone(std::vector<std::unique_ptr<Sink>>& sinks)
@@ -298,10 +294,13 @@ public:
 
     // one evaluation: read every enabled header's source, run the curves, and
     // send the live duties if they changed (or the refresh is due). Call it
-    // on the rules tick; it costs nothing when nothing is enabled.
+    // on the rules tick; it costs nothing when nothing is enabled and no
+    // phone is watching (a watcher still gets the host tiles' readings, even
+    // with every header switched off).
     void tick(double now, std::vector<std::unique_ptr<Sink>>& sinks)
     {
-        if (!active())
+        bool watch = watching(now);
+        if (!active() && !watch && !liveOut_)
             return;
 
         float dt = lastTick_ > 0 ? (float)(now - lastTick_) : 0.5f;
@@ -316,18 +315,23 @@ public:
             if (h.enabled)
                 p[h.slot] = (uint8_t)compute(h, dt);
 
+        // with nothing enabled p is all FAN_NONE — sent once, so a header
+        // switched off from the phone is released to its fallback now rather
+        // than after the receiver's live timeout; then nothing until a header
+        // is enabled again
         bool changed = memcmp(p, live_, sizeof p) != 0;
 
-        if (changed || now - lastSent_ >= REFRESH_S)
+        if (changed || (active() && now - lastSent_ >= REFRESH_S))
         {
             memcpy(live_, p, sizeof p);
             lastSent_ = now;
+            liveOut_ = active();
 
             for (auto& s : sinks)
                 s->sendCommand(proto::CMD_FAN_LIVE, p, sizeof p);
         }
 
-        if (watching(now))
+        if (watch)
             sendTelemetry(now, sinks);
     }
 
@@ -395,7 +399,7 @@ public:
         fprintf(out, "fans: hysteresis %g °C, ramp %g %%/s, boost %d s\n",
                 hysteresis_, ramp_, boostSeconds_);
         fprintf(out, "  dashboard edits: %s\n",
-                writable_ ? "written back to the config" : "off (config not writable)");
+                writable() ? "written back to the config" : "off (config not writable)");
 
         for (auto& h : headers_)
         {
@@ -795,41 +799,28 @@ private:
         return out;
     }
 
-    // a JSON string literal's body
-    static std::string jsonEscape(const std::string& s)
-    {
-        std::string out;
-        char buf[8];
-        for (unsigned char ch : s)
-        {
-            if (ch == '"' || ch == '\\')
-                out += '\\', out += (char)ch;
-            else if (ch == '\n')
-                out += "\\n";
-            else if (ch < 0x20)
-                snprintf(buf, sizeof buf, "\\u%04x", ch), out += buf;
-            else
-                out += (char)ch;
-        }
-        return out;
-    }
-
     // the block as run, for the dashboard (see the header comment)
     std::string toJson() const
     {
         char buf[80];
-        std::string j = writable_ ? "{\"editable\":true" : "{\"editable\":false";
+        std::string j = writable() ? "{\"editable\":true" : "{\"editable\":false";
         snprintf(buf, sizeof buf, ",\"hysteresis\":%g,\"ramp\":%g,\"boost_seconds\":%d",
                  hysteresis_, ramp_, boostSeconds_);
         j += buf;
 
         for (auto& h : headers_)
         {
+            j += ",\"" + h.key + "\":{\"n\":\"" + cfgedit::escape(h.name) + "\",\"s\":\"" +
+                 kindName(h.kind) + "\"";
             if (!h.enabled)
+            {
+                // just enough to show and switch on; the curve follows once
+                // it is enabled (the wire is 512 bytes for everything)
+                j += ",\"en\":false}";
                 continue;
-            j += ",\"" + h.key + "\":{\"n\":\"" + jsonEscape(h.name) + "\",\"s\":\"" +
-                 kindName(h.kind) + "\",\"c\":\"" + h.curveText + "\",\"b\":" +
-                 (h.boost < 0 ? std::string("null") : std::to_string(h.boost)) +
+            }
+            j += ",\"c\":\"" + h.curveText + "\"" +
+                 (h.boost < 0 ? std::string() : ",\"b\":" + std::to_string(h.boost)) +
                  ",\"f\":" + std::to_string(h.fallback) + "}";
         }
         return j + "}";
@@ -884,7 +875,20 @@ private:
         std::string curve;
         int boost;    // -1 = none
         int fallback;
+        std::string name;
+        bool enabled;
     };
+
+    static const size_t NAME_CHARS = 16; // the card's title (characters, not bytes);
+                                         // six of these plus curves fit the 512-byte wire
+
+    static size_t utf8Chars(const std::string& s)
+    {
+        size_t n = 0;
+        for (unsigned char c : s)
+            n += (c & 0xC0) != 0x80; // count every byte that isn't a continuation
+        return n;
+    }
 
     // validate a set of edits and, only if every one passes, apply them.
     // `where` prefixes the error lines. Returns false with nothing changed.
@@ -905,6 +909,10 @@ private:
                 return bad(at + ".b", "expected a percent 0..100, or null");
             if (e.fallback < 0 || e.fallback > 100)
                 return bad(at + ".f", "expected a percent 0..100");
+            // only a name the phone changed is held to this — the config may
+            // hold any name, and a curve edit echoes it back untouched
+            if (e.name != e.h->name && (e.name.empty() || utf8Chars(e.name) > NAME_CHARS))
+                return bad(at + ".n", "a name is 1.." + std::to_string(NAME_CHARS) + " characters");
         }
 
         hysteresis_ = hyst;
@@ -917,8 +925,21 @@ private:
             h.curveText = curveToText(h.curve, h.kind == Header::Constant);
             h.boost = edits[i].boost;
             h.fallback = edits[i].fallback;
+            h.name = edits[i].name;
+            if (edits[i].enabled && !h.enabled)
+            {
+                // switched on from the phone: find its sensor now, as load does
+                h.haveIn = h.haveOut = false;
+                if ((h.kind == Header::Temp || h.kind == Header::Pwm) && h.path.empty())
+                    resolve(h);
+            }
+            h.enabled = edits[i].enabled;
             // haveOut stays: the ramp eases from the old duty to the new curve
         }
+
+        enabled_ = 0;
+        for (auto& h : headers_)
+            enabled_ += h.enabled;
         return true;
     }
 
@@ -958,14 +979,18 @@ private:
                 if (!h)
                     return bad(where + "." + k, "no such header in the config");
 
-                HeaderEdit e{h, h->curveText, h->boost, h->fallback};
+                HeaderEdit e{h, h->curveText, h->boost, h->fallback, h->name, h->enabled};
                 for (auto& f : v.members)
                 {
                     const std::string& fk = f.first;
                     const json::Value& fv = f.second;
-                    if (fk == "n" || fk == "s")
+                    if (fk == "s")
                         continue;
-                    if (fk == "c" && (fv.isString() || fv.isNumber()))
+                    if (fk == "n" && fv.isString())
+                        e.name = fv.text;
+                    else if (fk == "en" && fv.type == json::Value::Type::Bool)
+                        e.enabled = fv.boolean;
+                    else if (fk == "c" && (fv.isString() || fv.isNumber()))
                         e.curve = json::toString(fv);
                     else if (fk == "b" && fv.type == json::Value::Type::Null)
                         e.boost = -1;
@@ -992,7 +1017,7 @@ private:
     {
         const std::string where = "fans (dashboard edit)";
 
-        if (!writable_ || headers_.empty())
+        if (!writable() || headers_.empty())
             return bad(where, "refused — the config file is not writable, or has no fans block");
 
         json::Value root;
@@ -1008,11 +1033,13 @@ private:
         }
 
         fprintf(stderr, "fans: live edit applied from the dashboard\n");
-        writeConfig();
         if (standaloneKey() != before)
             pushStandalone(sinks);
         lastSent_ = -1e9; // send the new duties on the next tick, changed or not
-        return true;
+
+        // the edit runs either way; a failed write is said by the writer and
+        // gets no answer, so the phone's timeout names the cause
+        return writeConfig();
     }
 
     // the receiver's standalone settings as one comparable string
@@ -1020,227 +1047,36 @@ private:
     {
         std::string k = std::to_string(boostSeconds_);
         for (auto& h : headers_)
-            k += "|" + std::to_string(h.boost) + ":" + std::to_string(h.fallback);
+            k += "|" + std::to_string(h.enabled ? h.boost : -2) + ":" +
+                 std::to_string(h.enabled ? h.fallback : -2);
         return k;
     }
 
     // ---- writing an edit back into the config file ----
 
-    // a mutable member of an object, appended when absent
-    static json::Value& member(json::Value& obj, const std::string& key)
-    {
-        for (auto& m : obj.members)
-            if (m.first == key)
-                return m.second;
-        obj.members.emplace_back(key, json::Value());
-        return obj.members.back().second;
-    }
-
-    static json::Value jsonNumber(double v)
-    {
-        json::Value n;
-        n.type = json::Value::Type::Number;
-        n.number = v;
-        return n;
-    }
-
-    static json::Value jsonString(const std::string& v)
-    {
-        json::Value n;
-        n.type = json::Value::Type::String;
-        n.text = v;
-        return n;
-    }
-
-    // pretty-print a value the way the config is written: four-space
-    // indents, one member or item per line. `depth` is the nesting of the
-    // value's own opening bracket (the fans block sits at 1).
-    static void writeJson(const json::Value& v, int depth, std::string& out)
-    {
-        using T = json::Value::Type;
-        const std::string pad(4 * depth, ' '), padIn(4 * (depth + 1), ' ');
-        char buf[32];
-
-        switch (v.type)
-        {
-            case T::Null: out += "null"; break;
-            case T::Bool: out += v.boolean ? "true" : "false"; break;
-            case T::Number:
-                if (v.number == (double)(long long)v.number && fabs(v.number) < 1e15)
-                    snprintf(buf, sizeof buf, "%lld", (long long)v.number);
-                else
-                    snprintf(buf, sizeof buf, "%.10g", v.number);
-                out += buf;
-                break;
-            case T::String: out += "\"" + jsonEscape(v.text) + "\""; break;
-            case T::Array:
-                if (v.items.empty()) { out += "[]"; break; }
-                out += "[\n";
-                for (size_t i = 0; i < v.items.size(); i++)
-                {
-                    out += padIn;
-                    writeJson(v.items[i], depth + 1, out);
-                    out += i + 1 < v.items.size() ? ",\n" : "\n";
-                }
-                out += pad + "]";
-                break;
-            case T::Object:
-                if (v.members.empty()) { out += "{}"; break; }
-                out += "{\n";
-                for (size_t i = 0; i < v.members.size(); i++)
-                {
-                    out += padIn + "\"" + jsonEscape(v.members[i].first) + "\": ";
-                    writeJson(v.members[i].second, depth + 1, out);
-                    out += i + 1 < v.members.size() ? ",\n" : "\n";
-                }
-                out += pad + "}";
-                break;
-        }
-    }
-
-    // the end of the JSON value starting at t[i] (a bracketed value, a string
-    // or a bare scalar), respecting strings and escapes
-    static size_t skipValue(const std::string& t, size_t i)
-    {
-        auto skipString = [&](size_t j) {
-            for (j++; j < t.size(); j++)
-            {
-                if (t[j] == '\\') j++;
-                else if (t[j] == '"') return j + 1;
-            }
-            return j;
-        };
-        if (t[i] == '"')
-            return skipString(i);
-        if (t[i] == '{' || t[i] == '[')
-        {
-            int depth = 0;
-            for (; i < t.size(); i++)
-            {
-                if (t[i] == '"') { i = skipString(i) - 1; continue; }
-                if (t[i] == '{' || t[i] == '[') depth++;
-                else if ((t[i] == '}' || t[i] == ']') && --depth == 0) return i + 1;
-            }
-            return i;
-        }
-        while (i < t.size() && !strchr(",}] \t\r\n", t[i]))
-            i++;
-        return i;
-    }
-
-    // the byte span [start, end) of the top-level "fans" member's value in
-    // the config's text. The daemon parsed this same text at startup, so only
-    // a file changed underneath us can make this fail.
-    static bool fansSpan(const std::string& t, size_t& start, size_t& end)
-    {
-        int depth = 0;
-        for (size_t i = 0; i < t.size(); i++)
-        {
-            char c = t[i];
-            if (c == '"')
-            {
-                size_t e = skipValue(t, i);
-                std::string str = t.substr(i + 1, e - i - 2);
-                size_t k = e;
-                while (k < t.size() && isspace((unsigned char)t[k])) k++;
-                if (depth == 1 && k < t.size() && t[k] == ':' && str == "fans")
-                {
-                    for (k++; k < t.size() && isspace((unsigned char)t[k]); k++) {}
-                    start = k;
-                    end = skipValue(t, k);
-                    return end > start;
-                }
-                i = e - 1;
-            }
-            else if (c == '{' || c == '[') depth++;
-            else if (c == '}' || c == ']') depth--;
-        }
-        return false;
-    }
-
     // fold the running values into the block as parsed (every key the user
-    // wrote, in their order) and splice it over the block's bytes in the
-    // config file; the rest of the file is untouched. A failure is said and
-    // leaves the edit live until the next restart, and the dashboard turns
-    // read-only so the phone stops offering saves that can't stick.
-    void writeConfig()
+    // wrote, in their order) and have the writer splice it over the block's
+    // bytes in the config file; the rest of the file is untouched. A failure
+    // is said and leaves the edit live until the next restart (the writer
+    // turns read-only, so the phone stops offering saves that can't stick).
+    bool writeConfig()
     {
-        member(block_, "hysteresis") = jsonNumber(hysteresis_);
-        member(block_, "ramp") = jsonNumber(ramp_);
-        member(block_, "boost_seconds") = jsonNumber(boostSeconds_);
+        cfgedit::member(block_, "hysteresis") = cfgedit::number(hysteresis_);
+        cfgedit::member(block_, "ramp") = cfgedit::number(ramp_);
+        cfgedit::member(block_, "boost_seconds") = cfgedit::number(boostSeconds_);
         for (auto& h : headers_)
         {
-            json::Value& hv = member(block_, h.key);
+            json::Value& hv = cfgedit::member(block_, h.key);
             if (!hv.isObject())
                 continue;
-            member(hv, "curve") = jsonString(h.curveText);
-            member(hv, "boost") = h.boost < 0 ? json::Value() : jsonNumber(h.boost);
-            member(hv, "fallback") = jsonNumber(h.fallback);
+            cfgedit::member(hv, "enabled") = cfgedit::boolean(h.enabled);
+            cfgedit::member(hv, "name") = cfgedit::string(h.name);
+            cfgedit::member(hv, "curve") = cfgedit::string(h.curveText);
+            cfgedit::member(hv, "boost") = h.boost < 0 ? json::Value() : cfgedit::number(h.boost);
+            cfgedit::member(hv, "fallback") = cfgedit::number(h.fallback);
         }
 
-        std::string why;
-        std::ifstream in(configPath_);
-        std::stringstream buf;
-        if (in.is_open())
-            buf << in.rdbuf();
-        std::string text = buf.str();
-        size_t a = 0, b = 0;
-        if (text.empty())
-            why = "can't read it";
-        else if (!fansSpan(text, a, b))
-            why = "no top-level \"fans\" block found — was the file changed under the daemon?";
-
-        // the first rewrite of this daemon's life keeps the file as it found
-        // it, beside it, as insurance against this very code — a tuned config
-        // is the one thing on the box that is hard to recreate
-        if (why.empty() && !backedUp_)
-        {
-            std::string bak = configPath_ + ".bak";
-            FILE* bf = fopen(bak.c_str(), "w");
-            if (bf)
-            {
-                fwrite(text.data(), 1, text.size(), bf);
-                fclose(bf);
-            }
-            backedUp_ = true;
-        }
-
-        std::string block;
-        writeJson(block_, 1, block);
-        text = text.substr(0, a) + block + text.substr(b);
-
-        std::string tmp = configPath_ + ".tmp";
-        struct stat st;
-        bool ok = why.empty();
-        FILE* f = ok ? fopen(tmp.c_str(), "w") : nullptr;
-        if (ok && !f)
-            why = strerror(errno), ok = false;
-        if (ok)
-        {
-            ok = fwrite(text.data(), 1, text.size(), f) == text.size() && fflush(f) == 0 &&
-                 fsync(fileno(f)) == 0;
-            ok = fclose(f) == 0 && ok;
-            if (ok && stat(configPath_.c_str(), &st) == 0)
-                chmod(tmp.c_str(), st.st_mode & 07777);
-            if (ok && rename(tmp.c_str(), configPath_.c_str()) != 0)
-                ok = false;
-            if (!ok)
-            {
-                why = strerror(errno);
-                unlink(tmp.c_str());
-            }
-        }
-
-        if (!ok)
-        {
-            fprintf(stderr, "fans: can't write the edit to %s: %s — it runs until "
-                            "restart; dashboard now read-only\n",
-                    configPath_.c_str(), why.c_str());
-            writable_ = false;
-            return;
-        }
-        wrote_ = true;
-        fprintf(stderr, "fans: %s updated\n", configPath_.c_str());
+        return writer_->write({"fans"}, block_, "fans");
     }
 
     std::vector<Header> headers_;
@@ -1251,10 +1087,7 @@ private:
 
     std::string sensors_;    // the top-level `sensors` spec (telemetry temp)
     json::Value block_;      // the fans block as written (writeConfig updates it)
-    std::string configPath_; // the file it came from
-    bool writable_ = false;  // ...and whether edits can be written back to it
-    bool wrote_ = false;     // writeConfig succeeded since the last takeWrote()
-    bool backedUp_ = false;  // <config>.bak written this run
+    cfgedit::Writer* writer_ = nullptr; // the config file's editor; null = read-only
 
     double watchUntil_ = 0;    // a phone watches until this time (0 = none)
     std::string tempPath_;
@@ -1266,6 +1099,7 @@ private:
 
     double lastTick_ = 0;
     double lastSent_ = -1e9;
+    bool liveOut_ = false; // the receiver holds live duties of ours (see tick)
     uint8_t live_[CHANNELS] = {proto::FAN_NONE, proto::FAN_NONE, proto::FAN_NONE,
                                proto::FAN_NONE, proto::FAN_NONE, proto::FAN_NONE};
 

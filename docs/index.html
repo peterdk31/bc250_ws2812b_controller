@@ -19,8 +19,17 @@
      fallback, save; the write goes to the receiver, which relays it to the
      daemon, which validates and applies it, writes it into its config file
      and pushes the config back — the page shows "saved" only when that
-     round trip lands. Names, sources and which headers are enabled stay
-     the config file's.
+     round trip lands. Headers can be renamed and switched on or off the
+     same way; their sources stay the config file's.
+
+     A strip card, on firmware that has it: brightness, white balance and
+     gamma as sliders that apply on release (the daemon corrects the live
+     strip at once and writes the values into its config's strip block),
+     the reverse switch, and the "scenes" — every rule in the config whose
+     condition is a bare file: path, as a switch the daemon flips by creating
+     or removing that file; a scene whose settings carry a color (the solid
+     rule for tuning white) gets a color picker, one with a level a dim
+     slider. So white balance is tuned from the couch: scene on, drag, off.
 
      Any number of receivers: every board the chooser has ever granted is
      listed in the dropdown above the ring (by its advertised name — the
@@ -65,8 +74,12 @@
                               write  token(16) + a partial edit, same shape
        info    a5f20006-... : read  firmware version + heap (parseInfo)
        telem   a5f20007-... : read/notify  the daemon's readings, JSON text
+       stripcfg a5f20008-...: read/notify  the daemon's strip view, JSON text
+                              (daemon/strip_remote.hpp documents the shape);
+                              write  token(16) + a partial edit, same shape
      A receiver on older firmware has only the first two; the dashboard then
-     stays hidden and the power remote works as before. -->
+     stays hidden and the power remote works as before. One without stripcfg
+     shows the dashboard minus the strip card. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -254,6 +267,52 @@
 
   .info { display: grid; grid-template-columns: auto 1fr; gap: .25rem .75rem; font-size: .85rem; }
   .info span:nth-child(odd) { color: var(--muted); }
+
+  /* ---- the strip card: sliders that apply on release, a switch per scene ---- */
+  #stripcard .fields { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+  #stripcard .fields > span { padding-top: .25rem; }
+  .sl { display: grid; grid-template-columns: 1.1rem minmax(0, 1fr) 3.2rem; gap: .4rem; align-items: center; }
+  .sl.one { grid-template-columns: minmax(0, 1fr) 3.2rem; }
+  .sl .ch { font-style: normal; font-size: .72rem; font-weight: 600; text-align: center; border-radius: .25rem; padding: .05rem 0; }
+  .sl .ch.r { color: #ff6b6b; } .sl .ch.g { color: #5fd38a; } .sl .ch.b { color: #6fa8ff; }
+  .sl .val { font-size: .8rem; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .wb { display: flex; flex-direction: column; gap: .3rem; }
+  input[type=range] { width: 100%; min-width: 0; padding: 0; border: 0; background: none; accent-color: var(--on); height: 1.6rem; }
+  input[type=range]:disabled { opacity: .45; }
+  .gam { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .35rem; }
+  .gam label { display: flex; gap: .25rem; align-items: center; min-width: 0; }
+  .gam .ch { font-style: normal; font-size: .72rem; font-weight: 600; flex: none; }
+  .gam .ch.r { color: #ff6b6b; } .gam .ch.g { color: #5fd38a; } .gam .ch.b { color: #6fa8ff; }
+  .gam input { width: 100%; min-width: 0; text-align: center; letter-spacing: 0; padding: .3rem .2rem; font-size: .88rem;
+               -moz-appearance: textfield; appearance: textfield; }
+  .gam input::-webkit-inner-spin-button, .gam input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  /* a switch: a checkbox drawn as a pill */
+  .sw { position: relative; display: inline-block; width: 2.4rem; height: 1.35rem; flex: none; vertical-align: middle; }
+  .sw input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+  .sw i { position: absolute; inset: 0; border-radius: 999px; background: var(--off); transition: background .2s; }
+  .sw i::after { content: ""; position: absolute; top: .15rem; left: .15rem; width: 1.05rem; height: 1.05rem; border-radius: 50%;
+                 background: var(--text); transition: transform .2s; }
+  .sw input:checked + i { background: var(--on); }
+  .sw input:checked + i::after { transform: translateX(1.05rem); }
+  .sw input:disabled + i { opacity: .45; }
+  .swrow { display: flex; gap: .6rem; align-items: center; }
+  .swrow .unit { font-size: .78rem; color: var(--muted); }
+  .scenes { margin-top: .7rem; display: flex; flex-direction: column; gap: .45rem; }
+  .scenes h3 { font-size: .72rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .scene { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: .3rem .6rem; align-items: center;
+           background: var(--bg); border-radius: .6rem; padding: .45rem .6rem; }
+  .scene .sname { font-weight: 600; font-size: .9rem; }
+  .scene .spath { font-size: .72rem; color: var(--muted); font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+  .scene .extra { grid-column: 2 / -1; display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+  .scene .extra .sl { flex: 1 1 8rem; }
+  .scene .extra .unit { font-size: .75rem; color: var(--muted); }
+  input[type=color] { width: 2.6rem; height: 1.7rem; padding: .1rem; border-radius: .4rem; cursor: pointer; }
+  #stripcard .tools { margin-top: .5rem; }
+  #stripcard .ro { margin-top: .5rem; }
+  #stripcard .tools .msg.ok { color: var(--on); }
+  #stripcard .tools .msg.err { color: var(--danger); }
+  .fan .chip.off { background: var(--off); color: var(--muted); }
+  .editor .row input[type=text] { width: auto; flex: 1 1 6rem; min-width: 0; text-align: left; }
 </style>
 </head>
 <body>
@@ -309,6 +368,30 @@
       <span class="msg" id="g-msg"></span>
     </div>
   </div>
+  <div class="card gl" id="stripcard" hidden>
+    <h2>Strip <span class="r" id="stripnote"></span></h2>
+    <div class="fields">
+      <span>Brightness</span>
+      <div class="sl one"><input id="s-bri" type="range" min="0" max="100" step="1" aria-label="Brightness"><span class="val" id="s-bri-v"></span></div>
+      <span>White balance</span>
+      <div class="wb">
+        <div class="sl"><i class="ch r">R</i><input id="s-wr" type="range" min="0" max="255" step="1" aria-label="White balance red"><span class="val" id="s-wr-v"></span></div>
+        <div class="sl"><i class="ch g">G</i><input id="s-wg" type="range" min="0" max="255" step="1" aria-label="White balance green"><span class="val" id="s-wg-v"></span></div>
+        <div class="sl"><i class="ch b">B</i><input id="s-wb" type="range" min="0" max="255" step="1" aria-label="White balance blue"><span class="val" id="s-wb-v"></span></div>
+      </div>
+      <span>Gamma</span>
+      <div class="gam">
+        <label><i class="ch r">R</i><input id="s-gr" type="number" min="0.5" max="5" step="0.05" aria-label="Gamma red"></label>
+        <label><i class="ch g">G</i><input id="s-gg" type="number" min="0.5" max="5" step="0.05" aria-label="Gamma green"></label>
+        <label><i class="ch b">B</i><input id="s-gb" type="number" min="0.5" max="5" step="0.05" aria-label="Gamma blue"></label>
+      </div>
+      <span>Reverse</span>
+      <div class="swrow"><label class="sw"><input id="s-rev" type="checkbox"><i></i></label><span class="unit">LED 0 at the far end</span></div>
+    </div>
+    <div class="scenes" id="scenes"></div>
+    <div class="tools"><span class="msg" id="s-msg"></span></div>
+    <p class="note ro" id="s-ro" hidden>Read-only: the daemon can't write its config file.</p>
+  </div>
   <div class="card" id="infocard">
     <h2>Receiver</h2>
     <div class="info" id="info"></div>
@@ -325,6 +408,7 @@ const FANS   = 'a5f20004-8f11-4e0e-9b3a-0bc250e0c001';
 const FANCFG = 'a5f20005-8f11-4e0e-9b3a-0bc250e0c001';
 const INFO   = 'a5f20006-8f11-4e0e-9b3a-0bc250e0c001';
 const TELEM  = 'a5f20007-8f11-4e0e-9b3a-0bc250e0c001';
+const STRIPCFG = 'a5f20008-8f11-4e0e-9b3a-0bc250e0c001';
 const OP_ON = 0x01, OP_SHUTDOWN = 0x02, OP_HARD_OFF = 0x03;
 const TOKEN_LEN = 16;
 const STATE_NAMES = ['off', 'booting', 'on'];
@@ -339,6 +423,7 @@ const forgetBtn = $('forget'), picker = $('picker');
 
 let device = null, ctrl = null, stat = null; // the selected receiver + its live GATT
 let fansChr = null, cfgChr = null, telemChr = null; // the dashboard's (null on older firmware)
+let stripChr = null; // the strip card's (null on firmware before it)
 let psu = -1;          // last status byte seen, -1 = unknown
 let busy = false;      // a user-initiated connect or write in flight
 let attempt = null;    // the device an auto-reconnect (watch or connect) is live for
@@ -751,8 +836,10 @@ function parseCfg(text) {
     const h = j['header' + (i + 1)];
     if (!h) { c.h.push(null); continue; }
     const kind = KIND[h.s] ?? KIND_CONST;
-    c.h.push({ name: String(h.n || ''), kind, pts: parseCurve(h.c, kind === KIND_CONST),
-               boost: h.b === null || h.b === undefined ? NONE : +h.b, fallback: +h.f });
+    // a disabled header comes by name and kind only (no curve) — see fans.hpp
+    c.h.push({ name: String(h.n || ''), kind, pts: h.c === undefined ? [] : parseCurve(h.c, kind === KIND_CONST),
+               boost: h.b === null || h.b === undefined ? NONE : +h.b, fallback: h.f === undefined ? null : +h.f,
+               enabled: h.en !== false });
   }
   return c;
 }
@@ -775,10 +862,11 @@ function parseInfo(dv) {
 }
 
 function dashReset() {
-  fansChr = cfgChr = telemChr = null;
+  fansChr = cfgChr = telemChr = stripChr = null;
   fans = cfg = telem = info = null;
   edits = {}; saving = null; dragging = null;
   clearTimeout(saveTimer);
+  stripReset();
   $('dash').classList.remove('show');
 }
 
@@ -844,6 +932,8 @@ async function dashOpen(svc) {
     t = await svc.getCharacteristic(TELEM);
   } catch { return; } // older firmware: no dashboard, and nothing to say
   try { i = await svc.getCharacteristic(INFO); } catch { i = null; }
+  let sc = null;
+  try { sc = await svc.getCharacteristic(STRIPCFG); } catch { sc = null; } // firmware before the strip card
   if (!device || !device.gatt.connected) return;
   fansChr = f; cfgChr = c; telemChr = t;
   f.addEventListener('characteristicvaluechanged', onFansEvent);
@@ -859,6 +949,7 @@ async function dashOpen(svc) {
   telem = tv.byteLength ? parseTelem(utf8.decode(tv)) : null;
   if (i) { try { info = parseInfo(await gattRead(i)); } catch { info = null; } }
   renderDash();
+  if (sc) await stripOpen(sc);
 }
 
 // ---- rendering ----
@@ -894,6 +985,7 @@ function renderDash() {
 
   renderFans();
   renderGlobals();
+  renderStrip();
 
   const rows = [];
   if (info) {
@@ -959,19 +1051,22 @@ function renderFanCard(el, slot) {
   const kind = c ? c.kind : KIND_CONST;
   const name = (c && c.name) || `header${slot + 1}`;
   const editable = !!(cfg && cfg.editable) && !!c;
+  const off = !!(c && !c.enabled); // in the config, switched off: the daemon leaves it alone
 
   let src = f && f.wired ? SRC_NAMES[f.src] : '';
   if (f && f.hold) src = 'hold';
+  if (off) src = 'off';
   const duty = f && f.wired && f.duty !== NONE ? f.duty : null;
 
   let sub = '';
-  if (c) {
+  if (off) sub = f && f.wired ? 'not driven by the daemon — runs its fallback' : `curve on ${KINDS[kind]} when enabled`;
+  else if (c) {
     if (kind === KIND_CONST) sub = 'fixed speed';
     else if (tm && tm.in !== undefined) sub = `${KIND_LABEL[kind]}${fmtIn(kind, tm.in)}`;
     else sub = fans && fans.telem ? 'no reading' : `curve on ${KINDS[kind]}`;
   } else if (f && f.wired) sub = 'not driven by the daemon — runs its fallback';
   let note = '';
-  if (c && f && !f.wired) note = 'enabled in the config but not wired on the receiver: run make flash-fan';
+  if (c && c.enabled && f && !f.wired) note = 'enabled in the config but not wired on the receiver: run make flash-fan';
 
   // first paint builds the skeleton; later paints only update text/attrs so
   // an open editor's inputs (and the drag) aren't torn down under the finger
@@ -995,23 +1090,26 @@ function renderFanCard(el, slot) {
   el.querySelector('.d').textContent = duty === null ? '—' : duty;
   const chip = el.querySelector('.chip');
   chip.textContent = src;
-  chip.className = 'chip ' + (src === 'live' ? 'live' : src === 'boost' ? 'boost' : src === 'hold' ? 'hold' : '');
+  chip.className = 'chip ' + (src === 'live' ? 'live' : src === 'boost' ? 'boost' : src === 'hold' ? 'hold' : src === 'off' ? 'off' : '');
   chip.hidden = !chip.textContent;
   el.querySelector('.what').textContent = sub;
   const noteEl = el.querySelector('.note');
   noteEl.textContent = note; noteEl.hidden = !note;
   const bar = el.querySelector('.bar');
-  bar.className = 'bar ' + (src === 'boost' ? 'boost' : src === 'fallback' ? 'fallback' : '');
+  bar.className = 'bar ' + (src === 'boost' ? 'boost' : (src === 'fallback' || off) ? 'fallback' : '');
   bar.firstChild.style.width = `${duty === null ? 0 : duty}%`;
 
   const svg = el.querySelector('.curve');
-  svg.toggleAttribute('hidden', !work || !work.pts.length); // SVG elements have no .hidden property
+  // SVG elements have no .hidden property; a switched-off header shows no
+  // curve until it is being edited
+  svg.toggleAttribute('hidden', !work || !work.pts.length || (off && !editing));
   if (work && work.pts.length) drawCurve(svg, work, tm && tm.in !== undefined ? tm.in : null, editing);
   svg.classList.toggle('editing', editing);
 
   const ed = el.querySelector('.editor');
   ed.hidden = !editing;
   if (editing) renderEditor(ed, slot);
+  el.querySelector('.edit').textContent = off ? 'Edit' : 'Edit curve';
   el.querySelector('.edit').hidden = editing || !editable;
   el.querySelector('.save').hidden = !editing;
   el.querySelector('.cancel').hidden = !editing;
@@ -1120,7 +1218,7 @@ function bindCurveDrag(svg, slot) {
 function beginEdit(slot) {
   if (!cfg || !cfg.h[slot]) return;
   const h = cfg.h[slot];
-  edits[slot] = { ...h, pts: h.pts.map(p => ({ ...p })) };
+  edits[slot] = { ...h, pts: h.pts.map(p => ({ ...p })), bare: !h.pts.length };
   renderDash();
 }
 
@@ -1130,10 +1228,15 @@ function beginEdit(slot) {
 function renderEditor(ed, slot) {
   const h = edits[slot];
   const unit = h.kind === KIND_TEMP ? '°C' : '%';
-  const rows = h.kind === KIND_CONST ? 1 : h.pts.length;
+  // a switched-off header arrives without its curve: name and enabled only,
+  // the curve editor appears once it is on and the daemon has sent it
+  const bare = !h.pts.length;
+  const rows = bare ? 0 : h.kind === KIND_CONST ? 1 : h.pts.length;
   if (+ed.dataset.rows !== rows || ed.dataset.kind !== String(h.kind)) {
     ed.dataset.rows = rows; ed.dataset.kind = h.kind;
     const parts = [];
+    parts.push(`<div class="row"><label>name</label><input type="text" class="nm" maxlength="16" autocomplete="off"></div>`);
+    parts.push(`<div class="row"><label>enabled</label><label class="sw"><input type="checkbox" class="en"><i></i></label><span class="unit">${bare ? 'switch on to load and edit its curve' : "off = the daemon leaves this header to the receiver's fallback"}</span></div>`);
     for (let i = 0; i < rows; i++) {
       parts.push(`<div class="prow${h.kind === KIND_CONST ? ' const' : ''}">
         ${h.kind === KIND_CONST ? '<label>duty</label>' :
@@ -1142,10 +1245,12 @@ function renderEditor(ed, slot) {
         ${h.kind !== KIND_CONST ? (rows > 1 ? `<button class="minor x" data-i="${i}" title="remove point">×</button>` : '<span></span>') : ''}
       </div>`);
     }
-    if (h.kind !== KIND_CONST && rows < MAX_POINTS)
+    if (!bare && h.kind !== KIND_CONST && rows < MAX_POINTS)
       parts.push('<div class="row"><label></label><button class="minor add">+ point</button></div>');
-    parts.push(`<div class="row"><label>boost</label><input type="number" class="boost" min="0" max="100" step="1" placeholder="none"><span class="unit">% at power-on</span></div>`);
-    parts.push(`<div class="row"><label>fallback</label><input type="number" class="fb" min="0" max="100" step="1"><span class="unit">% without the daemon</span></div>`);
+    if (!bare) {
+      parts.push(`<div class="row"><label>boost</label><input type="number" class="boost" min="0" max="100" step="1" placeholder="none"><span class="unit">% at power-on</span></div>`);
+      parts.push(`<div class="row"><label>fallback</label><input type="number" class="fb" min="0" max="100" step="1"><span class="unit">% without the daemon</span></div>`);
+    }
     ed.innerHTML = parts.join('');
     ed.querySelectorAll('.px').forEach(inp => inp.addEventListener('input', () => {
       const v = parseFloat(inp.value); if (!isNaN(v)) h.pts[+inp.dataset.i].x = v; renderDash(); }));
@@ -1166,21 +1271,29 @@ function renderEditor(ed, slot) {
       p.splice(at, 0, { x, y });
       renderDash();
     });
-    ed.querySelector('.boost').addEventListener('input', e => {
+    ed.querySelector('.nm').addEventListener('input', e => { h.name = e.target.value; });
+    ed.querySelector('.en').addEventListener('change', e => { h.enabled = e.target.checked; });
+    ed.querySelector('.boost')?.addEventListener('input', e => {
       h.boost = e.target.value === '' ? NONE : Math.max(0, Math.min(100, Math.round(+e.target.value))); });
-    ed.querySelector('.fb').addEventListener('input', e => {
+    ed.querySelector('.fb')?.addEventListener('input', e => {
       if (e.target.value !== '') h.fallback = Math.max(0, Math.min(100, Math.round(+e.target.value))); });
   }
   // refresh values without clobbering the field being typed in
-  const set = (inp, v) => { if (document.activeElement !== inp && inp.value !== String(v)) inp.value = v; };
+  const set = (inp, v) => { if (inp && document.activeElement !== inp && inp.value !== String(v)) inp.value = v; };
   ed.querySelectorAll('.px').forEach(inp => set(inp, h.pts[+inp.dataset.i].x));
   ed.querySelectorAll('.py').forEach(inp => set(inp, h.pts[+inp.dataset.i].y));
   set(ed.querySelector('.boost'), h.boost === NONE ? '' : h.boost);
   set(ed.querySelector('.fb'), h.fallback);
+  set(ed.querySelector('.nm'), h.name);
+  const en = ed.querySelector('.en');
+  if (en.checked !== !!h.enabled) en.checked = !!h.enabled;
 }
 
 // what the daemon will refuse, said here first (it also validates)
 function checkEdit(h) {
+  const nm = (h.name || '').trim();
+  if (!nm || [...nm].length > 16) return 'a name is 1–16 characters'; // characters, as the daemon counts
+  if (h.bare) return ''; // name and enabled only — the curve isn't here to check
   if (!h.pts.length) return 'a curve needs at least one point';
   const xs = new Set();
   for (const p of h.pts) {
@@ -1226,11 +1339,13 @@ async function writeCfg(key, edit) {
 function saveEdit(slot) {
   const h = edits[slot];
   if (!h || !cfg) return;
-  h.pts.sort((a, b) => a.x - b.x);
+  if (!h.bare) h.pts.sort((a, b) => a.x - b.x);
   const bad = checkEdit(h);
   if (bad) { flash(slot, bad, 'err'); return; }
-  writeCfg(slot, { ['header' + (slot + 1)]: {
-    c: curveText(h.pts, h.kind === KIND_CONST), b: h.boost === NONE ? null : h.boost, f: h.fallback } });
+  writeCfg(slot, { ['header' + (slot + 1)]: h.bare
+    ? { n: h.name.trim(), en: !!h.enabled }
+    : { c: curveText(h.pts, h.kind === KIND_CONST), b: h.boost === NONE ? null : h.boost, f: h.fallback,
+        n: h.name.trim(), en: !!h.enabled } });
 }
 
 // ---- the global card: hysteresis, ramp, boost seconds ----
@@ -1259,6 +1374,227 @@ $('g-save').addEventListener('click', () => {
   if (!edits.g || !cfg) return;
   writeCfg('g', { hysteresis: edits.g.hyst, ramp: edits.g.ramp, boost_seconds: edits.g.boostSecs });
 });
+
+// ---- the strip card ----
+// The daemon's strip view (daemon/strip_remote.hpp): the strip block's knobs
+// and the scenes. Unlike the fan editor there is no Save: a slider applies
+// on release, a switch on the tap — the daemon corrects the live strip at
+// once and writes the value into its config, and the answering config is
+// what says "saved". Edits that land while one is in flight are merged and
+// sent when the answer comes, so dragging a second slider never fails.
+let scfg = null;        // the parsed view
+let sSaving = false;    // a write waiting for the daemon's view to come back
+let sInflight = null;   // that write's edit — the answer must reflect it
+let sPending = null;    // edits merged while sSaving
+let sTimer = 0;
+const hex2 = v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0');
+
+function parseStripCfg(text) {
+  let j;
+  try { j = JSON.parse(text); } catch { return null; }
+  if (!j || typeof j !== 'object') return null;
+  const g = String(j.gamma ?? '2.2').trim().split(/\s+/).map(parseFloat).filter(x => !isNaN(x));
+  const gamma = g.length === 3 ? g : [g[0] ?? 2.2, g[0] ?? 2.2, g[0] ?? 2.2];
+  const w = String(j.white_balance ?? 'ffffff').replace('#', '').padStart(6, 'f');
+  const wb = [0, 2, 4].map(i => parseInt(w.substr(i, 2), 16) || 0);
+  return { editable: !!j.editable, leds: +j.leds || 0, pin: +j.pin || 0, reverse: !!j.reverse,
+           brightness: Math.max(0, Math.min(1, +j.brightness || 0)), gamma, wb,
+           scenes: Array.isArray(j.scenes) ? j.scenes.filter(s => s && typeof s.p === 'string').map(s => ({
+             p: s.p, e: String(s.e || ''), on: !!s.on,
+             color: typeof s.color === 'string' ? s.color.replace('#', '') : null,
+             l: typeof s.l === 'number' ? s.l : null })) : [] };
+}
+
+function stripReset() {
+  scfg = null; sSaving = false; sInflight = null; sPending = null;
+  clearTimeout(sTimer);
+  $('stripcard').hidden = true;
+  $('scenes').dataset.sig = '';
+}
+
+const onStripEvent = jsonNotifier(() => stripChr, onStripCfg);
+
+// does the daemon's view carry the edit? The view is also pushed unsolicited
+// (a scene's file appearing or disappearing), so an answer is recognised by
+// its content, not its arrival; a refused edit sends nothing and times out.
+const near = (a, b) => Math.abs(a - b) < 0.006;
+function reflects(v, edit) {
+  if ('brightness' in edit && !near(v.brightness, edit.brightness)) return false;
+  if ('reverse' in edit && v.reverse !== edit.reverse) return false;
+  if ('white_balance' in edit && v.wb.map(hex2).join('') !== edit.white_balance.toLowerCase()) return false;
+  if ('gamma' in edit) {
+    const g = String(edit.gamma).split(/\s+/).map(parseFloat);
+    const want = g.length === 3 ? g : [g[0], g[0], g[0]];
+    if (!want.every((x, i) => near(x, v.gamma[i]))) return false;
+  }
+  for (const e of edit.scenes || []) {
+    const s = v.scenes.find(x => x.p === e.p);
+    if (!s) return false;
+    if ('on' in e && s.on !== e.on) return false;
+    if ('color' in e && s.color !== e.color.toLowerCase()) return false;
+    if ('l' in e && !near(s.l, e.l)) return false;
+  }
+  return true;
+}
+
+function onStripCfg(dv) {
+  scfg = dv.byteLength ? parseStripCfg(utf8.decode(dv)) : null;
+  if (sSaving && scfg && reflects(scfg, sInflight)) {
+    sSaving = false; sInflight = null;
+    clearTimeout(sTimer);
+    sflash('saved', 'ok');
+    if (sPending) { const e = sPending; sPending = null; writeStrip(e); }
+  }
+  renderStrip();
+}
+
+async function stripOpen(sc) {
+  stripChr = sc;
+  sc.addEventListener('characteristicvaluechanged', onStripEvent);
+  await gattSubscribe(sc);
+  const v = await gattRead(sc);
+  if (stripChr !== sc) return;
+  onStripCfg(v);
+}
+
+function sflash(text, cls) {
+  const el = $('s-msg');
+  el.textContent = text;
+  el.className = 'msg ' + (cls || '');
+  if (cls === 'ok') setTimeout(() => { if (el.textContent === text) el.textContent = ''; }, 2500);
+}
+
+// merge a partial edit into another (scenes by path)
+function mergeStrip(into, edit) {
+  for (const k in edit) {
+    if (k !== 'scenes') { into[k] = edit[k]; continue; }
+    into.scenes ||= [];
+    for (const s of edit.scenes) {
+      const have = into.scenes.find(x => x.p === s.p);
+      if (have) Object.assign(have, s); else into.scenes.push({ ...s });
+    }
+  }
+  return into;
+}
+
+async function writeStrip(edit) {
+  if (!stripChr || !scfg || !scfg.editable) return;
+  if (sSaving) { sPending = mergeStrip(sPending || {}, edit); return; }
+  const text = new TextEncoder().encode(JSON.stringify(edit));
+  const buf = new Uint8Array(TOKEN_LEN + text.length);
+  buf.set(tokenBytes()); buf.set(text, TOKEN_LEN);
+  sSaving = true; sInflight = edit;
+  sflash('saving…');
+  try {
+    await gattWrite(stripChr, buf);
+    clearTimeout(sTimer);
+    sTimer = setTimeout(() => {
+      if (!sSaving) return;
+      sSaving = false; sInflight = null; sPending = null;
+      sflash('no answer from the daemon — is it running, and can it write its config?', 'err');
+      renderStrip();
+    }, SAVE_TIMEOUT_MS);
+  } catch (e) {
+    sSaving = false; sInflight = null; sPending = null;
+    if (tokenRejected(e)) { sflash('token rejected', 'err'); editToken = true; render(); }
+    else sflash(`write failed: ${e.message}${writeHint(e)}`, 'err');
+    renderStrip();
+  }
+}
+
+// a slider being dragged, a field being typed in, or a value whose edit is
+// still in flight is not overwritten by an incoming view; everything else
+// follows the daemon. (A switch or color well keeps focus after a tap and
+// isn't "being edited", so only typed and dragged inputs get the focus test.)
+const sliding = new Set();
+function setIf(inp, v) {
+  const typing = inp.type === 'text' || inp.type === 'number' || inp.type === 'range';
+  if ((typing && document.activeElement === inp) || sliding.has(inp)) return;
+  if (inp.type === 'checkbox') { if (inp.checked !== !!v) inp.checked = !!v; }
+  else if (inp.value !== String(v)) inp.value = v;
+}
+// the edits the daemon hasn't answered yet, merged — their fields hold
+const pendingStrip = () => mergeStrip(mergeStrip({}, sInflight || {}), sPending || {});
+
+function renderStrip() {
+  const card = $('stripcard');
+  card.hidden = !scfg;
+  if (!scfg) return;
+  const ro = !scfg.editable;
+  $('stripnote').textContent = `${scfg.leds} LEDs on GPIO${scfg.pin}`;
+  $('s-ro').hidden = !ro;
+  for (const id of ['s-bri', 's-wr', 's-wg', 's-wb', 's-gr', 's-gg', 's-gb', 's-rev']) $(id).disabled = ro;
+
+  const pend = pendingStrip();
+  if (!('brightness' in pend)) setIf($('s-bri'), Math.round(scfg.brightness * 100));
+  $('s-bri-v').textContent = `${$('s-bri').value} %`;
+  [['s-wr', 0], ['s-wg', 1], ['s-wb', 2]].forEach(([id, i]) => {
+    if (!('white_balance' in pend)) setIf($(id), scfg.wb[i]);
+    $(id + '-v').textContent = hex2(+$(id).value);
+  });
+  if (!('gamma' in pend)) [['s-gr', 0], ['s-gg', 1], ['s-gb', 2]].forEach(([id, i]) => setIf($(id), scfg.gamma[i]));
+  if (!('reverse' in pend)) setIf($('s-rev'), scfg.reverse);
+
+  // the scenes: rebuilt only when the list itself changes, else refreshed
+  const wrap = $('scenes');
+  const sig = JSON.stringify(scfg.scenes.map(s => [s.p, s.e, s.color !== null, s.l !== null]));
+  if (wrap.dataset.sig !== sig) {
+    wrap.dataset.sig = sig;
+    wrap.replaceChildren();
+    if (scfg.scenes.length) {
+      const h = document.createElement('h3'); h.textContent = 'Scenes'; wrap.appendChild(h);
+    }
+    scfg.scenes.forEach((sc, i) => {
+      const row = document.createElement('div');
+      row.className = 'scene';
+      row.dataset.i = i;
+      row.innerHTML = `<label class="sw"><input type="checkbox" class="on"><i></i></label>
+        <div><div class="sname"></div><div class="spath"></div></div>
+        ${sc.color !== null ? '<input type="color" class="col" aria-label="Scene color">' : '<span></span>'}
+        ${sc.l !== null ? '<div class="extra"><div class="sl one"><input type="range" class="lvl" min="0" max="100" step="1" aria-label="Scene level"><span class="val"></span></div><span class="unit">level</span></div>' : ''}`;
+      row.querySelector('.sname').textContent = sc.e;
+      row.querySelector('.spath').textContent = sc.p;
+      row.querySelector('.on').addEventListener('change', e => writeStrip({ scenes: [{ p: sc.p, on: e.target.checked }] }));
+      const col = row.querySelector('.col');
+      if (col) col.addEventListener('change', e => writeStrip({ scenes: [{ p: sc.p, color: e.target.value.replace('#', '') }] }));
+      const lvl = row.querySelector('.lvl');
+      if (lvl) bindSlider(lvl, v => { row.querySelector('.extra .val').textContent = `${v} %`; },
+                          v => writeStrip({ scenes: [{ p: sc.p, l: v / 100 }] }));
+      wrap.appendChild(row);
+    });
+  }
+  scfg.scenes.forEach((sc, i) => {
+    const row = wrap.querySelector(`.scene[data-i="${i}"]`);
+    if (!row) return;
+    const pe = (pend.scenes || []).find(x => x.p === sc.p) || {};
+    const on = row.querySelector('.on'); if (!('on' in pe)) setIf(on, sc.on); on.disabled = ro;
+    const col = row.querySelector('.col');
+    if (col) { if (!('color' in pe)) setIf(col, '#' + sc.color); col.disabled = ro; }
+    const lvl = row.querySelector('.lvl');
+    if (lvl) { if (!('l' in pe)) setIf(lvl, Math.round(sc.l * 100)); lvl.disabled = ro; row.querySelector('.extra .val').textContent = `${lvl.value} %`; }
+  });
+}
+
+// a range input: live() on every move (labels), done() once on release
+function bindSlider(inp, live, done) {
+  inp.addEventListener('pointerdown', () => sliding.add(inp));
+  inp.addEventListener('input', () => live(+inp.value));
+  inp.addEventListener('change', () => { sliding.delete(inp); live(+inp.value); done(+inp.value); });
+  inp.addEventListener('pointerup', () => sliding.delete(inp));
+  inp.addEventListener('pointercancel', () => { sliding.delete(inp); renderStrip(); });
+}
+
+bindSlider($('s-bri'), v => { $('s-bri-v').textContent = `${v} %`; }, v => writeStrip({ brightness: v / 100 }));
+for (const id of ['s-wr', 's-wg', 's-wb'])
+  bindSlider($(id), v => { $(id + '-v').textContent = hex2(v); },
+             () => writeStrip({ white_balance: hex2(+$('s-wr').value) + hex2(+$('s-wg').value) + hex2(+$('s-wb').value) }));
+for (const id of ['s-gr', 's-gg', 's-gb'])
+  $(id).addEventListener('change', () => {
+    const g = ['s-gr', 's-gg', 's-gb'].map(k => parseFloat($(k).value));
+    if (g.some(x => !(x >= 0.5 && x <= 5))) { sflash('gamma is 0.5–5 per channel', 'err'); return; }
+    writeStrip({ gamma: g.every(x => x === g[0]) ? String(g[0]) : g.join(' ') });
+  });
+$('s-rev').addEventListener('change', e => writeStrip({ reverse: e.target.checked }));
 
 // ---- wiring ----
 picker.addEventListener('change', async () => {
@@ -1368,13 +1704,18 @@ function demo() {
     header1: { n: 'pump', s: 'constant', c: '65', b: 100, f: 100 },
     header2: { n: 'radiator', s: 'temp', c: '45:35 60:55 75:100', b: null, f: 100 },
     header3: { n: 'exhaust', s: 'pwm', c: '0:25 100:80', b: null, f: 100 },
-    header4: { n: 'intake', s: 'gpu_load', c: '0:20 40:20 100:60', b: null, f: 60 } }));
+    header4: { n: 'intake', s: 'gpu_load', c: '0:20 40:20 100:60', b: null, f: 60 },
+    header5: { n: 'spare', s: 'temp', en: false } }));
+  scfg = parseStripCfg(JSON.stringify({ editable: true, leds: 33, pin: 4, reverse: false, brightness: 1,
+    gamma: '2.2', white_balance: 'ffb0f0', scenes: [
+      { p: '/tmp/led-static-color', e: 'solid', on: false, color: 'ffffff', l: 1 },
+      { p: '/tmp/led-night', e: 'drift', on: false } ] }));
   telem = parseTelem(JSON.stringify({ temp: 58.3, cpu: 37, gpu: 62,
     header1: { duty: 65 }, header2: { in: 58.3, duty: 52 }, header3: { in: 65.4, duty: 61 }, header4: { in: 62, duty: 45 } }));
   const f = new Uint8Array(FANS_LEN), dv = new DataView(f.buffer);
   f[0] = 1; f[1] = 0x01 | 0x08 | 0x10 | 0x20; f[2] = 2; f[3] = 1;
-  // state: wired | src<<1 (2 = live)
-  [[0x05, 65], [0x05, 52], [0x05, 61], [0x05, 45], [0, NONE], [0, NONE]].forEach(([st, d], k) => { f[4 + k * 2] = st; f[5 + k * 2] = d; });
+  // state: wired | src<<1 (1 = fallback, 2 = live)
+  [[0x05, 65], [0x05, 52], [0x05, 61], [0x05, 45], [0x03, 50], [0, NONE]].forEach(([st, d], k) => { f[4 + k * 2] = st; f[5 + k * 2] = d; });
   dv.setUint32(4 + CHANNELS * 2, 5 * 3600 + 17 * 60, true);
   fans = parseFans(dv);
   info = { version: 'v1.20.0-demo', heap: 143 * 1024, minHeap: 121 * 1024 };
@@ -1389,12 +1730,30 @@ function demo() {
     const cur = cfg, out = { editable: true, hysteresis: edit.hysteresis ?? cur.hyst, ramp: edit.ramp ?? cur.ramp,
                              boost_seconds: edit.boost_seconds ?? cur.boostSecs };
     cur.h.forEach((h, i) => { if (!h) return; const k = 'header' + (i + 1), e = edit[k] || {};
-      out[k] = { n: h.name, s: Object.keys(KIND)[h.kind], c: e.c ?? curveText(h.pts, h.kind === KIND_CONST),
-                 b: 'b' in e ? e.b : (h.boost === NONE ? null : h.boost), f: e.f ?? h.fallback }; });
+      const en = e.en ?? h.enabled;
+      // a disabled header travels bare; one just enabled gets a demo curve
+      if (!en) { out[k] = { n: e.n ?? h.name, s: Object.keys(KIND)[h.kind], en: false }; return; }
+      out[k] = { n: e.n ?? h.name, s: Object.keys(KIND)[h.kind],
+                 c: e.c ?? (h.pts.length ? curveText(h.pts, h.kind === KIND_CONST) : '40:30 70:100'),
+                 b: 'b' in e ? e.b : (h.boost === NONE ? null : h.boost), f: e.f ?? h.fallback ?? 100 }; });
     setTimeout(() => onCfg(new DataView(new TextEncoder().encode(JSON.stringify(out)).buffer)), 600); } };
+  stripChr = { writeValueWithResponse: async buf => {
+    // apply the partial edit the way the daemon would, scenes by path
+    const edit = JSON.parse(utf8.decode(buf.subarray(TOKEN_LEN)));
+    const out = { editable: true, leds: scfg.leds, pin: scfg.pin, reverse: edit.reverse ?? scfg.reverse,
+                  brightness: edit.brightness ?? scfg.brightness,
+                  gamma: edit.gamma ?? (scfg.gamma.every(x => x === scfg.gamma[0]) ? String(scfg.gamma[0]) : scfg.gamma.join(' ')),
+                  white_balance: edit.white_balance ?? scfg.wb.map(hex2).join(''),
+                  scenes: scfg.scenes.map(s => { const e = (edit.scenes || []).find(x => x.p === s.p) || {};
+                    const o = { p: s.p, e: s.e, on: e.on ?? s.on };
+                    if (s.color !== null) o.color = e.color ?? s.color;
+                    if (s.l !== null) o.l = e.l ?? s.l;
+                    return o; }) };
+    setTimeout(() => onStripCfg(new DataView(new TextEncoder().encode(JSON.stringify(out)).buffer)), 600); } };
   powerBtn.disabled = true;
   render();
   renderDash();
+  renderStrip();
   if (location.search.includes('edit')) beginEdit(1);
   say('Demo data — not connected to a receiver.', true);
 }

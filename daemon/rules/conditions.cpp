@@ -353,6 +353,17 @@ static std::unique_ptr<Condition> parseAll(const std::string& spec,
     return std::make_unique<AndCondition>(std::move(terms));
 }
 
+bool fileSwitchPath(const std::string& spec, std::string& path)
+{
+    std::string s = trim(spec);
+    if (s.find_first_of("&|") != std::string::npos || s.empty() || s[0] == '!')
+        return false;
+    if (s.rfind("file:", 0) != 0 || s.size() == 5)
+        return false;
+    path = s.substr(5);
+    return true;
+}
+
 // '|' alternatives of '&' groups: & binds tighter than |
 std::unique_ptr<Condition> parseCondition(const std::string& spec,
                                           const Config& cfg)

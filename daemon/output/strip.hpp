@@ -168,17 +168,9 @@ public:
 
     float getBrightness() const { return lut.brightness(); }
 
-private:
-    void resize()
-    {
-        if (leds <= 0)
-        {
-            buf.clear();
-            return;
-        }
-
-        buf.resize(proto::PIX_HEADER + leds * 6 + 1); // header + pixels + checksum
-    }
+    // the config's notation for the two multi-valued knobs, shared with the
+    // dashboard's strip editor (daemon/strip_remote.hpp) so both read them
+    // the same way
 
     // RRGGBB hex, optionally '#'-prefixed, as 0xRRGGBB
     static uint32_t parseColor(std::string v)
@@ -199,6 +191,18 @@ private:
         if (n == 3) { r = v[0]; g = v[1]; b = v[2]; return; }
 
         r = g = b = (n >= 1) ? v[0] : 2.2f;
+    }
+
+private:
+    void resize()
+    {
+        if (leds <= 0)
+        {
+            buf.clear();
+            return;
+        }
+
+        buf.resize(proto::PIX_HEADER + leds * 6 + 1); // header + pixels + checksum
     }
 
 private:

@@ -53,30 +53,10 @@ void hostShutdown();
 
 // ---- the BLE dashboard's view (ble.cpp) ----
 //
-// This module relays two host payloads it never reads — JSON text the daemon
-// writes for the phone (protocol.hpp): its fan config (CMD_FAN_CONFIG, up to
-// HOST_CONFIG_MAX bytes) and its telemetry (CMD_FAN_TELEM, up to
-// HOST_TELEM_MAX) — each kept as the last one received, for ble.cpp to serve
-// verbatim. The setters run on the led_rx task; the getters copy out under the
-// lock from any task. They work whether or not the PWM feature itself is on —
-// a box with the fans wired elsewhere still gets the daemon's readings on its
-// phone.
-static const uint16_t HOST_CONFIG_MAX = 512; // a GATT attribute's ceiling
-static const uint16_t HOST_TELEM_MAX = 384;
-
-void setHostConfig(const uint8_t* payload, uint16_t len);
-void setHostTelemetry(const uint8_t* payload, uint16_t len);
-
-// copy the last payload into out (max bytes); returns its length, 0 when none
-// has arrived (or out is too small). *seq counts arrivals, so a poller can
-// tell a new one from the same one; *ageMs is how long ago the last arrived
-// (0xFFFFFFFF = never). Both optional.
-uint16_t hostConfig(uint8_t* out, uint16_t max, uint32_t* seq = nullptr);
-uint16_t hostTelemetry(uint8_t* out, uint16_t max, uint32_t* seq = nullptr,
-                       uint32_t* ageMs = nullptr);
-
-// what this module is doing right now, per header — the dashboard's local
-// half, which is there even with the daemon down
+// The daemon's own payloads for the dashboard (its fan config and readings)
+// are kept by dash.cpp; this is the board's side of the picture — what the
+// PWM outputs are doing right now, per header, which is there even with the
+// daemon down
 struct Snapshot
 {
     bool active = false;   // the PWM feature is on (some header wired)

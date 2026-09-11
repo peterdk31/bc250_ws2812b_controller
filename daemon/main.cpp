@@ -7,8 +7,10 @@
 #include <chrono>
 #include <vector>
 #include <memory>
+#include "config_edit.hpp"
 #include "effect.hpp"
 #include "fans.hpp"
+#include "strip_remote.hpp"
 #include "motion.hpp"
 #include "rules.hpp"
 #include "steam.hpp"
@@ -136,7 +138,8 @@ static std::vector<uint8_t> framePixels(uint8_t pin, uint16_t count,
 // only the serial transport acts on commands, the rest no-op (see
 // daemon/output/sink.hpp).
 static void recordAndUpload(const Config& cfg, const Strip& strip,
-                            std::vector<std::unique_ptr<Sink>>& sinks)
+                            std::vector<std::unique_ptr<Sink>>& sinks,
+                            const std::function<void()>& keepalive = {})
 {
     const struct { const char* path; uint8_t id; } slots[] = {
         {"power_on", proto::SLOT_POWER_ON},
@@ -151,7 +154,7 @@ static void recordAndUpload(const Config& cfg, const Strip& strip,
         {
             fprintf(stderr, "recorded %s: %u frames @ %u ms; uploading\n",
                     slot.path, r.frameCount, r.frameMs);
-            rec::upload(sinks, slot.id, r);
+            rec::upload(sinks, slot.id, r, keepalive);
         }
     }
 }
@@ -309,12 +312,18 @@ int main(int argc, char** argv)
     if (!checkRetiredKeys(cfg))
         return 1;
 
+    // the dashboards' way back into the config file (daemon/config_edit.hpp):
+    // a phone edit of a fan curve or the strip's colors is written into the
+    // file the daemon runs from, so it survives a restart like a hand edit
+    cfgedit::Writer cfgWriter;
+    cfgWriter.open(argv[1]);
+
     // the fan controller's half on this side (daemon/fans.hpp): the "fans"
     // block, validated up front like the rules — a bad header stops the daemon
     // here rather than running the fans on a half-read config
     fans::Controller fanCtl;
 
-    if (!fanCtl.load(cfg, argv[1]))
+    if (!fanCtl.load(cfg, &cfgWriter))
         return 1;
 
     // ./led <config> --fan-status: what each header resolves to right now
@@ -329,6 +338,11 @@ int main(int argc, char** argv)
     signal(SIGHUP, onReload);
 
     Strip strip = Strip::fromConfig(cfg);
+
+    // the strip's half of the BLE dashboard (daemon/strip_remote.hpp): the
+    // strip block's knobs and the file: rules as switches
+    stripcfg::Remote stripRemote;
+    stripRemote.load(cfg, &cfgWriter);
 
     // outputs the rendered frame goes to. The list is the fan-out: a serial
     // transport for the real strip (absent when running headless), plus the
@@ -352,6 +366,7 @@ int main(int argc, char** argv)
     recordAndUpload(cfg, strip, sinks);
     fanCtl.pushStandalone(sinks);
     fanCtl.pushConfig(sinks); // for the BLE dashboard (daemon/fans.hpp)
+    stripRemote.pushConfig(sinks); // ...and its strip card (daemon/strip_remote.hpp)
 
     // the fan curves run on their own 0.5 s cadence in both loops below; a
     // no-op when no header is enabled. The dashboard's messages back from the
@@ -359,6 +374,30 @@ int main(int argc, char** argv)
     // atomic peek when there are none, which is nearly always.
     const double fanInterval = 0.5;
     double lastFanTick = -1e9;
+
+    // a strip edit from the phone (brightness, gamma, white balance) changes
+    // the correction the boot/shutdown recordings bake in, so they have to be
+    // re-rendered and re-sent — but that holds the strip for a second per
+    // slot, and someone tuning white balance moves a slider ten times a
+    // minute. So the re-record waits until the edits have stopped for this
+    // long; the live strip shows every move at once.
+    const double recordDelay = 10.0;
+    double recordDue = 0; // 0 = nothing pending
+    bool restartEffect = false; // a scene's settings changed under the running effect
+    int activeRule = -1; // index into rules of the rule that started the effect (rules mode)
+    std::unique_ptr<Effect> effect;
+
+    // while a recording streams (seconds, paced), the receiver sees no pixel
+    // frames and would blank the strip at its host timeout: re-send the last
+    // rendered frame between batches (same anim id, so no crossfade)
+    auto keepalive = [&]()
+    {
+        if (!effect)
+            return; // nothing rendered yet: the canvas holds no frame
+        const std::vector<uint8_t>& frame = strip.endFrame();
+        for (auto& s : sinks)
+            s->send(frame);
+    };
 
     // live reload (README "Configuration"): the file's mtime as loaded, and as
     // last seen by the watch in the rules loop. A dashboard edit the fan
@@ -377,21 +416,40 @@ int main(int argc, char** argv)
         std::vector<uint8_t> payload;
         for (auto& s : sinks)
             while (s->takeMessage(kind, payload))
-                fanCtl.onMessage(kind, payload, now, sinks);
-        if (fanCtl.takeWrote())
+            {
+                if (kind == proto::MSG_STRIP_CONFIG)
+                    stripRemote.onMessage(kind, payload, sinks);
+                else
+                    fanCtl.onMessage(kind, payload, now, sinks);
+            }
+        if (cfgWriter.takeWrote())
             cfgMtime = cfgSeen = fileMtime(cfgPath);
+
+        if (stripRemote.takeStripChanged())
+        {
+            stripRemote.applyTo(strip); // the next frame shows it
+            recordDue = now + recordDelay;
+        }
+        for (size_t idx : stripRemote.takeRulesChanged())
+            if ((int)idx == activeRule)
+                restartEffect = true; // the running effect was built from the old value
+
+        if (recordDue > 0 && now >= recordDue)
+        {
+            recordDue = 0;
+            recordAndUpload(cfg, strip, sinks, keepalive);
+        }
 
         if (now - lastFanTick >= fanInterval)
         {
             lastFanTick = now;
             fanCtl.tick(now, sinks);
+            stripRemote.tick(now, sinks);
         }
     };
 
-    std::unique_ptr<Effect> effect;
     std::string active;
     const json::Value* activeSettings = nullptr;
-    int activeRule = -1; // index into rules of the rule that started it (rules mode)
     double effectStart = 0;
 
     // crossfading now lives on the receiver (and the viewer): every frame
@@ -516,11 +574,15 @@ int main(int argc, char** argv)
     {
         fprintf(stderr, "config: %s — reloading %s\n", why, cfgPath);
 
+        // the file may have become writable again (or stopped being): the
+        // dashboards' editable flag follows this probe
+        cfgWriter.open(cfgPath);
+
         Config fresh;
         fans::Controller freshFans;
         std::vector<Rule> freshRules;
         if (!fresh.load(cfgPath) || !checkRetiredKeys(fresh) ||
-            !freshFans.load(fresh, cfgPath) || !loadRules(fresh, freshRules))
+            !freshFans.load(fresh, &cfgWriter) || !loadRules(fresh, freshRules))
         {
             fprintf(stderr, "config: reload failed — keeping the running config; "
                             "fix the file and save again\n");
@@ -547,6 +609,8 @@ int main(int argc, char** argv)
 
         fanCtl.pushStandalone(sinks);
         fanCtl.pushConfig(sinks);
+        stripRemote.load(cfg, &cfgWriter);
+        stripRemote.pushConfig(sinks);
 
         if (fansOnly)
         {
@@ -566,8 +630,14 @@ int main(int argc, char** argv)
         // the boot/shutdown recordings are re-rendered and re-sent only when
         // what they depend on changed (the receiver skips an unchanged upload
         // anyway, but the ~second of transmit would still stall the strip)
+        // (a re-record pending from a phone edit — recordDue — is covered by
+        // this one, or stays pending for the tick if the strip block is
+        // unchanged, since the phone's in-place edit made the two trees equal)
         if (recordings)
-            recordAndUpload(cfg, strip, sinks);
+        {
+            recordAndUpload(cfg, strip, sinks, keepalive);
+            recordDue = 0;
+        }
 
         // the effect was built from the old tree: drop it and let the next
         // evaluation pick and start the matching rule afresh (a crossfade on
@@ -593,6 +663,22 @@ int main(int argc, char** argv)
             g_reload = 0;
             reload("SIGHUP");
             cfgMtime = cfgSeen = fileMtime(cfgPath);
+        }
+
+        if (restartEffect)
+        {
+            // a scene's color or level was edited from the phone, in place in
+            // the tree the running effect was built from: drop the effect and
+            // let the next evaluation start the matching rule afresh, so the
+            // new value shows (a crossfade on the receiver)
+            restartEffect = false;
+            effect.reset();
+            active.clear();
+            activeSettings = nullptr;
+            activeRule = -1;
+            want = nullptr;
+            lastSwitch = -1e9;
+            lastEval = -1e9;
         }
 
         if (now - lastEval >= evalInterval)

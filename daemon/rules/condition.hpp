@@ -29,3 +29,10 @@ public:
 // returns nullptr for unknown syntax
 std::unique_ptr<Condition> parseCondition(const std::string& spec,
                                           const Config& cfg);
+
+// is `spec` exactly one file: atom — no &, |, or ! around it — i.e. a rule
+// that is a plain on/off switch? Then `path` is the file it watches, read
+// with the same trimming parseCondition applies. The phone's dashboard lists
+// these as scenes (daemon/strip_remote.hpp); keeping the test here means the
+// two can't disagree about what a switch is.
+bool fileSwitchPath(const std::string& spec, std::string& path);

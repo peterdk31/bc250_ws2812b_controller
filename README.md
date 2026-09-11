@@ -271,7 +271,10 @@ once (the daemon says so when it changes), and anything flash-time on the
 receiver — `power_switch`, the fans' pins, `ble_remote` — which is `make
 flash`'s business. Editing `power_on`, `shutdown` or `strip` re-renders and
 re-sends the boot and shutdown recordings, which holds the strip for about a
-second.
+second. Edits from the phone's dashboard take a shorter path: they are
+applied live and written into the file by the daemon itself (`fans`, `strip`,
+a scene rule's `color`/`level`), which then treats the file's new mtime as
+its own doing rather than a change to reload.
 
 ### Tuning the colors
 
@@ -325,6 +328,26 @@ a forced effect has no rule settings, but effects fall back to top-level
 config keys, so temporarily add `"level": 0.25` at the top level of the
 config (next to `"strip"`) and run `solid` again. Remove it when done.
 
+**From the couch, with the BLE remote:** the shipped config's first rule is
+the same test field as a switch — a static color with a level, which doubles
+as a plain light when it isn't tuning anything —
+
+```jsonc
+{ "if": "file:/tmp/led-static-color", "effect": "solid", "hold": 0,
+  "settings": { "color": "ffffff", "level": 1.0 } }
+```
+
+— and the phone's dashboard shows every such `file:` rule as a **scene**
+with a switch (README [BLE remote](#the-dashboard)). Switch "solid" on, drag
+the white-balance sliders on the **Strip** card while looking at the strip
+(each release applies to the live strip at once and lands in the config's
+`strip` block), pull the scene's `level` slider down for the gamma step,
+switch it off. The color picker on the scene changes the rule's `color`, so
+the same switch tests a pure red or a warm white. Any `file:` rule with a
+`color` or `level` setting gets the same controls; one without is just a
+switch (the `/tmp/led-night` rule below, say). Put these rules first so they
+win over everything else while on.
+
 `white_balance` is the *total* correction — strip and diffuser combined into
 one measured value. Starting points per diffuser (always confirm against
 `solid` white):
@@ -340,8 +363,10 @@ extra fractional bits and the receiver rounds them away with a temporal dither
 at its own strip-refresh rate (several hundred Hz — far above flicker fusion),
 so dim gradients glide instead of stepping or shimmering. There is nothing to
 configure; the old `dither` key is gone (this needs receiver firmware from the
-same version — reflash once after updating). Restart the daemon after any
-change so the boot/shutdown recordings re-capture with the new colors.
+same version — reflash once after updating). A change to `strip` re-renders
+the boot/shutdown recordings so they carry the new colors — on a hand edit as
+part of the reload, after a phone edit ten seconds after the last slider
+moved (each re-render holds the strip for about a second).
 
 ### Sensors
 
@@ -384,7 +409,10 @@ instant). `hold` debounces a flapping rule.
 | `A \| B` | either holds (`&` binds tighter; no parentheses) |
 
 `file:` is the external control surface — `touch /tmp/led-night` to switch modes,
-`rm` to switch back.
+`rm` to switch back. A rule whose whole condition is one `file:` path is also
+a **scene** on the phone's dashboard ([BLE remote](#the-dashboard)): a switch
+the daemon flips by creating or removing that file, with a color picker or a
+level slider when the rule's settings carry `color` or `level`.
 
 The `steam_download` effect turns the strip into a live download progress bar
 (percent driven by network throughput; green pulse at 100%). Reading other
@@ -859,8 +887,11 @@ install, diff it, and the phone's edits come along. The same file watch that rel
 ([Live reload](#live-reload)) works the other way too: edit a curve in the
 file, and the phone's dashboard shows the new curve a moment later.
 
-Names, sources and `enabled` are yours alone — the phone can't add a header or
-point one at a different sensor. The dashboard is read-only when the daemon
+Names (up to 16 characters) and `enabled` are editable from the phone too
+(the editor opens both; a switched-off header shows as `off` and runs the
+receiver's fallback), and a disabled header is listed by name so it can be
+switched on — its curve follows once it is. Sources are yours alone —
+the phone can't add a header or point one at a different sensor. The dashboard is read-only when the daemon
 can't write its config (the page hides the edit buttons); a write that fails
 mid-way is reported in the journal and the edit runs until the next restart.
 The daemon takes edits only from the receiver's link, which only the
@@ -972,11 +1003,26 @@ Under the power ring, once connected, the page shows what the box is doing:
   and opens boost and fallback; **Save** sends just that header's change and
   the card says `saved` only when the daemon has applied it, written it into
   the config and pushed the config back — see
-  [Editing curves from the phone](#editing-curves-from-the-phone). A header
+  [Editing curves from the phone](#editing-curves-from-the-phone). The
+  editor also renames the header and switches it on or off; a header
   enabled in the config but not flashed onto the receiver is called out on
   its card.
 - **Fan behaviour** — hysteresis, ramp-down rate and boost length, editable
   the same way.
+- **Strip** — the config's `strip` block: brightness, white balance (one
+  slider per channel) and per-channel gamma, plus the `reverse` switch; LED
+  count and pin shown, not editable (they are wiring). No Save here: a
+  slider applies on release, a switch on the tap — the daemon corrects the
+  live strip on its next frame and writes the value into the config, and
+  the card says `saved` when the config comes back. Below them the
+  **scenes**: every rule whose condition is a bare `file:` path, as a switch
+  the daemon flips by creating or removing that file (nothing is written to
+  the config for a toggle — the rule reacts on its next tick, like a shell's
+  `touch`); a scene whose settings have a `color` gets a color picker, one
+  with a `level` a slider, both written into that rule. This is the
+  white-balance tuning flow, see [Tuning the colors](#tuning-the-colors).
+  A receiver on firmware from before the strip card shows the dashboard
+  without it.
 - **Receiver** — firmware version, uptime, free heap, whether a host is on
   the link.
 
@@ -1087,11 +1133,12 @@ sync byte: a **log** frame (`0xAA 0x58`, the debug backchannel), a **request**
 frame (`0xAA 0x59`, the power button asking for a graceful shutdown; answered
 with command `0x06`), and a **message** frame (`0xAA 0x5A`) for the BLE
 dashboard — `kind(1) len(1) payload checksum`, sent once, carrying a phone's
-fan-curve edit (`0x01`) or "a phone is watching" (`0x02`). The dashboard's
-host → receiver commands are `0x0A` (the fan config as the daemon runs it) and
-`0x0B` (its live readings). All three payloads are small JSON texts in the
-shape `daemon/fans.hpp` documents — the receiver relays them to the phone
-without parsing them.
+fan-curve edit (`0x01`), "a phone is watching" (`0x02`) or a strip edit
+(`0x03`). The dashboard's host → receiver commands are `0x0A` (the fan config
+as the daemon runs it), `0x0B` (its live readings) and `0x0C` (the strip
+settings and scenes). All of these payloads are small JSON texts in the shapes
+`daemon/fans.hpp` and `daemon/strip_remote.hpp` document — the receiver relays
+them to the phone without parsing them.
 
 Byte values and payload formats live in `common/protocol.hpp`, shared by host
 and firmware. The receiver drops bad-checksum frames and rescans for sync, so a

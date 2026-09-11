@@ -22,6 +22,7 @@
 #include "esp_app_desc.h"
 #include "esp_system.h"
 
+#include "dash.hpp"
 #include "dbglog.hpp"
 #include "fan.hpp"
 #include "hostreq.hpp"
@@ -32,7 +33,7 @@
 
 #define BLOG(fmt, ...) dbglog::line("ble: " fmt, ##__VA_ARGS__)
 
-// The GATT surface — one custom service, five characteristics:
+// The GATT surface — one custom service, eight characteristics:
 //
 //   control (write):        token(16) op(1). Token is the flash-time shared
 //                           secret, byte-for-byte (short tokens NUL-padded —
@@ -67,13 +68,20 @@
 //                           forwarded to the daemon as MSG_FAN_CONFIG; the
 //                           daemon's answering CMD_FAN_CONFIG notifies the
 //                           new value.
+//   stripcfg (read + write + notify):
+//                           the same for the strip: the last CMD_STRIP_CONFIG
+//                           (brightness, gamma, white balance, the file: rule
+//                           "scenes"); a write is token(16) + a partial edit
+//                           relayed as MSG_STRIP_CONFIG, answered by the
+//                           daemon's next CMD_STRIP_CONFIG.
 //   info (read):            build facts: firmware version string, free heap.
 //
 // The 128-bit UUIDs are this project's own (random base, "bc250" spelled
 // into the tail); the web page must list the service UUID to find us.
 // NimBLE wants them little-endian:
 //   service a5f20001-8f11-4e0e-9b3a-0bc250e0c001, control ...0002,
-//   status ...0003, fans ...0004, fancfg ...0005, info ...0006, telem ...0007
+//   status ...0003, fans ...0004, fancfg ...0005, info ...0006, telem ...0007,
+//   stripcfg ...0008
 namespace ble
 {
 static const uint32_t POLL_MS = 250; // policy task cadence
@@ -122,6 +130,9 @@ static const ble_uuid128_t INFO_UUID = BLE_UUID128_INIT(
 static const ble_uuid128_t TELEM_UUID = BLE_UUID128_INIT(
     0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
     0x0e, 0x4e, 0x11, 0x8f, 0x07, 0x00, 0xf2, 0xa5);
+static const ble_uuid128_t STRIPCFG_UUID = BLE_UUID128_INIT(
+    0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
+    0x0e, 0x4e, 0x11, 0x8f, 0x08, 0x00, 0xf2, 0xa5);
 
 static const uint8_t OP_POWER_ON = 0x01;
 static const uint8_t OP_SHUTDOWN = 0x02;
@@ -205,9 +216,11 @@ static uint16_t g_fansHandle = 0;
 static uint16_t g_fancfgHandle = 0;
 static uint16_t g_infoHandle = 0;
 static uint16_t g_telemHandle = 0;
+static uint16_t g_stripcfgHandle = 0;
 static volatile bool g_fansSub = false;   // a client has fans notifications on
 static volatile bool g_fancfgSub = false; // ...fancfg's
 static volatile bool g_telemSub = false;  // ...telem's (= the daemon should send)
+static volatile bool g_stripcfgSub = false; // ...stripcfg's
 
 // policy task locals
 static int g_lastState = -2;   // last pwr::psuState() seen (-2 = never)
@@ -217,8 +230,9 @@ static uint16_t g_advItvl = 0; // interval the running advertisement was
 static uint32_t g_lastFansPoll = 0;
 static uint32_t g_lastWatch = 0;   // last MSG_FAN_WATCH 1 sent
 static bool g_watching = false;    // the daemon has been told a phone watches
-static uint32_t g_lastCfgSeq = 0;  // fan::hostConfig() seq last notified
-static uint32_t g_lastTelSeq = 0;  // fan::hostTelemetry() seq last notified
+static uint32_t g_lastCfgSeq = 0;  // dash FAN_CONFIG seq last notified
+static uint32_t g_lastTelSeq = 0;  // dash FAN_TELEM seq last notified
+static uint32_t g_lastStripSeq = 0; // dash STRIP_CONFIG seq last notified
 
 // ---- the fans value ----
 
@@ -245,7 +259,7 @@ static uint16_t buildFans(uint8_t* p)
     fan::snapshot(s);
 
     uint32_t age = 0;
-    fan::hostTelemetry(nullptr, 0, nullptr, &age);
+    dash::get(dash::FAN_TELEM, nullptr, 0, nullptr, &age);
     bool haveT = age != 0xFFFFFFFFu;
     bool fresh = haveT && age < TELEM_FRESH_MS;
 
@@ -341,34 +355,29 @@ static int fansAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     return os_mbuf_append(ctxt->om, b, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
-// the two daemon payloads, served verbatim; none yet reads as an empty value,
-// which the page shows as "nothing from the daemon" rather than as broken
+// the daemon's payloads, served verbatim (dash.hpp); none yet reads as an
+// empty value, which the page shows as "nothing from the daemon" rather than
+// as broken
+static int serve(ble_gatt_access_ctxt* ctxt, dash::Slot slot)
+{
+    uint8_t b[dash::MAX_LEN];
+    uint16_t n = dash::get(slot, b, sizeof b);
+    return n == 0 || os_mbuf_append(ctxt->om, b, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
 static int telemAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
 {
     if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR)
         return BLE_ATT_ERR_UNLIKELY;
-
-    uint8_t b[fan::HOST_TELEM_MAX];
-    uint16_t n = fan::hostTelemetry(b, sizeof b);
-    return n == 0 || os_mbuf_append(ctxt->om, b, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    return serve(ctxt, dash::FAN_TELEM);
 }
 
-static int fancfgAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
+// a phone's edit: token(16) + a partial edit (JSON text), relayed to the
+// daemon unopened as msg `kind` — validation is its job. Bounded by what one
+// msg frame carries (hostreq::MSG_MAX); the page keeps its edits to one
+// header, the globals, or a few strip values, far under it.
+static int relayEdit(ble_gatt_access_ctxt* ctxt, uint8_t kind, const char* what)
 {
-    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)
-    {
-        uint8_t b[fan::HOST_CONFIG_MAX];
-        uint16_t n = fan::hostConfig(b, sizeof b);
-        return n == 0 || os_mbuf_append(ctxt->om, b, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
-    }
-
-    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
-        return BLE_ATT_ERR_UNLIKELY;
-
-    // token(16) + a partial edit (JSON text), relayed to the daemon unopened
-    // — validation is its job. Bounded by what one msg frame carries
-    // (hostreq::MSG_MAX); the page keeps its edits to one header or the
-    // globals, far under it.
     uint8_t buf[TOKEN_LEN + hostreq::MSG_MAX];
     uint16_t len = 0;
     if (ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof buf, &len) != 0 || len <= TOKEN_LEN + 2)
@@ -376,18 +385,36 @@ static int fancfgAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
 
     if (!tokenOk(buf))
     {
-        BLOG("fan edit with a wrong token rejected");
+        BLOG("%s edit with a wrong token rejected", what);
         return TOKEN_ERR;
     }
 
-    if (!hostreq::post(proto::MSG_FAN_CONFIG, buf + TOKEN_LEN, len - TOKEN_LEN))
+    if (!hostreq::post(kind, buf + TOKEN_LEN, len - TOKEN_LEN))
     {
-        BLOG("fan edit dropped — message queue full");
+        BLOG("%s edit dropped — message queue full", what);
         return BLE_ATT_ERR_INSUFFICIENT_RES;
     }
 
-    BLOG("fan edit (%u bytes) relayed to the daemon", (unsigned)(len - TOKEN_LEN));
+    BLOG("%s edit (%u bytes) relayed to the daemon", what, (unsigned)(len - TOKEN_LEN));
     return 0;
+}
+
+static int fancfgAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)
+        return serve(ctxt, dash::FAN_CONFIG);
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
+        return BLE_ATT_ERR_UNLIKELY;
+    return relayEdit(ctxt, proto::MSG_FAN_CONFIG, "fan");
+}
+
+static int stripcfgAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)
+        return serve(ctxt, dash::STRIP_CONFIG);
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
+        return BLE_ATT_ERR_UNLIKELY;
+    return relayEdit(ctxt, proto::MSG_STRIP_CONFIG, "strip");
 }
 
 // ver(1) = 1, version(32, NUL-padded; the app image's PROJECT_VER — the git
@@ -414,7 +441,7 @@ static int infoAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
 // built in start() with plain field assignment: NimBLE's struct layouts have
 // grown fields across IDF versions, and C++ designated initializers would
 // pin this file to one ordering
-static ble_gatt_chr_def g_chrs[7];
+static ble_gatt_chr_def g_chrs[8];
 static ble_gatt_svc_def g_svcs[2];
 
 // ---- GAP / advertising ----
@@ -434,7 +461,11 @@ static int gapEvent(ble_gap_event* ev, void*)
 
     case BLE_GAP_EVENT_DISCONNECT:
         g_conn = BLE_HS_CONN_HANDLE_NONE;
-        g_fansSub = g_fancfgSub = g_telemSub = false; // the policy task tells the daemon
+        // the policy task tells the daemon nobody is watching any more
+        g_fansSub = false;
+        g_fancfgSub = false;
+        g_telemSub = false;
+        g_stripcfgSub = false;
         BLOG("phone disconnected (reason=%d)", ev->disconnect.reason);
         break;
 
@@ -447,6 +478,8 @@ static int gapEvent(ble_gap_event* ev, void*)
             g_fancfgSub = ev->subscribe.cur_notify != 0;
         else if (ev->subscribe.attr_handle == g_telemHandle)
             g_telemSub = ev->subscribe.cur_notify != 0;
+        else if (ev->subscribe.attr_handle == g_stripcfgHandle)
+            g_stripcfgSub = ev->subscribe.cur_notify != 0;
         break;
 
     default:
@@ -540,7 +573,7 @@ static void dashboard(uint32_t now)
     }
 
     uint32_t seq = 0;
-    fan::hostTelemetry(nullptr, 0, &seq);
+    dash::get(dash::FAN_TELEM, nullptr, 0, &seq);
     if (seq != g_lastTelSeq)
     {
         g_lastTelSeq = seq;
@@ -548,12 +581,20 @@ static void dashboard(uint32_t now)
             ble_gatts_chr_updated(g_telemHandle);
     }
 
-    fan::hostConfig(nullptr, 0, &seq);
+    dash::get(dash::FAN_CONFIG, nullptr, 0, &seq);
     if (seq != g_lastCfgSeq)
     {
         g_lastCfgSeq = seq;
         if (g_fancfgSub)
             ble_gatts_chr_updated(g_fancfgHandle);
+    }
+
+    dash::get(dash::STRIP_CONFIG, nullptr, 0, &seq);
+    if (seq != g_lastStripSeq)
+    {
+        g_lastStripSeq = seq;
+        if (g_stripcfgSub)
+            ble_gatts_chr_updated(g_stripcfgHandle);
     }
 }
 
@@ -663,7 +704,12 @@ void start()
     g_chrs[5].access_cb = telemAccess;
     g_chrs[5].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY;
     g_chrs[5].val_handle = &g_telemHandle;
-    g_chrs[6] = {}; // terminator
+    g_chrs[6] = {};
+    g_chrs[6].uuid = &STRIPCFG_UUID.u;
+    g_chrs[6].access_cb = stripcfgAccess;
+    g_chrs[6].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY;
+    g_chrs[6].val_handle = &g_stripcfgHandle;
+    g_chrs[7] = {}; // terminator
 
     g_svcs[0] = {};
     g_svcs[0].type = BLE_GATT_SVC_TYPE_PRIMARY;

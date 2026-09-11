@@ -196,19 +196,39 @@ static const uint8_t CMD_FAN_CONFIG = 0x0A;
 // nobody has open.
 static const uint8_t CMD_FAN_TELEM = 0x0B;
 
+// CMD_STRIP_CONFIG: the strip's dashboard view — the config's `strip` block
+// as the daemon runs it (LED count, pin, reverse, brightness, gamma, white
+// balance) plus the "scenes": every rule whose condition is a bare `file:`
+// path, with whether its file exists right now and, when its settings carry
+// one, its color. JSON text in the shape daemon/strip_remote.hpp documents, at
+// most 512 bytes. Sent once at startup, whenever a scene's file appears or
+// disappears, and after every applied edit (the answer to a MSG_STRIP_CONFIG).
+// Unknown to older firmware, which ignores it.
+static const uint8_t CMD_STRIP_CONFIG = 0x0C;
+
 // MSG_FAN_CONFIG (msg frame): a phone's edit — a partial object of the same
-// shape holding only what changed (one header's curve/boost/fallback, or the
-// three globals). The daemon validates it exactly as it validates the config,
-// applies it live, writes it into its config file's fans block (README
-// "Fans"), and answers with CMD_FAN_CONFIG. An invalid or read-only edit is
-// dropped with a journal line; the phone's timeout on the answering
-// CMD_FAN_CONFIG is what tells its user.
+// shape holding only what changed (one header's curve/boost/fallback/name/
+// enabled, or the three globals). The daemon validates it exactly as it
+// validates the config, applies it live, writes it into its config file's
+// fans block (README "Fans"), and answers with CMD_FAN_CONFIG. An invalid or
+// read-only edit is dropped with a journal line; the phone's timeout on the
+// answering CMD_FAN_CONFIG is what tells its user.
 static const uint8_t MSG_FAN_CONFIG = 0x01;
 
 // MSG_FAN_WATCH (msg frame): payload one byte, 1 = a phone is subscribed to
 // the dashboard (repeated every ~10 s while it is), 0 = it left. The daemon
 // sends CMD_FAN_TELEM only within ~30 s of a 1.
 static const uint8_t MSG_FAN_WATCH = 0x02;
+
+// MSG_STRIP_CONFIG (msg frame): a phone's edit of the strip view — a partial
+// object: any of brightness / gamma / white_balance / reverse (applied to the
+// live strip at once and written into the config's strip block), and/or
+// "scenes": [{ "p": path, "on": bool }] to create or remove a scene's file
+// (nothing written to the config — the rule reacts on its next tick) or
+// [{ "p": path, "color": "rrggbb" }] to change a scene rule's color setting
+// (written into that rule). Answered with CMD_STRIP_CONFIG, refused like a
+// fan edit.
+static const uint8_t MSG_STRIP_CONFIG = 0x03;
 
 // REQ_HOST_SHUTDOWN: "power yourself down, gracefully." The receiver's power
 // switch sends this on a short button press while the machine is up — the

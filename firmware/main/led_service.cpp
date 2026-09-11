@@ -15,6 +15,7 @@
 #include "recording.hpp"
 
 #include "dbglog.hpp"
+#include "dash.hpp"
 #include "fan.hpp"
 #include "hostreq.hpp"
 #include "link.hpp"
@@ -295,13 +296,18 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
     else if (cmd == proto::CMD_FAN_CONFIG)
     {
         // the daemon's fan config as it runs it, held for the BLE dashboard
-        // (fan.hpp "the dashboard's view"); this side never interprets it
-        fan::setHostConfig(payload, len);
+        // (dash.hpp); this side never interprets it
+        dash::set(dash::FAN_CONFIG, payload, len);
     }
     else if (cmd == proto::CMD_FAN_TELEM)
     {
         // and what its curves are reading right now, same
-        fan::setHostTelemetry(payload, len);
+        dash::set(dash::FAN_TELEM, payload, len);
+    }
+    else if (cmd == proto::CMD_STRIP_CONFIG)
+    {
+        // and its strip settings and scenes, same
+        dash::set(dash::STRIP_CONFIG, payload, len);
     }
 }
 
