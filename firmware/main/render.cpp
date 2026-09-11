@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "led_strip.h"
 
@@ -13,18 +14,45 @@
 #include "dither.hpp"
 
 #include "util.hpp"
+#include "dbglog.hpp"
 
 // how often the strip is re-latched between host frames. Frames arrive as 8.8
 // fixed-point values (see common/protocol.hpp); every latch rounds them to
 // the strip's 8 bits with a fresh ordered threshold (common/dither.hpp), so a
 // fractional value renders as a duty cycle between adjacent codes. The
-// ~500-900 Hz this period yields (the serial read's ~1 ms block and the RMT
-// transfer time set the real cadence) is the dither's whole budget: the
-// blink-rate floor below can only keep fractions whose pulse rate clears
+// ~500-900 Hz this period yields (the serial read's ~1 ms block and the
+// strip's transfer time set the real cadence) is the dither's whole budget:
+// the blink-rate floor below can only keep fractions whose pulse rate clears
 // DITHER_MIN_BLINK_HZ, so a faster latch means finer fractions survive. A
-// long strip's RMT time (~30 µs/LED) throttles this naturally; the floor
+// long strip's wire time (~30 µs/LED) throttles this naturally; the floor
 // adapts (see refresh), so slow latches degrade to rounding, not flicker.
 #define DITHER_REFRESH_US 1000
+
+// How the WS2812 bitstream leaves the chip. SPI with DMA (the default): the
+// whole frame is encoded into a DMA buffer (3 SPI bits per WS2812 bit at
+// 2.5 MHz — 100 / 110 — well inside the ±150 ns the LEDs accept) and the
+// peripheral clocks the pixel bits out with no software in the loop. The RMT
+// path it replaces is kept selectable (`make flash-source STRIP_USE_RMT=1`,
+// a CMake cache var main/CMakeLists.txt turns into this macro) because it is
+// what every board ran until Sep 2026 — but RMT on these chips has no DMA:
+// an interrupt refills a ping-pong buffer (on the C3, 96 symbols — ~60 µs of
+// slack per refill). The BLE controller's interrupts and critical sections
+// (a phone connected to the power remote) eat into that, and a late refill
+// is a torn bit — seen as random LEDs flickering while a phone is connected.
+// Flash writes (recording uploads) stall it the same way. DMA has neither
+// problem; the strip pin still comes from the daemon config (any GPIO, via
+// the matrix), and the SPI bus is otherwise unused on both targets.
+//
+// One thing the SPI backend does not send is the reset: the RMT encoder
+// appended a 280 µs low symbol to every frame, SPI just stops clocking, so
+// the latch is the idle gap before the NEXT transfer. tick() waits a
+// millisecond anyway; show() latches a host frame the moment it lands, so
+// refresh() holds a frame back until the previous one has had STRIP_RESET_US
+// of silence — else the strip reads the two as one long frame.
+#ifndef STRIP_USE_RMT
+#define STRIP_USE_RMT 0
+#endif
+#define STRIP_RESET_US 300
 
 // the slowest pulse rate a dithered fraction may produce. A duty cycle's
 // pulse rate is fraction × latch rate: exact on average, but a near-code
@@ -80,16 +108,25 @@ void init(uint16_t count, uint8_t pin)
     sc.led_pixel_format = LED_PIXEL_FORMAT_GRB;
     sc.flags.invert_out = false;
 
+    // on failure leave strip null; show()/blank() guard on it, so a bad
+    // pin/count can't brick the receiver (it just stays dark until a good frame)
+#if STRIP_USE_RMT
     led_strip_rmt_config_t rc = {};
     rc.clk_src = RMT_CLK_SRC_DEFAULT;
     rc.resolution_hz = 10 * 1000 * 1000; // 10 MHz — standard WS2812 timing
-    rc.mem_block_symbols = 64;
+    rc.mem_block_symbols = 64;           // the C3 rounds this up to both TX blocks (96)
     rc.flags.with_dma = false;
-
-    // on failure leave strip null; show()/blank() guard on it, so a bad
-    // pin/count can't brick the receiver (it just stays dark until a good frame)
     if (led_strip_new_rmt_device(&sc, &rc, &strip) != ESP_OK)
+#else
+    led_strip_spi_config_t pc = {};
+    pc.clk_src = SPI_CLK_SRC_DEFAULT;
+    pc.spi_bus = SPI2_HOST; // the general-purpose SPI on the C3 and the ESP32
+    pc.flags.with_dma = true;
+    if (led_strip_new_spi_device(&sc, &pc, &strip) != ESP_OK)
+#endif
     {
+        dbglog::line("render: strip driver init FAILED (pin %u, %u LEDs) — strip stays dark",
+                     (unsigned)pin, (unsigned)count);
         strip = nullptr;
         return;
     }
@@ -104,6 +141,7 @@ void blank()
         return;
 
     led_strip_clear(strip); // zero every pixel and latch it out
+    lastRefreshUs = esp_timer_get_time();
     haveFrame = false;      // nothing to dither; the refresh loop idles dark
 
     // the strip is black now: record that as the last shown, under a sentinel
@@ -179,7 +217,18 @@ static void refresh()
         led_strip_set_pixel(strip, i, c[0], c[1], c[2]);
     }
 
-    led_strip_refresh(strip);
+#if !STRIP_USE_RMT
+    // give the previous frame its reset gap (see STRIP_RESET_US); at most a
+    // few hundred microseconds, and only when show() follows a latch closely
+    int64_t sinceLast = esp_timer_get_time() - lastRefreshUs;
+    if (sinceLast >= 0 && sinceLast < STRIP_RESET_US)
+        esp_rom_delay_us((uint32_t)(STRIP_RESET_US - sinceLast));
+#endif
+
+    // a failed transfer used to pass silently; say so once, then rarely
+    static uint32_t failures = 0;
+    if (led_strip_refresh(strip) != ESP_OK && (failures++ % 1000) == 0)
+        dbglog::line("render: strip refresh FAILED (%u so far)", (unsigned)failures);
 
     // remember the *blended* 8.8 frame (not the dithered 8-bit one) as what's
     // on screen, so a dissolve that starts mid-dissolve seeds cleanly

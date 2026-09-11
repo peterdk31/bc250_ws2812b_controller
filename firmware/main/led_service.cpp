@@ -482,7 +482,7 @@ static void loop()
     // complete frames and calls the StripHandler, which lights the strip
     // (onPixels) or acts on a command (onCommand). The first read blocks one
     // tick so an idle loop yields to the RTOS instead of spinning — kept to
-    // 1 ms because this block plus the RMT transfer is the latch cadence, and
+    // 1 ms because this block plus the strip transfer is the latch cadence, and
     // the dither's blink floor eats less resolution the faster we latch (see
     // DITHER_REFRESH_US in render.cpp). Once bytes arrive we drain the burst
     // with non-blocking reads.
@@ -659,7 +659,7 @@ static void taskMain(void*)
 void start()
 {
     // its own task, so the latch cadence — the 1 ms blocking read in loop()
-    // plus the RMT transfer, which is the dither's whole budget — never waits
+    // plus the strip transfer, which is the dither's whole budget — never waits
     // on other features running in their own tasks. Priority above the default
     // main task so a busy sibling can't starve the latch; anything that needs
     // to influence the LEDs should queue to this task, not poke its state.

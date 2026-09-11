@@ -1,6 +1,6 @@
 # Managed components pulled from the ESP Component Registry on first build
 # (idf.py resolves these into firmware/managed_components/, gitignored).
-#   led_strip  — RMT-backed WS2812 driver (replaces the Arduino Freenove lib)
+#   led_strip  — WS2812 driver, SPI+DMA backend (RMT selectable; replaces the Arduino Freenove lib)
 #   littlefs   — LittleFS VFS for the recording store (replaces Arduino LittleFS)
 dependencies:
   idf:

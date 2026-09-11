@@ -363,7 +363,8 @@ FW_URL = https://github.com/$(FW_REPO)/releases/$(if $(filter latest,$(FW_RELEAS
 # freshly built daemon.
 IDF_BUILD_CMD = idf.py -C firmware -B $(RECEIVER_BUILD) -DIDF_TARGET=$(TARGET) \
                 -DSDKCONFIG=$$ROOT/$(RECEIVER_BUILD)/sdkconfig \
-                -DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS) build
+                -DHOST_BAUD=$(BAUD) -DHOST_TIMEOUT_MS=$(TIMEOUT_MS) \
+                $(if $(STRIP_USE_RMT),-DSTRIP_USE_RMT=$(STRIP_USE_RMT)) build
 
 receiver: led receiver-toolchain
 	@# idf.py only merges sdkconfig.defaults into a build dir's sdkconfig when

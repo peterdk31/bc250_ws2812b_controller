@@ -11,7 +11,7 @@ but nothing is board-specific. Co-authored with
 
 ```
 host (led daemon)                      ESP32              strip
-sensors → rules → effect → frames ──serial──→ RMT ──→ WS2812
+sensors → rules → effect → frames ──serial──→ SPI/DMA ──→ WS2812
 ```
 
 ## Hardware
@@ -992,8 +992,11 @@ Radio policy: the receiver advertises in both PSU states — a crashed machine
 must be reachable, and it counts as "on" — but at two paces: 300 ms intervals
 while off (quick to find, still gentle on 5VSB), ~1.3 s while the host is up,
 where the radio should stay a rounding error next to the strip's latch
-cadence. If the strip ever shows glitches with a phone connected, the RMT
-buffer in `render.cpp` (`mem_block_symbols`) is the knob to reach for.
+cadence. The strip's bitstream leaves the chip by SPI with DMA (`render.cpp`)
+for exactly this coexistence: the earlier RMT path refilled its buffer from an
+interrupt, and the BLE controller's interrupts delayed that refill enough to
+tear bits — random LEDs flickering while a phone was connected. The RMT path
+is still there should a board ever need it: `make flash-source STRIP_USE_RMT=1`.
 
 Guardrails, mirroring the fans': the chip must run a firmware whose partition
 table has the `blecfg` entry — `make flash-ble` against an older layout is a

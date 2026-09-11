@@ -667,8 +667,8 @@ void start()
 
     // one timer at the fan frequency, one channel per wired header (header
     // i+1 = LEDC channel i). All LEDC on the C3 is the one low-speed group;
-    // the strip's RMT is a different peripheral entirely, so the two never
-    // contend.
+    // the strip's SPI (or RMT) is a different peripheral entirely, so the two
+    // never contend.
     ledc_timer_config_t tc = {};
     tc.speed_mode = LEDC_LOW_SPEED_MODE;
     tc.duty_resolution = PWM_RES;

@@ -24,3 +24,8 @@ endif()
 if(DEFINED HOST_TIMEOUT_MS)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE HOST_TIMEOUT_MS=${HOST_TIMEOUT_MS})
 endif()
+# STRIP_USE_RMT=1 selects the interrupt-fed RMT strip driver over SPI+DMA
+# (render.cpp explains why SPI is the default); `make flash-source STRIP_USE_RMT=1`
+if(DEFINED STRIP_USE_RMT)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE STRIP_USE_RMT=${STRIP_USE_RMT})
+endif()
