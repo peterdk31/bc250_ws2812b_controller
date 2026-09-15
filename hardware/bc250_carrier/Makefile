@@ -5,6 +5,7 @@
 #   make drc        KiCad's own DRC through the pcbnew Python module (out/drc.txt)
 #   make export     gerbers (+ zip for JLCPCB), drill, PDFs, position file, netlist, BOM xml into out/
 #   make preview    quick PNG render of the layout (out/preview.png, Pillow only, no KiCad needed)
+#   make pinout     the annotated wiring/pinout image (pinout.png, tracked — shown in the README)
 #   BOARDS=3 make   size the LCSC parts list (out/lcsc_parts.csv) for 3 boards (default 10)
 #
 # Needs python3 and kicad-cli 7 (KICAD_SHARE points at KiCad's share dir,
@@ -17,9 +18,9 @@ CLI ?= kicad-cli
 BOARDS ?= 10         # boards to order: sizes out/lcsc_parts.csv
 export BOARDS
 
-.PHONY: all generate check drc export preview clean
+.PHONY: all generate check drc export preview pinout clean
 
-all: generate check drc preview export
+all: generate check drc preview pinout export
 
 generate:
 	python3 generate.py
@@ -29,6 +30,9 @@ check:
 
 preview:
 	python3 preview.py
+
+pinout:
+	python3 pinout.py
 
 drc:
 	mkdir -p $(OUT) && python3 drc.py $(PCB) $(OUT)/drc.txt

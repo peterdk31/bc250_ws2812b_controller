@@ -11,6 +11,13 @@ solders to a single pin. An optional 2 × 8 pin header along the left edge
 breaks out the three rails (two pins each) and the module's five spare
 GPIOs, each beside a ground pin.
 
+![Annotated pinout of the carrier: every pad labelled with its rail, GPIO and role, connector orientation, the OpenPuck wake hookup on J11](pinout.png)
+
+*The wiring diagram (`make pinout` → `pinout.png`, drawn from `generate.py`'s
+geometry so it cannot drift from the board): top view, every pad labelled
+with what it carries, pin 1 marks, connector orientation, and the OpenPuck
+hookup on J11. Open the image at full size for soldering.*
+
 The only discrete parts are the power switch's 2N7000 and its 100 kΩ gate
 pull-down, exactly the circuit the README describes. No regulator (the Super
 Mini has one), no level shifter (the strip reads 3.3 V data fine), no
