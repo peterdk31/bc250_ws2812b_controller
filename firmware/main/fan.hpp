@@ -27,7 +27,10 @@
 //    `fancfg` partition (`make flash` / `make flash-fan` write it from the
 //    daemon config's "fans" block); the daemon pushes the same values once at
 //    startup (CMD_FAN_STANDALONE) and they persist in this module's own NVS
-//    namespace, so an edited config applies on daemon-less boots too.
+//    namespace, so an edited config applies on daemon-less boots too. The
+//    phone can dial a header's resting duty directly (setFallback), which
+//    persists the same way — a machine with no daemon is still a fan
+//    controller.
 //
 // Runs as its own task and owns its own NVS namespace; it knows nothing of
 // the LED service. The LED task hands it the two fan commands and one word —
@@ -46,6 +49,15 @@ void setStandalone(const uint8_t* payload, uint16_t len);
 
 // a CMD_FAN_LIVE payload from the host (see protocol.hpp). Same calling rules.
 void setLive(const uint8_t* payload, uint16_t len);
+
+// the phone's edit (ble.cpp): set one header's resting duty, percent. The
+// same standalone setting the host pushes, changed one header at a time and
+// persisted the same way — so with no daemon at all this board is a fan
+// controller the phone dials; and the next daemon start pushes the config
+// file's values again, so the file stays the source of truth on a running
+// machine. Called on the NimBLE host task. False = feature off, no such
+// header, or a header that isn't wired (nothing is applied then).
+bool setFallback(uint8_t slot, uint8_t pct);
 
 // the host sent CMD_SHUTDOWN flagged as a power-off: hold the live duties
 // through the power-down instead of letting them expire to the fallback.
@@ -66,6 +78,8 @@ struct Snapshot
     uint8_t wired[proto::FAN_CHANNELS];
     uint8_t duty[proto::FAN_CHANNELS];   // the duty actually applied
     uint8_t source[proto::FAN_CHANNELS]; // SRC_*: where that duty came from
+    uint8_t fallback[proto::FAN_CHANNELS]; // the resting duty in force (what
+                                           // setFallback edits), NONE unwired
 };
 static const uint8_t SRC_NONE = 0;     // header not wired
 static const uint8_t SRC_FALLBACK = 1;

@@ -35,17 +35,25 @@
 
 // The GATT surface — one custom service, eight characteristics:
 //
-//   control (write):        token(16) op(1). Token is the flash-time shared
-//                           secret, byte-for-byte (short tokens NUL-padded —
-//                           the web page pads the same way). op 0x01 = power
-//                           on, 0x02 = graceful shutdown, 0x03 = hard off
-//                           (release PS_ON#: the remote form of holding the
-//                           button, for a crashed machine). A wrong token is
-//                           rejected with "write not permitted" (TOKEN_ERR,
-//                           below); a right one stages the request with the
-//                           pwr task and succeeds even if the state makes it moot
-//                           (the status characteristic is how a client sees
-//                           what actually happened).
+//   control (write):        token(16) op(1) [args]. Token is the flash-time
+//                           shared secret, byte-for-byte (short tokens
+//                           NUL-padded — the web page pads the same way). op
+//                           0x01 = power on, 0x02 = graceful shutdown, 0x03 =
+//                           hard off (release PS_ON#: the remote form of
+//                           holding the button, for a crashed machine) — no
+//                           args. op 0x10 = set a fan header's fallback duty,
+//                           args slot(1) percent(1): the receiver's own
+//                           resting duty for that header (the fans layout's
+//                           position, 0-based), applied and persisted by the
+//                           fan module without any daemon — what makes this
+//                           board a fan controller on its own. Rejected
+//                           (VALUE_ERR) for a slot that isn't wired.
+//                           A wrong token is rejected with "write not
+//                           permitted" (TOKEN_ERR, below); a right power op
+//                           stages the request with the pwr task and
+//                           succeeds even if the state makes it moot (the
+//                           status characteristic is how a client sees what
+//                           actually happened).
 //   status (read + notify): one byte, pwr's coarse PSU state: 0 = off,
 //                           1 = booting, 2 = on. Notifies on change, so the
 //                           phone watches the power-on it asked for confirm
@@ -109,6 +117,11 @@ static const uint16_t NAME_LEN = 16;
 // reach an Android page as "Unknown"; the page words that honestly.
 static const int TOKEN_ERR = BLE_ATT_ERR_WRITE_NOT_PERMITTED;
 
+// what a well-formed command with an unusable value gets (the fan op naming a
+// header that isn't wired): the first ATT application error code, distinct
+// from the length and token refusals in a debug log
+static const int VALUE_ERR = 0x80;
+
 static const ble_uuid128_t SVC_UUID = BLE_UUID128_INIT(
     0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
     0x0e, 0x4e, 0x11, 0x8f, 0x01, 0x00, 0xf2, 0xa5);
@@ -137,6 +150,7 @@ static const ble_uuid128_t STRIPCFG_UUID = BLE_UUID128_INIT(
 static const uint8_t OP_POWER_ON = 0x01;
 static const uint8_t OP_SHUTDOWN = 0x02;
 static const uint8_t OP_HARD_OFF = 0x03;
+static const uint8_t OP_FAN_FALLBACK = 0x10; // + slot(1) percent(1)
 
 // dashboard cadence: the fans value is notified this often while subscribed
 // (the daemon's telemetry moves on its 0.5 s tick, the fan task's on 100 ms;
@@ -238,17 +252,19 @@ static uint32_t g_lastStripSeq = 0; // dash STRIP_CONFIG seq last notified
 
 // FANS_LEN bytes, all little-endian — this board's side only; the daemon's
 // numbers are in the telem value, and the page joins the two:
-//   ver(1) = 1
+//   ver(1) = 2 (1 had no fallback byte per header; the page reads both)
 //   flags(1): bit0 fan feature on, bit1 boosting, bit2 hold (host powering
 //             off), bit3 live (daemon duties in force), bit4 host present on
 //             the link, bit5 telemetry fresh (younger than TELEM_FRESH_MS)
 //   psu(1): 0 off, 1 booting, 2 on
 //   telemAge(1): seconds since the daemon's last telemetry, 255 = none/stale
-//   per header ×6: state(1) duty(1)
+//   per header ×6: state(1) duty(1) fallback(1)
 //     state: bit0 wired, bits1-2 source (fan::SRC_*)
 //     duty: the duty this board applies (0xFF unwired)
+//     fallback: the resting duty in force — the control op 0x10 sets it, so
+//               the page's slider shows what is stored (0xFF unwired)
 //   uptime(4): this board's seconds since reset
-static const uint16_t FANS_LEN = 4 + proto::FAN_CHANNELS * 2 + 4;
+static const uint16_t FANS_LEN = 4 + proto::FAN_CHANNELS * 3 + 4;
 
 static const uint8_t F_ACTIVE = 0x01, F_BOOST = 0x02, F_HOLD = 0x04, F_LIVE = 0x08,
                      F_HOST = 0x10, F_TELEM = 0x20;
@@ -265,7 +281,7 @@ static uint16_t buildFans(uint8_t* p)
 
     int st = pwr::psuState();
     uint16_t at = 0;
-    p[at++] = 1;
+    p[at++] = 2;
     p[at++] = (s.active ? F_ACTIVE : 0) | (s.boosting ? F_BOOST : 0) |
               (s.hold ? F_HOLD : 0) | (s.live ? F_LIVE : 0) |
               (link::hostPresent() ? F_HOST : 0) | (fresh ? F_TELEM : 0);
@@ -276,6 +292,7 @@ static uint16_t buildFans(uint8_t* p)
     {
         p[at++] = (s.wired[i] ? 0x01 : 0) | ((s.source[i] & 3) << 1);
         p[at++] = s.duty[i];
+        p[at++] = s.fallback[i];
     }
 
     uint32_t up = (uint32_t)(esp_timer_get_time() / 1000000);
@@ -292,10 +309,12 @@ static int ctrlAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
         return BLE_ATT_ERR_UNLIKELY;
 
-    uint8_t buf[TOKEN_LEN + 1];
+    // token, op, and up to two argument bytes (the fan op's); the length
+    // is checked per op below, once the token has been
+    uint8_t buf[TOKEN_LEN + 3];
     uint16_t len = 0;
     if (ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof buf, &len) != 0 ||
-        len != sizeof buf)
+        len < TOKEN_LEN + 1)
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
 
     // constant-time token compare — not that a BLE latency oracle is a real
@@ -310,6 +329,25 @@ static int ctrlAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     }
 
     uint8_t op = buf[TOKEN_LEN];
+    uint16_t args = len - TOKEN_LEN - 1;
+
+    if (op == OP_FAN_FALLBACK)
+    {
+        if (args != 2)
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        uint8_t slot = buf[TOKEN_LEN + 1], pct = buf[TOKEN_LEN + 2];
+        if (!fan::setFallback(slot, pct))
+        {
+            BLOG("fan fallback header%u=%u%% rejected — not a wired header "
+                 "(or the fan feature is off)", slot + 1u, pct);
+            return VALUE_ERR;
+        }
+        BLOG("fan fallback header%u=%u%% set from the phone", slot + 1u, pct);
+        return 0;
+    }
+
+    if (args != 0)
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     if (op == OP_POWER_ON)
         pwr::remoteRequest(pwr::REMOTE_ON);
     else if (op == OP_SHUTDOWN)

@@ -32,14 +32,20 @@
 //
 //     "fans": {
 //         "hysteresis": 3, "ramp": 5, "boost_seconds": 5,
-//         "header1": { "enabled": true, "name": "pump", "source": "constant",
+//         "header1": { "name": "pump", "source": "constant",
 //                      "curve": "65", "boost": 100, "fallback": 100 },
 //         "header2": { ... "source": "temp", "curve": "45:35 60:55 75:100",
 //                      "boost": null, "fallback": 100 },
 //         ...
 //     }
 //
-// Every header has the same six keys. `source` is what the curve reads:
+// Every header has the same five keys, and a header listed here is driven:
+// its curve runs, its output is wired at flash time. To take one out of
+// service, delete its block (and reflash fancfg); to stop its fan, give it
+// a constant curve of 0. There is no enable flag — one existed, and meant
+// two things at once (wiring at flash time, curve at runtime), so a phone
+// could switch on a header the receiver had no pin for; the key is now a
+// startup error. `source` is what the curve reads:
 // `constant` (no reading; the curve is one value), `temp` (the top-level
 // `sensors` pick, °C), a hwmon `chip:label` temperature (same syntax as the
 // sensors list, °C), a hwmon `chip:pwmN` output (the board's own fan header,
@@ -50,8 +56,10 @@
 // whenever this daemon isn't driving the header. Both of those, plus
 // boost_seconds, are the receiver's standalone settings: pushed once at
 // startup (CMD_FAN_STANDALONE) and also baked into its fancfg partition at
-// flash time from this same block (tools/fancfg.py). A disabled header is
-// simply not the daemon's — nothing is ever sent for it.
+// flash time from this same block (tools/fancfg.py). They are pushed for
+// every header in this block — the config is the one source of truth while
+// a daemon is connected, and a value dialled on the receiver from the phone
+// while no daemon ran is overwritten by it.
 //
 // The curves run on the rules' 0.5 s tick, sharing the reads the rule
 // conditions already do. Their output goes out as CMD_FAN_LIVE whole percents
@@ -76,13 +84,10 @@
 //     { "editable": true,        // the config file is writable
 //       "hysteresis": 3, "ramp": 5, "boost_seconds": 5,
 //       "header2": { "n": "radiator", "s": "temp",   // s is read-only
-//                    "c": "45:35 60:55 75:100", "f": 100 },
-//       "header5": { "n": "spare", "s": "constant", "en": false }, ... }
+//                    "c": "45:35 60:55 75:100", "f": 100 }, ... }
 //
 // c/b/f are curve, boost and fallback in the config's own notation (b absent
-// = null, no boost), n the name, en whether the header is enabled (absent =
-// true). A disabled header is listed by name and kind only, so the phone can
-// switch it on (its curve then follows); s is the source's kind (constant,
+// = null, no boost), n the name; s is the source's kind (constant,
 // temp, pwm, cpu_load, gpu_load) and the one thing the phone can't change.
 // Keys are short because a GATT attribute holds 512 bytes at most and six
 // headers have to fit — pushConfig says so in the journal when they don't.
@@ -102,7 +107,6 @@ struct Header
 {
     int slot = 0;                    // 0-based; header1 is slot 0
     std::string key;                 // "header1"
-    bool enabled = false;
     std::string name;
     std::string source;              // as written
 
@@ -184,8 +188,7 @@ public:
     // read and validate the "fans" block. Returns false (having said what is
     // wrong, "fans.header2.curve: ...") on a bad block, so the daemon can
     // refuse to start the way it does for a bad rule; true with no block or no
-    // enabled header, in which case active() is false and nothing is ever
-    // sent.
+    // header, in which case active() is false and nothing is ever sent.
     // writer is the config file's editor (config_edit.hpp), where a dashboard
     // edit is written back (see the header comment); null = edits are refused.
     bool load(const Config& cfg, cfgedit::Writer* writer = nullptr)
@@ -256,9 +259,6 @@ public:
                 return bad("fans." + k, "unknown key");
         }
 
-        for (auto& h : headers_)
-            enabled_ += h.enabled;
-
         sensors_ = sensors;
         block_ = *block; // the block as written, for writeConfig to update in place
         writer_ = writer;
@@ -266,11 +266,13 @@ public:
         return true;
     }
 
-    bool active() const { return enabled_ > 0; }
+    bool active() const { return !headers_.empty(); }
 
     bool writable() const { return writer_ && writer_->writable(); }
 
-    // the receiver's standalone settings — once, at startup
+    // the receiver's standalone settings — once, at startup, and again when
+    // an edit moves them. Every header in the block: the config wins over
+    // whatever the receiver held (see the header comment)
     void pushStandalone(std::vector<std::unique_ptr<Sink>>& sinks)
     {
         if (!active())
@@ -282,8 +284,6 @@ public:
 
         for (auto& h : headers_)
         {
-            if (!h.enabled)
-                continue;
             p[1 + 2 * h.slot] = (uint8_t)h.fallback;
             p[2 + 2 * h.slot] = h.boost < 0 ? proto::FAN_NONE : (uint8_t)h.boost;
         }
@@ -292,15 +292,14 @@ public:
             s->sendCommand(proto::CMD_FAN_STANDALONE, p, sizeof p);
     }
 
-    // one evaluation: read every enabled header's source, run the curves, and
-    // send the live duties if they changed (or the refresh is due). Call it
-    // on the rules tick; it costs nothing when nothing is enabled and no
-    // phone is watching (a watcher still gets the host tiles' readings, even
-    // with every header switched off).
+    // one evaluation: read every header's source, run the curves, and send
+    // the live duties if they changed (or the refresh is due). Call it on the
+    // rules tick; it costs nothing when there are no headers and no phone is
+    // watching (a watcher still gets the host tiles' readings).
     void tick(double now, std::vector<std::unique_ptr<Sink>>& sinks)
     {
         bool watch = watching(now);
-        if (!active() && !watch && !liveOut_)
+        if (!active() && !watch)
             return;
 
         float dt = lastTick_ > 0 ? (float)(now - lastTick_) : 0.5f;
@@ -312,20 +311,14 @@ public:
         memset(p, proto::FAN_NONE, sizeof p);
 
         for (auto& h : headers_)
-            if (h.enabled)
-                p[h.slot] = (uint8_t)compute(h, dt);
+            p[h.slot] = (uint8_t)compute(h, dt);
 
-        // with nothing enabled p is all FAN_NONE — sent once, so a header
-        // switched off from the phone is released to its fallback now rather
-        // than after the receiver's live timeout; then nothing until a header
-        // is enabled again
         bool changed = memcmp(p, live_, sizeof p) != 0;
 
         if (changed || (active() && now - lastSent_ >= REFRESH_S))
         {
             memcpy(live_, p, sizeof p);
             lastSent_ = now;
-            liveOut_ = active();
 
             for (auto& s : sinks)
                 s->sendCommand(proto::CMD_FAN_LIVE, p, sizeof p);
@@ -403,8 +396,7 @@ public:
 
         for (auto& h : headers_)
         {
-            fprintf(out, "  %s %-10s %s", h.key.c_str(), h.name.c_str(),
-                    h.enabled ? "enabled " : "disabled");
+            fprintf(out, "  %s %-10s", h.key.c_str(), h.name.c_str());
 
             if (h.kind == Header::Constant)
                 fprintf(out, "  constant %g%%", h.curve[0].y);
@@ -419,8 +411,7 @@ public:
                     fprintf(out, " = (no reading)");
             }
 
-            if (h.enabled)
-                fprintf(out, "  -> %d%%", (int)live_[h.slot]);
+            fprintf(out, "  -> %d%%", (int)live_[h.slot]);
             fprintf(out, "   boost %s, fallback %d%%\n",
                     h.boost < 0 ? "none" : (std::to_string(h.boost) + "%").c_str(),
                     h.fallback);
@@ -507,10 +498,14 @@ private:
         if (!v.isObject())
             return bad(where, "expected an object");
 
-        static const char* KEYS[] = {"enabled", "name", "source", "curve",
-                                     "boost", "fallback"};
+        static const char* KEYS[] = {"name", "source", "curve", "boost", "fallback"};
         for (auto& m : v.members)
         {
+            if (m.first == "enabled")
+                return bad(where + ".enabled",
+                           "retired — a header listed here is always driven; delete "
+                           "the header's block to drop it, or give it a constant "
+                           "curve of 0 to stop the fan");
             bool known = false;
             for (const char* k : KEYS)
                 known |= m.first == k;
@@ -520,13 +515,8 @@ private:
         for (const char* k : KEYS)
             if (!v.find(k))
                 return bad(where, std::string("missing \"") + k +
-                                      "\" (every header has enabled, name, "
-                                      "source, curve, boost, fallback)");
-
-        const json::Value& en = *v.find("enabled");
-        if (en.type != json::Value::Type::Bool)
-            return bad(where + ".enabled", "expected true or false");
-        h.enabled = en.boolean;
+                                      "\" (every header has name, source, "
+                                      "curve, boost, fallback)");
 
         const json::Value& name = *v.find("name");
         if (!name.isString())
@@ -590,7 +580,7 @@ private:
             return bad(where + ".fallback", "expected a percent 0..100");
         h.fallback = (int)(fb.number + 0.5);
 
-        if (h.enabled && (h.kind == Header::Temp || h.kind == Header::Pwm))
+        if (h.kind == Header::Temp || h.kind == Header::Pwm)
         {
             resolve(h);
             if (h.path.empty())
@@ -621,8 +611,8 @@ private:
         bool wantCpu = watch, wantGpu = watch;
         for (auto& h : headers_)
         {
-            wantCpu |= h.enabled && h.kind == Header::CpuLoad;
-            wantGpu |= h.enabled && h.kind == Header::GpuLoad;
+            wantCpu |= h.kind == Header::CpuLoad;
+            wantGpu |= h.kind == Header::GpuLoad;
         }
 
         tempOk_ = false;
@@ -812,13 +802,6 @@ private:
         {
             j += ",\"" + h.key + "\":{\"n\":\"" + cfgedit::escape(h.name) + "\",\"s\":\"" +
                  kindName(h.kind) + "\"";
-            if (!h.enabled)
-            {
-                // just enough to show and switch on; the curve follows once
-                // it is enabled (the wire is 512 bytes for everything)
-                j += ",\"en\":false}";
-                continue;
-            }
             j += ",\"c\":\"" + h.curveText + "\"" +
                  (h.boost < 0 ? std::string() : ",\"b\":" + std::to_string(h.boost)) +
                  ",\"f\":" + std::to_string(h.fallback) + "}";
@@ -830,7 +813,7 @@ private:
     // cards: { "temp": 58.3, "cpu": 37, "gpu": 62,
     //          "header2": { "in": 58.3, "duty": 52 }, ... }
     // — a reading is absent when there is none, "in" when the header has no
-    // input (a constant, a sensor not found), and only enabled headers appear
+    // input (a constant, a sensor not found)
     std::string telemetryJson() const
     {
         char buf[64];
@@ -844,8 +827,6 @@ private:
             snprintf(buf, sizeof buf, "\"gpu\":%d", (int)(gpuLoad_ + 0.5f)), add(buf);
         for (auto& h : headers_)
         {
-            if (!h.enabled)
-                continue;
             std::string e = "\"" + h.key + "\":{";
             if (h.kind != Header::Constant && h.lastInOk)
                 snprintf(buf, sizeof buf, "\"in\":%.1f,", h.lastIn), e += buf;
@@ -876,7 +857,6 @@ private:
         int boost;    // -1 = none
         int fallback;
         std::string name;
-        bool enabled;
     };
 
     static const size_t NAME_CHARS = 16; // the card's title (characters, not bytes);
@@ -926,20 +906,9 @@ private:
             h.boost = edits[i].boost;
             h.fallback = edits[i].fallback;
             h.name = edits[i].name;
-            if (edits[i].enabled && !h.enabled)
-            {
-                // switched on from the phone: find its sensor now, as load does
-                h.haveIn = h.haveOut = false;
-                if ((h.kind == Header::Temp || h.kind == Header::Pwm) && h.path.empty())
-                    resolve(h);
-            }
-            h.enabled = edits[i].enabled;
             // haveOut stays: the ramp eases from the old duty to the new curve
         }
 
-        enabled_ = 0;
-        for (auto& h : headers_)
-            enabled_ += h.enabled;
         return true;
     }
 
@@ -979,7 +948,7 @@ private:
                 if (!h)
                     return bad(where + "." + k, "no such header in the config");
 
-                HeaderEdit e{h, h->curveText, h->boost, h->fallback, h->name, h->enabled};
+                HeaderEdit e{h, h->curveText, h->boost, h->fallback, h->name};
                 for (auto& f : v.members)
                 {
                     const std::string& fk = f.first;
@@ -988,8 +957,6 @@ private:
                         continue;
                     if (fk == "n" && fv.isString())
                         e.name = fv.text;
-                    else if (fk == "en" && fv.type == json::Value::Type::Bool)
-                        e.enabled = fv.boolean;
                     else if (fk == "c" && (fv.isString() || fv.isNumber()))
                         e.curve = json::toString(fv);
                     else if (fk == "b" && fv.type == json::Value::Type::Null)
@@ -1047,8 +1014,7 @@ private:
     {
         std::string k = std::to_string(boostSeconds_);
         for (auto& h : headers_)
-            k += "|" + std::to_string(h.enabled ? h.boost : -2) + ":" +
-                 std::to_string(h.enabled ? h.fallback : -2);
+            k += "|" + std::to_string(h.boost) + ":" + std::to_string(h.fallback);
         return k;
     }
 
@@ -1069,7 +1035,6 @@ private:
             json::Value& hv = cfgedit::member(block_, h.key);
             if (!hv.isObject())
                 continue;
-            cfgedit::member(hv, "enabled") = cfgedit::boolean(h.enabled);
             cfgedit::member(hv, "name") = cfgedit::string(h.name);
             cfgedit::member(hv, "curve") = cfgedit::string(h.curveText);
             cfgedit::member(hv, "boost") = h.boost < 0 ? json::Value() : cfgedit::number(h.boost);
@@ -1080,7 +1045,6 @@ private:
     }
 
     std::vector<Header> headers_;
-    int enabled_ = 0;
     float hysteresis_ = 3;
     float ramp_ = 5;
     int boostSeconds_ = 5;
@@ -1099,7 +1063,6 @@ private:
 
     double lastTick_ = 0;
     double lastSent_ = -1e9;
-    bool liveOut_ = false; // the receiver holds live duties of ours (see tick)
     uint8_t live_[CHANNELS] = {proto::FAN_NONE, proto::FAN_NONE, proto::FAN_NONE,
                                proto::FAN_NONE, proto::FAN_NONE, proto::FAN_NONE};
 

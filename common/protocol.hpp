@@ -137,7 +137,7 @@ static const uint8_t CMD_REQ_ACK = 0x06;
 // FAN_CHANNELS PWM outputs, one per header. Both fan commands carry one byte
 // per header, header1 first, and FAN_NONE (0xFF) in a duty slot means "this
 // header is not the daemon's to drive" — the receiver leaves it exactly as it
-// is (a disabled header in the config). The pins themselves live in the
+// is (a header the config doesn't list). The pins themselves live in the
 // receiver's `fancfg` flash partition, written at flash time from the same
 // config block; these commands only ever adjust speeds. Both are unknown to
 // older firmware, which ignores them.
@@ -177,7 +177,7 @@ static const uint8_t CMD_FAN_LIVE = 0x09;
 // All three payloads below are JSON text (UTF-8, no NUL), in the shape
 // daemon/fans.hpp documents; the receiver never parses them.
 
-// CMD_FAN_CONFIG: the fan config as the daemon runs it — per enabled header
+// CMD_FAN_CONFIG: the fan config as the daemon runs it — per header
 // its name, source kind, curve, boost and fallback, plus hysteresis, ramp,
 // boost_seconds and whether edits are accepted (the config file is writable).
 // At most 512 bytes (a GATT

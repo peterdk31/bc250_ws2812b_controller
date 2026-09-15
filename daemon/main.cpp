@@ -369,7 +369,7 @@ int main(int argc, char** argv)
     stripRemote.pushConfig(sinks); // ...and its strip card (daemon/strip_remote.hpp)
 
     // the fan curves run on their own 0.5 s cadence in both loops below; a
-    // no-op when no header is enabled. The dashboard's messages back from the
+    // no-op with no headers. The dashboard's messages back from the
     // receiver (a phone watching, a curve edit) are taken every frame — an
     // atomic peek when there are none, which is nearly always.
     const double fanInterval = 0.5;

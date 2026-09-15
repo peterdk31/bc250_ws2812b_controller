@@ -16,9 +16,10 @@ The layout must match Config::decode in firmware/main/fan.cpp:
     enabled(1) boost_secs(1) pin[6] duty[6] boost[6]
 
 Slot i is header i+1. Pins are GPIO numbers, 0xFF = header not wired (a
-disabled header — the firmware never configures its output, and a 4-pin fan
-plugged into it runs full, per the fan spec's floating-PWM rule). duty is the
-header's fallback percent; boost its boost percent, 0xFF = sits the boost out.
+header the block doesn't list — the firmware never configures its output, and
+a 4-pin fan plugged into it runs full, per the fan spec's floating-PWM rule).
+duty is the header's fallback percent; boost its boost percent, 0xFF = sits
+the boost out.
 Fields are only ever APPENDED (firmware newer than a blob reads erased flash
 for the tail: 0xFF pins = not wired, duty bytes past 100 clamp to 100). The
 firmware also still reads the original "FAN1" layout.
@@ -30,7 +31,7 @@ it validates the block the way the daemon does (daemon/fans.hpp), and the
 wiring against the target chip and the pins other features claim
 (--strip-pin, --avoid).
 
---list-pins prints the enabled headers' GPIOs (comma-separated) instead of
+--list-pins prints the listed headers' GPIOs (comma-separated) instead of
 writing anything, for the Makefile's cross-feature collision checks.
 """
 import argparse
@@ -45,7 +46,7 @@ from pincheck import CHIPS, FAN_PINS, MAX_PIN, parse_avoid, pin_byte
 
 MAX_FANS = 6  # LEDC channels on the smallest target (ESP32-C3)
 NONE = 0xFF
-HEADER_KEYS = ('enabled', 'name', 'source', 'curve', 'boost', 'fallback')
+HEADER_KEYS = ('name', 'source', 'curve', 'boost', 'fallback')
 SOURCE_WORDS = ('constant', 'temp', 'cpu_load', 'gpu_load')
 
 p = argparse.ArgumentParser(description=__doc__,
@@ -53,7 +54,7 @@ p = argparse.ArgumentParser(description=__doc__,
 p.add_argument('--out', help='output file (required unless --list-pins)')
 p.add_argument('--config', required=True,
                help='the daemon config (its "fans" block is what gets encoded; '
-                    'no block, or no enabled header = the feature is written off)')
+                    'no block, or no header = the feature is written off)')
 p.add_argument('--target', default='',
                help='chip the config is for (validates pins, e.g. esp32c3)')
 p.add_argument('--strip-pin', type=int, default=-1,
@@ -66,7 +67,7 @@ p.add_argument('--avoid-hard', action='store_true',
                     '(when the other feature is being flashed alongside, so '
                     'its pins are known-true)')
 p.add_argument('--list-pins', action='store_true',
-               help='print the enabled headers\' GPIOs and exit')
+               help='print the listed headers\' GPIOs and exit')
 a = p.parse_args()
 
 errors = []
@@ -156,15 +157,17 @@ for k, v in block.items():
             err(where, 'expected an object')
             continue
         for kk in v:
-            if kk not in HEADER_KEYS:
+            if kk == 'enabled':
+                err(f'{where}.enabled', 'retired — a header listed here is always '
+                    'driven; delete the header\'s block to drop it, or give it a '
+                    'constant curve of 0 to stop the fan')
+            elif kk not in HEADER_KEYS:
                 err(f'{where}.{kk}', 'unknown key')
         missing = [kk for kk in HEADER_KEYS if kk not in v]
         if missing:
             err(where, f'missing "{missing[0]}" (every header has '
                        + ', '.join(HEADER_KEYS) + ')')
             continue
-        if not isinstance(v['enabled'], bool):
-            err(f'{where}.enabled', 'expected true or false')
         if not isinstance(v['name'], str):
             err(f'{where}.name', 'expected a string')
         src = v['source']
@@ -183,7 +186,7 @@ for k, v in block.items():
         if not (number(fb) and 0 <= fb <= 100):
             err(f'{where}.fallback', 'expected a percent 0..100')
         if not errors:
-            headers[n - 1] = dict(enabled=v['enabled'], name=v['name'],
+            headers[n - 1] = dict(name=v['name'],
                                   boost=NONE if b is None else int(round(b)),
                                   fallback=int(round(fb)))
     else:
@@ -203,23 +206,21 @@ if pins_override is not None and len(pins_override) > MAX_FANS:
     err('fans.pins', f'{len(pins_override)} pins, but the firmware drives at '
                      f'most {MAX_FANS} headers')
 
-enabled = {slot: h for slot, h in headers.items() if h['enabled']}
-
-for slot in sorted(enabled):
+for slot in sorted(headers):
     if slot >= len(board_pins):
         err(f'fans.header{slot + 1}',
             f'no GPIO for this header on {a.target or "this target"}'
             + (f' (the board has header1..header{len(board_pins)})' if board_pins else '')
             + ' — add "pins": "5,6,7,10,..." to the fans block for a hand-wired build')
 
-if not errors and enabled:
+if not errors and headers:
     chip = CHIPS.get(a.target)
     top = chip['max_pin'] if chip else MAX_PIN.get(a.target)
 
     seen = {}
-    for slot in sorted(enabled):
+    for slot in sorted(headers):
         v = board_pins[slot]
-        flag = f'fans.header{slot + 1} ({enabled[slot]["name"]}, GPIO{v})'
+        flag = f'fans.header{slot + 1} ({headers[slot]["name"]}, GPIO{v})'
         if v in seen:
             err(flag, f'shares its pin with {seen[v]} — check "pins"')
             continue
@@ -259,23 +260,23 @@ for w in warnings:
     print(f'fancfg warning: {w}', file=sys.stderr)
 
 if a.list_pins:
-    print(','.join(str(board_pins[s]) for s in sorted(enabled)))
+    print(','.join(str(board_pins[s]) for s in sorted(headers)))
     sys.exit(0)
 
 if not a.out:
     print('fancfg: --out is required', file=sys.stderr)
     sys.exit(1)
 
-wire_pins = [pin_byte(board_pins[i]) if i in enabled else NONE
+wire_pins = [pin_byte(board_pins[i]) if i in headers else NONE
              for i in range(MAX_FANS)]
-wire_duty = [enabled[i]['fallback'] if i in enabled else 100
+wire_duty = [headers[i]['fallback'] if i in headers else 100
              for i in range(MAX_FANS)]
-wire_boost = [enabled[i]['boost'] if i in enabled else NONE
+wire_boost = [headers[i]['boost'] if i in headers else NONE
               for i in range(MAX_FANS)]
 
 blob = b'FAN2' + struct.pack(
     '<BB6B6B6B',
-    1 if enabled else 0,
+    1 if headers else 0,
     boost_secs,
     *wire_pins,
     *wire_duty,

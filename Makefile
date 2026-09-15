@@ -46,7 +46,7 @@ STRIP_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),4)
 # once the receiver reboots — it cuts the machine's power — so only an
 # explicit "enabled": false may do it (pwrcfg.py exits 3 for "no block").
 
-# The fans' standalone part (which headers are enabled, each one's fallback
+# The fans' standalone part (which headers there are, each one's fallback
 # duty and boost, the boost length) is what fancfg holds; curves are the
 # daemon's. The header → GPIO map is the carrier board's (tools/pincheck.py
 # FAN_PINS; "pins" in the block overrides it for a hand-wired build). Each
@@ -311,7 +311,7 @@ FANCFG_BIN = firmware/dist/fancfg.bin
 # companion to PWRCFG_RESOLVE for the fan controller: encode the config's
 # "fans" block into $(FANCFG_BIN) and set $$fan to the extra offset+file pair
 # for esptool write_flash. Always, when there is a config to read (no block or
-# no enabled header = written off); with no config at all the chip's fancfg is
+# no header = written off); with no config at all the chip's fancfg is
 # left alone. As with pwrcfg.py, fancfg.py is the only place a mistake can be
 # caught — the firmware silently treats a bad pin as "not wired" and that fan
 # just never spins — so it validates the block like the daemon does, and the

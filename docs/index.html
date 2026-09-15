@@ -15,12 +15,19 @@
      duty the receiver applies and where it came from (boost / the daemon's
      curve / fallback), the curve's own input, and the curve itself, with the
      current operating point marked — and the receiver's build facts. Curves
-     are editable in place: drag the points (or type them), set boost and
-     fallback, save; the write goes to the receiver, which relays it to the
-     daemon, which validates and applies it, writes it into its config file
-     and pushes the config back — the page shows "saved" only when that
-     round trip lands. Headers can be renamed and switched on or off the
-     same way; their sources stay the config file's.
+     are editable in place: drag the points (or type them), set boost, save;
+     the write goes to the receiver, which relays it to the daemon, which
+     validates and applies it, writes it into its config file and pushes the
+     config back — the page shows "saved" only when that round trip lands.
+     Headers can be renamed the same way; their sources stay the config
+     file's. Each card also has a fallback slider — what the header runs
+     when nothing drives it — applying on release to wherever the value
+     lives: to the daemon (into the config file, which the daemon then
+     pushes to the receiver, so the file is the one source of truth) while a
+     daemon is there; straight to the receiver, stored there, when there is
+     none — the machine off, a bench with just the receiver — so the board
+     is a fan controller in its own right until a daemon next connects and
+     the config wins again.
 
      A strip card, on firmware that has it: brightness, white balance and
      gamma as sliders that apply on release (the daemon corrects the live
@@ -59,14 +66,30 @@
      dropdown opens the chooser instead of connecting straight to it.
 
      Web Bluetooth needs Chrome or Edge — on Android or desktop — and HTTPS
-     (GitHub Pages qualifies). iOS browsers don't have it. Installed from
-     Chrome's "Add to Home screen", the service worker (sw.js) makes it work
-     fully offline, which is the point: the machine travels.
+     (GitHub Pages qualifies). Installed from Chrome's "Add to Home screen",
+     the service worker (sw.js) makes it work fully offline, which is the
+     point: the machine travels.
+
+     iOS: Safari (and every iOS browser, all WebKit) has no Web Bluetooth and
+     WebKit has said it won't add it. What exists is a "polyfill" living
+     INSIDE a third-party browser app: Bluefy (free) and WebBLE (paid) are
+     WKWebView shells that inject a spec-shaped navigator.bluetooth bridged
+     to CoreBluetooth. This page uses nothing beyond the spec, so it runs in
+     them as-is; what it does for iOS is (a) tell a Safari visitor to open
+     the page in Bluefy — a bluefy:// link plus the App Store — instead of a
+     dead "use Chrome", (b) word the remembered-device messages for a browser
+     that isn't Chrome, (c) skip the advertisement dance: CoreBluetooth
+     connects a known peripheral without a fresh scan (the connect just pends
+     until it is in range), and the polyfills' watchAdvertisements() is
+     either missing (WebBLE) or not something to wait on, and (d) fall back
+     to writeValue() where writeValueWithResponse() is missing.
 
      Everything protocol-shaped must match ble.cpp (JSON shapes: daemon/fans.hpp):
        service a5f20001-8f11-4e0e-9b3a-0bc250e0c001
-       control a5f20002-... : write  token(16, NUL-padded) + op(1)
+       control a5f20002-... : write  token(16, NUL-padded) + op(1) [+ args]
                               op 0x01=on 0x02=graceful shutdown 0x03=hard off
+                              op 0x10=set a fan header's fallback duty,
+                              args slot(1) percent(1) — the receiver's own
        status  a5f20003-... : read/notify  1 byte  0=off 1=booting 2=on
        fans    a5f20004-... : read/notify  the receiver's own fan view (parseFans)
        fancfg  a5f20005-... : read/notify  the daemon's fan config, JSON text
@@ -155,6 +178,7 @@
   /* errors only — empty (and invisible) the rest of the time */
   #state { font-size: .9rem; color: var(--danger); min-height: 1.5em; max-width: 26rem; }
   #state.hint { color: var(--muted); } /* capability notes, not failures */
+  #state a { color: inherit; text-decoration: underline; } /* the Bluefy links, on the dark ground */
 
   .row { display: flex; gap: .75rem; flex-wrap: wrap; justify-content: center; }
   button.minor, input, select {
@@ -214,6 +238,10 @@
   .bar i { display: block; height: 100%; background: var(--on); transition: width .4s; }
   .bar.boost i { background: var(--booting); }
   .bar.fallback i { background: var(--muted); }
+  /* the fallback slider on a fan card (into the config, or onto the receiver) */
+  .fan .fb { grid-column: 1 / -1; display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-bottom: .3rem; }
+  .fan .fb .sl { flex: 1 1 8rem; }
+  .fan .fb .unit { font-size: .75rem; color: var(--muted); }
 
   /* the curve: an SVG the card owns; points drag when editing */
   .curve { grid-column: 1 / -1; width: 100%; height: 7.5rem; display: block;
@@ -410,6 +438,7 @@ const INFO   = 'a5f20006-8f11-4e0e-9b3a-0bc250e0c001';
 const TELEM  = 'a5f20007-8f11-4e0e-9b3a-0bc250e0c001';
 const STRIPCFG = 'a5f20008-8f11-4e0e-9b3a-0bc250e0c001';
 const OP_ON = 0x01, OP_SHUTDOWN = 0x02, OP_HARD_OFF = 0x03;
+const OP_FAN_FALLBACK = 0x10; // + slot(1) percent(1)
 const TOKEN_LEN = 16;
 const STATE_NAMES = ['off', 'booting', 'on'];
 const DEFAULT_NAME = 'BC250'; // what the firmware advertises without a ble_remote.name
@@ -430,6 +459,15 @@ let attempt = null;    // the device an auto-reconnect (watch or connect) is liv
 let retryTimer = 0;
 let watchAbort = null; // aborts the advertisement watch of the live attempt
 let editToken = false; // the token box is open on request (change / rejected)
+
+// iPhone / iPad (iPadOS 13+ claims to be a Mac; touch points tell). Bluefy
+// and WebBLE run in a WKWebView, so their UA is an iOS Safari UA as well.
+const IOS = /iP(hone|ad|od)/.test(navigator.userAgent) ||
+            (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const BLUEFY_STORE = 'https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055';
+// Bluefy registers a URL scheme that opens a page inside it (its vendor's
+// documented way to hand a page over from Safari)
+const bluefyLink = () => 'bluefy://open?url=' + encodeURIComponent(location.href.split('#')[0]);
 
 // ---- storage (localStorage; wrapped — storage can throw in private windows) ----
 const store = {
@@ -586,7 +624,11 @@ function gattQueue(op) {
 }
 const gattReset = () => { gattChain = Promise.resolve(); };
 const gattRead = c => gattQueue(() => c.readValue());
-const gattWrite = (c, v) => gattQueue(() => c.writeValueWithResponse(v));
+// writeValueWithResponse is newer than the iOS polyfills' first releases —
+// the deprecated writeValue is the same thing (write with response) where
+// the new name is missing
+const gattWrite = (c, v) => gattQueue(() =>
+  c.writeValueWithResponse ? c.writeValueWithResponse(v) : c.writeValue(v));
 const gattSubscribe = c => gattQueue(() => c.startNotifications());
 
 // top-level named handlers: addEventListener dedupes identical refs, so
@@ -643,9 +685,12 @@ function onDisconnected(e) {
 // this session: watch its advertisements and connect on the first one seen.
 // Resolves 'seen' (in range, connect now), 'fallback' (watch API missing or
 // refused — attempt a blind connect, the pre-flag behavior), or 'aborted'
-// (superseded by a pick / switch / tab hidden — do nothing).
+// (superseded by a pick / switch / tab hidden — do nothing). On iOS the
+// blind connect IS the right path: CoreBluetooth connects a known
+// peripheral without a scan and simply pends until it is in range, and the
+// polyfill browsers' watchAdvertisements() is missing or not to be waited on.
 function waitForAdvertisement(d) {
-  if (!d.watchAdvertisements) return Promise.resolve('fallback');
+  if (IOS || !d.watchAdvertisements) return Promise.resolve('fallback');
   return new Promise(resolve => {
     watchAbort?.abort();
     const ac = watchAbort = new AbortController();
@@ -693,8 +738,13 @@ async function resume() {
   if (device) { reconnect(); return; }
   if (!token() || !('bluetooth' in navigator)) return;
   if (!navigator.bluetooth.getDevices) {
-    // stock Chrome (2026): persistent-device APIs still flag-gated
-    say('Auto-reconnect needs “Experimental Web Platform features” turned ' +
+    // stock Chrome (2026): persistent-device APIs still flag-gated; on iOS
+    // it is the browser app (WebBLE has no getDevices, Bluefy has) — there
+    // is no flag to name
+    say(IOS
+      ? 'This browser can’t remember receivers between visits — tap to ' +
+        'connect (Bluefy can).'
+      : 'Auto-reconnect needs “Experimental Web Platform features” turned ' +
         'on in <code>chrome://flags</code> — until then, tap to connect.', true);
     return;
   }
@@ -708,7 +758,10 @@ async function resume() {
       // survives the session is the second flag's doing — the page can't
       // read flag state, so name it only as the reason this would recur
       if (anyKnown())
-        say('Chrome holds no permission for the receiver — tap to connect ' +
+        say(IOS
+          ? 'The browser holds no permission for the receiver — tap to ' +
+            'connect once.'
+          : 'Chrome holds no permission for the receiver — tap to connect ' +
             'once. If this keeps coming back, enable <code>chrome://flags/' +
             '#enable-web-bluetooth-new-permissions-backend</code> and ' +
             'relaunch Chrome.', true);
@@ -743,10 +796,11 @@ function select(id) {
   reconnect();
 }
 
-async function write(op) {
-  const buf = new Uint8Array(TOKEN_LEN + 1);
+async function write(op, ...args) {
+  const buf = new Uint8Array(TOKEN_LEN + 1 + args.length);
   buf.set(tokenBytes());
   buf[TOKEN_LEN] = op;
+  buf.set(args, TOKEN_LEN + 1);
   try {
     await gattWrite(ctrl, buf);
     say('');
@@ -789,7 +843,9 @@ const KIND_CONST = 0, KIND_TEMP = 1;
 const NONE = 0xFF;
 const CHANNELS = 6, MAX_POINTS = 8;   // the page adds no more than this; the daemon has no cap
 const SRC_NAMES = ['', 'fallback', 'live', 'boost']; // fan::SRC_*
-const FANS_LEN = 4 + CHANNELS * 2 + 4;
+// the fans view's length by layout version: 1 = state(1) duty(1) per header,
+// 2 adds the receiver's stored fallback(1)
+const FANS_LEN = ver => 4 + CHANNELS * (ver === 1 ? 2 : 3) + 4;
 const SAVE_TIMEOUT_MS = 6000;
 const utf8 = new TextDecoder();
 
@@ -802,18 +858,49 @@ let dragging = null;  // { slot, idx } while a curve point is being dragged
 const u32 = (dv, o) => dv.getUint32(o, true);
 
 function parseFans(dv) {
-  if (dv.byteLength < FANS_LEN || dv.getUint8(0) !== 1) return null;
+  if (dv.byteLength < 1) return null;
+  const ver = dv.getUint8(0), stride = ver === 1 ? 2 : ver === 2 ? 3 : 0;
+  if (!stride || dv.byteLength < FANS_LEN(ver)) return null;
   const f = dv.getUint8(1);
   const out = {
     active: !!(f & 1), boosting: !!(f & 2), hold: !!(f & 4), live: !!(f & 8),
     host: !!(f & 16), telem: !!(f & 32),
-    psu: dv.getUint8(2), age: dv.getUint8(3), h: [], uptime: u32(dv, 4 + CHANNELS * 2),
+    psu: dv.getUint8(2), age: dv.getUint8(3), h: [], uptime: u32(dv, 4 + CHANNELS * stride),
   };
   for (let i = 0; i < CHANNELS; i++) {
-    const st = dv.getUint8(4 + i * 2);
-    out.h.push({ wired: !!(st & 1), src: (st >> 1) & 3, duty: dv.getUint8(5 + i * 2) });
+    const st = dv.getUint8(4 + i * stride);
+    out.h.push({ wired: !!(st & 1), src: (st >> 1) & 3, duty: dv.getUint8(5 + i * stride),
+                 fb: stride === 3 ? dv.getUint8(6 + i * stride) : null }); // null: firmware before the slider
   }
   return out;
+}
+
+// the fallback slider's write. The value lives in one of two places and the
+// slider writes to whichever owns it: the daemon's config for a header the
+// daemon has (a partial edit like every other fan edit — into the config
+// file, which the daemon then pushes to the receiver), else
+// the receiver itself via the control op — no daemon, or a wired header the
+// daemon's config doesn't list. Either way a view (the config, or the receiver's fans
+// view once a second) echoes the value; until one does the slider holds what
+// the finger set, so a view assembled before the change applied can't yank
+// it back.
+const pendFb = new Map(); // slot -> { v, t } a write no view has echoed yet
+const PEND_FB_MS = 3000;
+async function setFallback(slot, v) {
+  pendFb.set(slot, { v, t: Date.now() });
+  if (fallbackRoute(slot) === 'daemon') {
+    if (!(await writeCfg(slot, { ['header' + (slot + 1)]: { f: v } }))) { pendFb.delete(slot); renderDash(); }
+    return;
+  }
+  try { await write(OP_FAN_FALLBACK, slot, v); flash(slot, 'set', 'ok'); }
+  catch { pendFb.delete(slot); flash(slot, 'not set', 'err'); renderDash(); } // write() said why
+}
+// where a header's fallback is written: 'daemon', 'receiver', or '' (nowhere:
+// the daemon has it but can't write its config, or the receiver isn't wired)
+function fallbackRoute(slot) {
+  const c = cfg && cfg.h[slot], f = fans && fans.h[slot];
+  if (c) return cfg.editable ? 'daemon' : '';
+  return f && f.wired && f.fb !== null && f.fb !== NONE ? 'receiver' : '';
 }
 
 // "45:35 60:55" (or "65" for a constant) -> [{x, y}], sorted; the daemon's notation
@@ -836,10 +923,8 @@ function parseCfg(text) {
     const h = j['header' + (i + 1)];
     if (!h) { c.h.push(null); continue; }
     const kind = KIND[h.s] ?? KIND_CONST;
-    // a disabled header comes by name and kind only (no curve) — see fans.hpp
-    c.h.push({ name: String(h.n || ''), kind, pts: h.c === undefined ? [] : parseCurve(h.c, kind === KIND_CONST),
-               boost: h.b === null || h.b === undefined ? NONE : +h.b, fallback: h.f === undefined ? null : +h.f,
-               enabled: h.en !== false });
+    c.h.push({ name: String(h.n || ''), kind, pts: parseCurve(h.c ?? '', kind === KIND_CONST),
+               boost: h.b === null || h.b === undefined ? NONE : +h.b, fallback: h.f === undefined ? null : +h.f });
   }
   return c;
 }
@@ -1004,9 +1089,8 @@ function renderDash() {
 }
 
 // which headers get a card: every wired one (the receiver drives it) plus
-// any the daemon's config has (it lists enabled headers only), so a header
-// enabled in the config but not flashed still shows — with a note, since
-// that is a real misconfiguration
+// every one the daemon's config has, so a header in the config but not
+// flashed still shows — with a note, since that is a real misconfiguration
 function cardSlots() {
   const slots = new Set();
   if (fans) fans.h.forEach((h, i) => { if (h.wired) slots.add(i); });
@@ -1051,22 +1135,19 @@ function renderFanCard(el, slot) {
   const kind = c ? c.kind : KIND_CONST;
   const name = (c && c.name) || `header${slot + 1}`;
   const editable = !!(cfg && cfg.editable) && !!c;
-  const off = !!(c && !c.enabled); // in the config, switched off: the daemon leaves it alone
 
   let src = f && f.wired ? SRC_NAMES[f.src] : '';
   if (f && f.hold) src = 'hold';
-  if (off) src = 'off';
   const duty = f && f.wired && f.duty !== NONE ? f.duty : null;
 
   let sub = '';
-  if (off) sub = f && f.wired ? 'not driven by the daemon — runs its fallback' : `curve on ${KINDS[kind]} when enabled`;
-  else if (c) {
+  if (c) {
     if (kind === KIND_CONST) sub = 'fixed speed';
     else if (tm && tm.in !== undefined) sub = `${KIND_LABEL[kind]}${fmtIn(kind, tm.in)}`;
     else sub = fans && fans.telem ? 'no reading' : `curve on ${KINDS[kind]}`;
   } else if (f && f.wired) sub = 'not driven by the daemon — runs its fallback';
   let note = '';
-  if (c && c.enabled && f && !f.wired) note = 'enabled in the config but not wired on the receiver: run make flash-fan';
+  if (c && f && !f.wired) note = 'in the config but not wired on the receiver: run make flash-fan';
 
   // first paint builds the skeleton; later paints only update text/attrs so
   // an open editor's inputs (and the drag) aren't torn down under the finger
@@ -1075,6 +1156,7 @@ function renderFanCard(el, slot) {
       <div class="name"></div><div class="duty"><span class="d"></span><small>%</small></div>
       <div class="sub"><span class="chip"></span><span class="what"></span><span class="note" hidden></span></div>
       <div class="bar"><i></i></div>
+      <div class="fb" hidden><div class="sl one"><input type="range" class="fbv" min="0" max="100" step="1" aria-label="Fallback duty"><span class="val"></span></div><span class="unit">fallback · stored on the receiver</span></div>
       <svg class="curve" viewBox="0 0 320 120" preserveAspectRatio="none"></svg>
       <div class="editor" hidden></div>
       <div class="tools"><button class="minor edit">Edit curve</button>
@@ -1084,32 +1166,51 @@ function renderFanCard(el, slot) {
     el.querySelector('.cancel').addEventListener('click', () => { delete edits[slot]; renderDash(); });
     el.querySelector('.save').addEventListener('click', () => saveEdit(slot));
     bindCurveDrag(el.querySelector('.curve'), slot);
+    bindSlider(el.querySelector('.fbv'), v => { el.querySelector('.fb .val').textContent = `${v} %`; },
+               v => setFallback(slot, v));
   }
 
   el.querySelector('.name').textContent = name;
   el.querySelector('.d').textContent = duty === null ? '—' : duty;
   const chip = el.querySelector('.chip');
   chip.textContent = src;
-  chip.className = 'chip ' + (src === 'live' ? 'live' : src === 'boost' ? 'boost' : src === 'hold' ? 'hold' : src === 'off' ? 'off' : '');
+  chip.className = 'chip ' + (src === 'live' ? 'live' : src === 'boost' ? 'boost' : src === 'hold' ? 'hold' : '');
   chip.hidden = !chip.textContent;
   el.querySelector('.what').textContent = sub;
   const noteEl = el.querySelector('.note');
   noteEl.textContent = note; noteEl.hidden = !note;
   const bar = el.querySelector('.bar');
-  bar.className = 'bar ' + (src === 'boost' ? 'boost' : (src === 'fallback' || off) ? 'fallback' : '');
+  bar.className = 'bar ' + (src === 'boost' ? 'boost' : src === 'fallback' ? 'fallback' : '');
   bar.firstChild.style.width = `${duty === null ? 0 : duty}%`;
 
+  // the fallback slider — what the header runs when nothing drives it. Shown
+  // whenever there is a value to show: the config's for a header the daemon
+  // has (that is what the daemon pushes to the receiver), else the
+  // receiver's own stored one. setFallback routes the write the same way.
+  const fbEl = el.querySelector('.fb');
+  const route = fallbackRoute(slot);
+  const fbVal = c && c.fallback !== null ? c.fallback
+              : f && f.wired && f.fb !== null && f.fb !== NONE ? f.fb : null;
+  fbEl.hidden = fbVal === null;
+  if (fbVal !== null) {
+    const inp = fbEl.querySelector('.fbv');
+    const pend = pendFb.get(slot);
+    if (pend && (pend.v === fbVal || Date.now() - pend.t > PEND_FB_MS)) pendFb.delete(slot);
+    if (!sliding.has(inp)) inp.value = pendFb.has(slot) ? pendFb.get(slot).v : fbVal;
+    inp.disabled = !route || saving !== null;
+    fbEl.querySelector('.val').textContent = `${inp.value} %`;
+    fbEl.querySelector('.unit').textContent = route === 'daemon' ? 'fallback · into the config' : 'fallback · stored on the receiver';
+  }
+
   const svg = el.querySelector('.curve');
-  // SVG elements have no .hidden property; a switched-off header shows no
-  // curve until it is being edited
-  svg.toggleAttribute('hidden', !work || !work.pts.length || (off && !editing));
+  // SVG elements have no .hidden property
+  svg.toggleAttribute('hidden', !work || !work.pts.length);
   if (work && work.pts.length) drawCurve(svg, work, tm && tm.in !== undefined ? tm.in : null, editing);
   svg.classList.toggle('editing', editing);
 
   const ed = el.querySelector('.editor');
   ed.hidden = !editing;
   if (editing) renderEditor(ed, slot);
-  el.querySelector('.edit').textContent = off ? 'Edit' : 'Edit curve';
   el.querySelector('.edit').hidden = editing || !editable;
   el.querySelector('.save').hidden = !editing;
   el.querySelector('.cancel').hidden = !editing;
@@ -1218,25 +1319,21 @@ function bindCurveDrag(svg, slot) {
 function beginEdit(slot) {
   if (!cfg || !cfg.h[slot]) return;
   const h = cfg.h[slot];
-  edits[slot] = { ...h, pts: h.pts.map(p => ({ ...p })), bare: !h.pts.length };
+  edits[slot] = { ...h, pts: h.pts.map(p => ({ ...p })) };
   renderDash();
 }
 
 // the numeric side of the editor: one row per point, add/remove, then boost
-// and fallback. Rebuilt only when the point count changes, otherwise the
+// (the fallback is the card's slider). Rebuilt only when the point count changes, otherwise the
 // inputs' values are refreshed in place (typing must not lose focus).
 function renderEditor(ed, slot) {
   const h = edits[slot];
   const unit = h.kind === KIND_TEMP ? '°C' : '%';
-  // a switched-off header arrives without its curve: name and enabled only,
-  // the curve editor appears once it is on and the daemon has sent it
-  const bare = !h.pts.length;
-  const rows = bare ? 0 : h.kind === KIND_CONST ? 1 : h.pts.length;
+  const rows = h.kind === KIND_CONST ? 1 : h.pts.length;
   if (+ed.dataset.rows !== rows || ed.dataset.kind !== String(h.kind)) {
     ed.dataset.rows = rows; ed.dataset.kind = h.kind;
     const parts = [];
     parts.push(`<div class="row"><label>name</label><input type="text" class="nm" maxlength="16" autocomplete="off"></div>`);
-    parts.push(`<div class="row"><label>enabled</label><label class="sw"><input type="checkbox" class="en"><i></i></label><span class="unit">${bare ? 'switch on to load and edit its curve' : "off = the daemon leaves this header to the receiver's fallback"}</span></div>`);
     for (let i = 0; i < rows; i++) {
       parts.push(`<div class="prow${h.kind === KIND_CONST ? ' const' : ''}">
         ${h.kind === KIND_CONST ? '<label>duty</label>' :
@@ -1245,12 +1342,9 @@ function renderEditor(ed, slot) {
         ${h.kind !== KIND_CONST ? (rows > 1 ? `<button class="minor x" data-i="${i}" title="remove point">×</button>` : '<span></span>') : ''}
       </div>`);
     }
-    if (!bare && h.kind !== KIND_CONST && rows < MAX_POINTS)
+    if (h.kind !== KIND_CONST && rows < MAX_POINTS)
       parts.push('<div class="row"><label></label><button class="minor add">+ point</button></div>');
-    if (!bare) {
-      parts.push(`<div class="row"><label>boost</label><input type="number" class="boost" min="0" max="100" step="1" placeholder="none"><span class="unit">% at power-on</span></div>`);
-      parts.push(`<div class="row"><label>fallback</label><input type="number" class="fb" min="0" max="100" step="1"><span class="unit">% without the daemon</span></div>`);
-    }
+    parts.push(`<div class="row"><label>boost</label><input type="number" class="boost" min="0" max="100" step="1" placeholder="none"><span class="unit">% at power-on</span></div>`);
     ed.innerHTML = parts.join('');
     ed.querySelectorAll('.px').forEach(inp => inp.addEventListener('input', () => {
       const v = parseFloat(inp.value); if (!isNaN(v)) h.pts[+inp.dataset.i].x = v; renderDash(); }));
@@ -1272,28 +1366,21 @@ function renderEditor(ed, slot) {
       renderDash();
     });
     ed.querySelector('.nm').addEventListener('input', e => { h.name = e.target.value; });
-    ed.querySelector('.en').addEventListener('change', e => { h.enabled = e.target.checked; });
-    ed.querySelector('.boost')?.addEventListener('input', e => {
+    ed.querySelector('.boost').addEventListener('input', e => {
       h.boost = e.target.value === '' ? NONE : Math.max(0, Math.min(100, Math.round(+e.target.value))); });
-    ed.querySelector('.fb')?.addEventListener('input', e => {
-      if (e.target.value !== '') h.fallback = Math.max(0, Math.min(100, Math.round(+e.target.value))); });
   }
   // refresh values without clobbering the field being typed in
   const set = (inp, v) => { if (inp && document.activeElement !== inp && inp.value !== String(v)) inp.value = v; };
   ed.querySelectorAll('.px').forEach(inp => set(inp, h.pts[+inp.dataset.i].x));
   ed.querySelectorAll('.py').forEach(inp => set(inp, h.pts[+inp.dataset.i].y));
   set(ed.querySelector('.boost'), h.boost === NONE ? '' : h.boost);
-  set(ed.querySelector('.fb'), h.fallback);
   set(ed.querySelector('.nm'), h.name);
-  const en = ed.querySelector('.en');
-  if (en.checked !== !!h.enabled) en.checked = !!h.enabled;
 }
 
 // what the daemon will refuse, said here first (it also validates)
 function checkEdit(h) {
   const nm = (h.name || '').trim();
   if (!nm || [...nm].length > 16) return 'a name is 1–16 characters'; // characters, as the daemon counts
-  if (h.bare) return ''; // name and enabled only — the curve isn't here to check
   if (!h.pts.length) return 'a curve needs at least one point';
   const xs = new Set();
   for (const p of h.pts) {
@@ -1302,15 +1389,15 @@ function checkEdit(h) {
     xs.add(p.x);
   }
   if (h.boost !== NONE && !(h.boost >= 0 && h.boost <= 100)) return 'boost must be 0–100 % or blank';
-  if (!(h.fallback >= 0 && h.fallback <= 100)) return 'fallback must be 0–100 %';
   return '';
 }
 
 // write a partial edit (one header, or the globals — the daemon's JSON
 // shape), then wait for the daemon's config to come back (onCfg) — that is
-// what "saved" means here
+// what "saved" means here. True once the write itself went through (the
+// answer is still to come); false when it couldn't be sent, or failed.
 async function writeCfg(key, edit) {
-  if (!cfgChr || saving !== null) return;
+  if (!cfgChr || saving !== null) return false;
   const text = new TextEncoder().encode(JSON.stringify(edit));
   const buf = new Uint8Array(TOKEN_LEN + text.length);
   buf.set(tokenBytes()); buf.set(text, TOKEN_LEN);
@@ -1326,6 +1413,7 @@ async function writeCfg(key, edit) {
       flash(key, 'no answer from the daemon — is it running, and can it write its config?', 'err');
       renderDash();
     }, SAVE_TIMEOUT_MS);
+    return true;
   } catch (e) {
     saving = null;
     if (tokenRejected(e)) {
@@ -1333,19 +1421,18 @@ async function writeCfg(key, edit) {
       editToken = true;
     } else flash(key, `write failed: ${e.message}${writeHint(e)}`, 'err');
     renderDash();
+    return false;
   }
 }
 
 function saveEdit(slot) {
   const h = edits[slot];
   if (!h || !cfg) return;
-  if (!h.bare) h.pts.sort((a, b) => a.x - b.x);
+  h.pts.sort((a, b) => a.x - b.x);
   const bad = checkEdit(h);
   if (bad) { flash(slot, bad, 'err'); return; }
-  writeCfg(slot, { ['header' + (slot + 1)]: h.bare
-    ? { n: h.name.trim(), en: !!h.enabled }
-    : { c: curveText(h.pts, h.kind === KIND_CONST), b: h.boost === NONE ? null : h.boost, f: h.fallback,
-        n: h.name.trim(), en: !!h.enabled } });
+  writeCfg(slot, { ['header' + (slot + 1)]: { c: curveText(h.pts, h.kind === KIND_CONST),
+    b: h.boost === NONE ? null : h.boost, n: h.name.trim() } });
 }
 
 // ---- the global card: hysteresis, ramp, boost seconds ----
@@ -1704,38 +1791,54 @@ function demo() {
     header1: { n: 'pump', s: 'constant', c: '65', b: 100, f: 100 },
     header2: { n: 'radiator', s: 'temp', c: '45:35 60:55 75:100', b: null, f: 100 },
     header3: { n: 'exhaust', s: 'pwm', c: '0:25 100:80', b: null, f: 100 },
-    header4: { n: 'intake', s: 'gpu_load', c: '0:20 40:20 100:60', b: null, f: 60 },
-    header5: { n: 'spare', s: 'temp', en: false } }));
+    header4: { n: 'intake', s: 'gpu_load', c: '0:20 40:20 100:60', b: null, f: 60 } }));
   scfg = parseStripCfg(JSON.stringify({ editable: true, leds: 33, pin: 4, reverse: false, brightness: 1,
     gamma: '2.2', white_balance: 'ffb0f0', scenes: [
       { p: '/tmp/led-static-color', e: 'solid', on: false, color: 'ffffff', l: 1 },
       { p: '/tmp/led-night', e: 'drift', on: false } ] }));
   telem = parseTelem(JSON.stringify({ temp: 58.3, cpu: 37, gpu: 62,
     header1: { duty: 65 }, header2: { in: 58.3, duty: 52 }, header3: { in: 65.4, duty: 61 }, header4: { in: 62, duty: 45 } }));
-  const f = new Uint8Array(FANS_LEN), dv = new DataView(f.buffer);
-  f[0] = 1; f[1] = 0x01 | 0x08 | 0x10 | 0x20; f[2] = 2; f[3] = 1;
-  // state: wired | src<<1 (1 = fallback, 2 = live)
-  [[0x05, 65], [0x05, 52], [0x05, 61], [0x05, 45], [0x03, 50], [0, NONE]].forEach(([st, d], k) => { f[4 + k * 2] = st; f[5 + k * 2] = d; });
-  dv.setUint32(4 + CHANNELS * 2, 5 * 3600 + 17 * 60, true);
+  const f = new Uint8Array(FANS_LEN(2)), dv = new DataView(f.buffer);
+  f[0] = 2; f[1] = 0x01 | 0x08 | 0x10 | 0x20; f[2] = 2; f[3] = 1;
+  // state: wired | src<<1 (1 = fallback, 2 = live); duty; the stored fallback.
+  // header6 is wired but not in the daemon's config (dropped from the file
+  // after flashing): its slider writes to the receiver
+  [[0x05, 65, 100], [0x05, 52, 100], [0x05, 61, 100], [0x05, 45, 60], [0, NONE, NONE], [0x03, 40, 40]]
+    .forEach(([st, d, fb], k) => { f[4 + k * 3] = st; f[5 + k * 3] = d; f[6 + k * 3] = fb; });
+  dv.setUint32(4 + CHANNELS * 3, 5 * 3600 + 17 * 60, true);
   fans = parseFans(dv);
+  // ?demo&nodaemon: the same board with the machine off — no daemon config or
+  // readings, every header on its fallback, a slider on each card
+  if (location.search.includes('nodaemon')) {
+    cfg = telem = null;
+    fans.live = fans.telem = fans.host = false; fans.age = 255; fans.psu = 0;
+    fans.h.forEach(h => { if (h.wired) { h.src = 1; h.duty = h.fb; } });
+  }
   info = { version: 'v1.20.0-demo', heap: 143 * 1024, minHeap: 121 * 1024 };
   psu = 2;
   // stand-ins for the GATT objects so the page believes it is connected
   device = { id: 'demo', gatt: { connected: true } };
   receivers.demo = { name: 'BC250 (demo)', token: 'demo-token' };
   fansChr = telemChr = {};
+  ctrl = { writeValueWithResponse: async buf => {
+    // the fan fallback op, applied the way the receiver would; the fans view
+    // echoing it stands in for the next notification
+    if (buf[TOKEN_LEN] !== OP_FAN_FALLBACK) return;
+    const h = fans.h[buf[TOKEN_LEN + 1]];
+    h.fb = buf[TOKEN_LEN + 2];
+    if (h.src === 1) h.duty = h.fb;
+    setTimeout(renderDash, 400); } };
   cfgChr = { writeValueWithResponse: async buf => {
     // merge the partial edit the way the daemon would
     const edit = JSON.parse(utf8.decode(buf.subarray(TOKEN_LEN)));
     const cur = cfg, out = { editable: true, hysteresis: edit.hysteresis ?? cur.hyst, ramp: edit.ramp ?? cur.ramp,
                              boost_seconds: edit.boost_seconds ?? cur.boostSecs };
     cur.h.forEach((h, i) => { if (!h) return; const k = 'header' + (i + 1), e = edit[k] || {};
-      const en = e.en ?? h.enabled;
-      // a disabled header travels bare; one just enabled gets a demo curve
-      if (!en) { out[k] = { n: e.n ?? h.name, s: Object.keys(KIND)[h.kind], en: false }; return; }
-      out[k] = { n: e.n ?? h.name, s: Object.keys(KIND)[h.kind],
-                 c: e.c ?? (h.pts.length ? curveText(h.pts, h.kind === KIND_CONST) : '40:30 70:100'),
-                 b: 'b' in e ? e.b : (h.boost === NONE ? null : h.boost), f: e.f ?? h.fallback ?? 100 }; });
+      out[k] = { n: e.n ?? h.name, s: Object.keys(KIND)[h.kind], c: e.c ?? curveText(h.pts, h.kind === KIND_CONST),
+                 b: 'b' in e ? e.b : (h.boost === NONE ? null : h.boost), f: e.f ?? h.fallback }; });
+    // ...and push the standalone values to the receiver, as the daemon does
+    cur.h.forEach((h, i) => { const e = edit['header' + (i + 1)]; const f = fans.h[i];
+      if (e && 'f' in e && f.wired) { f.fb = e.f; if (f.src === 1) f.duty = e.f; } });
     setTimeout(() => onCfg(new DataView(new TextEncoder().encode(JSON.stringify(out)).buffer)), 600); } };
   stripChr = { writeValueWithResponse: async buf => {
     // apply the partial edit the way the daemon would, scenes by path
@@ -1761,7 +1864,11 @@ function demo() {
 if (location.search.includes('demo'))
   demo();
 else if (!('bluetooth' in navigator))
-  say('No Web Bluetooth here — use Chrome or Edge (not on iOS).');
+  say(IOS
+    ? 'Safari has no Web Bluetooth. Open this page in ' +
+      `<a href="${bluefyLink()}">Bluefy</a>, a free browser that has it ` +
+      `(<a href="${BLUEFY_STORE}">App Store</a>), and bookmark it there.`
+    : 'No Web Bluetooth here — use Chrome or Edge.');
 else
   resume();
 

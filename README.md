@@ -234,7 +234,7 @@ running — the second half the host's rendering:
         "hysteresis": 3,        // header, all with the same keys
         "ramp": 5,
         "boost_seconds": 5,
-        "header1": { "enabled": false, "name": "pump", "source": "constant",
+        "header1": { "name": "pump", "source": "constant",
                      "curve": "65", "boost": 100, "fallback": 100 },
         "header2": { ... }
     },
@@ -740,7 +740,9 @@ tach (sense) wires stay unconnected. On the carrier board the four headers are
 labelled FAN1–FAN4; elsewhere, see the wiring table below.
 
 Everything about the fans is the config's `fans` block. Each header gets one
-entry, and every entry has the same six keys:
+entry, every entry has the same five keys, and a header listed here is
+driven — its curve runs, its output is wired at flash time. Delete a header's
+block to take it out of service (and reflash fancfg, since that is wiring).
 
 ```jsonc
 "fans": {
@@ -749,7 +751,6 @@ entry, and every entry has the same six keys:
     "boost_seconds": 5,    // how long a header with a `boost` runs it after the host powers on
 
     "header1": {
-        "enabled": false,
         "name": "pump",             // log lines only
         "source": "constant",       // fixed speed: curve is one value. AIO pumps want a steady 100 (70-80 for quiet)
         "curve": "65",
@@ -757,7 +758,6 @@ entry, and every entry has the same six keys:
         "fallback": 100             // what the receiver runs at boot and whenever the daemon isn't driving it
     },
     "header2": {
-        "enabled": false,
         "name": "radiator",
         "source": "temp",           // the top-level `sensors` pick, in °C
         "curve": "45:35 60:55 75:100",   // source:percent points, linear between, flat beyond the ends
@@ -765,7 +765,6 @@ entry, and every entry has the same six keys:
         "fallback": 100
     },
     "header3": {
-        "enabled": false,
         "name": "exhaust",
         "source": "nct6686:pwm1",   // mirror the BC-250's own fan header; pwm outputs read 0..100 %
         "curve": "0:25 100:80",     // floor of 25, scaled to 80 % of what the board asks for
@@ -773,7 +772,6 @@ entry, and every entry has the same six keys:
         "fallback": 100
     },
     "header4": {
-        "enabled": false,
         "name": "intake",
         "source": "gpu_load",       // amdgpu busy, 0..100 %
         "curve": "0:20 40:20 100:60",   // silent until the GPU actually works
@@ -829,22 +827,43 @@ Without the power switch, USB host presence stands in (debounced 3 s so a bus
 reset doesn't re-fire it), else the boost fires once at receiver boot.
 `boost_seconds: 0` disables boosting altogether.
 
+**The fallback is a slider on the phone**, on every header's card, and it
+writes to wherever the value lives. While a daemon is connected, to the
+daemon: into the config file like every other edit, and the daemon pushes
+the standalone values to the receiver. **With no daemon at all**,
+straight to the receiver (a control op over BLE, nothing relayed to a host),
+stored in its flash so it survives power cycles. So the receiver is a fan
+controller on its own — a manual one: every wired header runs its fallback,
+the boost still primes a pump at power-on, and the phone dials each header.
+That is the bench case (a carrier board, a PSU and fans, no BC-250 booting)
+and the machine-off case too — dial the fans down at night without waking
+anything. What the receiver can't do alone is a curve: it has no temperature
+to read and no tach to hear, so the slider is a fixed duty. There is one
+source of truth, and it is the config: a daemon connecting pushes the file's
+`fallback` and `boost` for every header in its block over
+whatever the receiver held — so a value dialled standalone lasts exactly
+until then, and the slider writes into the file whenever a daemon is there.
+
 **`hysteresis`** and **`ramp`** are global, because they exist to stop hunting
 and apply the same way to every fan. Hysteresis applies to temperature sources
 only; a constant ignores both.
 
-**`enabled: false`** means the header is simply not the daemon's: nothing is
-sent for it, and at flash time it gets no pin, so the receiver never drives
-its output. Note that is not "off" — a 4-pin fan with a floating PWM input
-runs at full speed, per the fan spec. A fan you want *stopped* is an enabled
-header with `"source": "constant", "curve": "0"`.
+**There is no enable switch.** A header in the block is driven; one that
+isn't gets no pin at flash time, so the receiver never touches that output.
+Note that is not "off" — a 4-pin fan with a floating PWM input runs at full
+speed, per the fan spec. A fan you want *stopped* is a header with
+`"source": "constant", "curve": "0"` (most fans stop at 0 % duty; the spec
+allows a fan to keep a minimum speed instead, so check yours). The old
+`enabled` key is refused at startup with a line saying so: it meant two things
+at once — wiring at flash time and "run the curve" at runtime — which let the
+phone switch on a header the receiver had no pin for.
 
 ### Getting the block onto the receiver
 
 Two consumers read the same block:
 
 - **`make flash` / `make flash-source`** bake the standalone part — which
-  headers are enabled, their pins, `fallback`, `boost`, `boost_seconds` —
+  headers there are, their pins, `fallback`, `boost`, `boost_seconds` —
   into the receiver's `fancfg` flash partition, exactly as `strip.pin` is
   baked. So a box that never runs the daemon is configured by editing the
   block and running `sudo make flash-fan` (the fancfg partition alone, a couple
@@ -875,6 +894,7 @@ written back to the config.
 With the BLE remote on, the web page shows every header live and lets you
 redraw its curve, set boost and fallback, and change hysteresis, ramp and
 boost length — see the dashboard under [BLE remote](#ble-remote). An edit
+(the fallback slider's included)
 travels phone → receiver → daemon, which validates it exactly as it validates
 the config, applies it on its next tick, and **writes it into the config
 file** — `/etc/led-controller/config.json` on a deployed box. Only the bytes
@@ -887,11 +907,9 @@ install, diff it, and the phone's edits come along. The same file watch that rel
 ([Live reload](#live-reload)) works the other way too: edit a curve in the
 file, and the phone's dashboard shows the new curve a moment later.
 
-Names (up to 16 characters) and `enabled` are editable from the phone too
-(the editor opens both; a switched-off header shows as `off` and runs the
-receiver's fallback), and a disabled header is listed by name so it can be
-switched on — its curve follows once it is. Sources are yours alone —
-the phone can't add a header or point one at a different sensor. The dashboard is read-only when the daemon
+Names (up to 16 characters) are editable from the phone too. Sources and
+the set of headers are yours alone — the phone can't add or remove a header,
+or point one at a different sensor. The dashboard is read-only when the daemon
 can't write its config (the page hides the edit buttons); a write that fails
 mid-way is reported in the journal and the edit runs until the next restart.
 The daemon takes edits only from the receiver's link, which only the
@@ -938,8 +956,13 @@ power button: it advertises a small Bluetooth LE service (idling on 5VSB even
 while the machine is off), and a phone within radio range can press the
 button — no WiFi, no app store, works wherever the machine is carried. The client is the Web Bluetooth page in `docs/` (host it on GitHub
 Pages and "install" it from Chrome once; it works offline afterwards) — or
-any BLE tool that can write a GATT characteristic. Note Web Bluetooth is a
-Chrome/Edge-on-Android (and desktop) feature; iOS browsers don't have it.
+any BLE tool that can write a GATT characteristic. Web Bluetooth is a
+Chrome/Edge-on-Android (and desktop) feature; Safari has none and WebKit has
+said it won't add it. On an iPhone open the page in
+[Bluefy](https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055) (free;
+WebBLE, paid, also works) — a browser app that ships its own Web Bluetooth
+polyfill on top of CoreBluetooth. The page needs nothing beyond the standard
+API, so it runs there unchanged; opened in Safari it offers the Bluefy link.
 
 Like the other receiver features it is **standalone** (no daemon involved)
 and configured in the config's `ble_remote` block, which `make flash` bakes
@@ -1000,13 +1023,16 @@ Under the power ring, once connected, the page shows what the box is doing:
   machine powers down), the curve's own input (`58.3 °C`, `GPU 62 %`, …), and
   the curve itself with the current operating point marked on it. "Edit
   curve" makes the points draggable (or type them; add and remove up to six)
-  and opens boost and fallback; **Save** sends just that header's change and
+  and opens boost; **Save** sends just that header's change and
   the card says `saved` only when the daemon has applied it, written it into
   the config and pushed the config back — see
   [Editing curves from the phone](#editing-curves-from-the-phone). The
-  editor also renames the header and switches it on or off; a header
-  enabled in the config but not flashed onto the receiver is called out on
-  its card.
+  editor also renames the header; a header in the config but not flashed
+  onto the receiver is called out on its card. Every card has the
+  **fallback slider** — what the header runs when nothing drives it —
+  applying on release like the strip's: into the config while a daemon is
+  connected, straight
+  onto the receiver when there is none (see [Fans](#fans)).
 - **Fan behaviour** — hysteresis, ramp-down rate and boost length, editable
   the same way.
 - **Strip** — the config's `strip` block: brightness, white balance (one

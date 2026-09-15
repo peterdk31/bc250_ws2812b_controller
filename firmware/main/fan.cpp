@@ -109,7 +109,7 @@ struct Standalone
 //     enabled(1) pin[6] duty[6] boost_duty(1) boost_secs(1)
 //
 // Slot i is header i+1. Pins are GPIO numbers, 0xFF = header not wired (a
-// disabled header). Duties are percent, >100 clamps to 100 — so erased flash
+// header the config doesn't list). Duties are percent, >100 clamps to 100 — so erased flash
 // in an appended field's place reads as a sane full-speed value. boost 0xFF =
 // that header sits the boost out; FAN1's single boost_duty applied to every
 // header. An erased partition (no magic) leaves the feature off.
@@ -202,6 +202,8 @@ static bool g_pendSaSet = false;
 static uint8_t g_pendLive[MAX_FANS];
 static bool g_pendLiveSet = false;
 static bool g_pendShutdown = false;
+static uint8_t g_pendFb[MAX_FANS]; // the phone's per-header fallback edits,
+                                   // NONE = none pending for that header
 
 // boost state (see boostCheck): with the power switch present, an armed
 // one-shot keyed to its power-on events; without it, an edge detector on USB
@@ -303,8 +305,8 @@ static void persist()
 // costs no flash wear); live duties never do
 static void drainPending(uint32_t now)
 {
-    uint8_t sa[Standalone::WIRE_LEN], live[MAX_FANS];
-    bool saSet, liveSet, shutdown;
+    uint8_t sa[Standalone::WIRE_LEN], live[MAX_FANS], fb[MAX_FANS];
+    bool saSet, liveSet, shutdown, fbSet = false;
 
     taskENTER_CRITICAL(&g_mux);
     saSet = g_pendSaSet;
@@ -314,6 +316,8 @@ static void drainPending(uint32_t now)
         memcpy(sa, g_pendSa, sizeof sa);
     if (liveSet)
         memcpy(live, g_pendLive, sizeof live);
+    memcpy(fb, g_pendFb, sizeof fb);
+    memset(g_pendFb, NONE, sizeof g_pendFb);
     g_pendSaSet = g_pendLiveSet = g_pendShutdown = false;
     taskEXIT_CRITICAL(&g_mux);
 
@@ -331,6 +335,25 @@ static void drainPending(uint32_t now)
             FLOG("host set fallback %s, boost %s for %us",
                  fmtDuties(g_sa.duty, b1, sizeof b1),
                  fmtDuties(g_sa.boost, b2, sizeof b2), g_sa.boostSecs);
+            changed = true;
+        }
+    }
+
+    // the phone's fallback edits land after the host's blob so that, in the
+    // one tick both could arrive, the hand on the dial wins
+    for (int i = 0; i < MAX_FANS; i++)
+        fbSet |= fb[i] != NONE;
+    if (fbSet)
+    {
+        Standalone s = g_sa;
+        for (int i = 0; i < MAX_FANS; i++)
+            if (fb[i] != NONE)
+                s.duty[i] = fb[i];
+        if (!(s == g_sa))
+        {
+            g_sa = s;
+            persist();
+            FLOG("phone set fallback %s", fmtDuties(g_sa.duty, b1, sizeof b1));
             changed = true;
         }
     }
@@ -517,6 +540,17 @@ void setLive(const uint8_t* payload, uint16_t len)
     taskEXIT_CRITICAL(&g_mux);
 }
 
+bool setFallback(uint8_t slot, uint8_t pct)
+{
+    if (!g_started || slot >= MAX_FANS || !g_wired[slot] || pct > 100)
+        return false;
+
+    taskENTER_CRITICAL(&g_mux);
+    g_pendFb[slot] = pct;
+    taskEXIT_CRITICAL(&g_mux);
+    return true;
+}
+
 void hostShutdown()
 {
     if (!g_started)
@@ -545,10 +579,12 @@ void snapshot(Snapshot& s)
         if (!s.wired[i])
         {
             s.duty[i] = NONE;
+            s.fallback[i] = NONE;
             s.source[i] = SRC_NONE;
             continue;
         }
         s.duty[i] = effective(i);
+        s.fallback[i] = g_sa.duty[i];
         if (g_boosting && g_sa.boost[i] != NONE)
             s.source[i] = SRC_BOOST;
         else if (g_live[i] != NONE)
@@ -593,6 +629,7 @@ void start()
     }
 
     memset(g_live, NONE, sizeof g_live);
+    memset(g_pendFb, NONE, sizeof g_pendFb);
     g_sa = g_cfg.sa;
 
     nvs_open("fan", NVS_READWRITE, &g_nvs);
