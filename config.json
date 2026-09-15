@@ -50,7 +50,8 @@
             "button": 1,
             "button_gnd": null,
             "sense": 2,
-            "led": 8
+            "led": 8,
+            "wake": null
         },
         "short_press": null
     },

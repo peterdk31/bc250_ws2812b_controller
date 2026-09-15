@@ -221,7 +221,8 @@ running — the second half the host's rendering:
         "boot_timeout_seconds": 10, // rail not up by then = release PS_ON#
         "sense_low_mv": 800,
         "sense_high_mv": 2000,
-        "pins": { "ps_on": 3, "button": 1, "button_gnd": null, "sense": 2, "led": 8 },
+        "pins": { "ps_on": 3, "button": 1, "button_gnd": null, "sense": 2, "led": 8,
+                  "wake": null },   // wake: an OpenPuck's power-on pulse, see Power switch
         "short_press": null         // what the daemon runs on a short press,
                                     // e.g. "systemctl poweroff"; null = ignore it
     },
@@ -567,7 +568,8 @@ Wiring (the shipped `power_switch.pins`, for the ESP32-C3; `null` = not wired):
 | GPIO1 (`button`) | momentary switch terminal A (internal pull-up, pressed = low) |
 | `button_gnd`: `null` when the switch is wired to a real GND (the carrier board), else e.g. GPIO21 | switch terminal B — driven low as a local ground, so the button needs no run to a real GND. (GPIO21 is U0TXD: free while the host link is USB) |
 | GPIO2 (`sense`, `null` = not wired) | optional board-power sense, e.g. BC-250 TPMS1 pin 9, which is the board's main **3.3 V rail**. Emphatically *not* pin 15 (`3VSB`): that stays up whenever PS_ON# is held, so it reads like a working sense wire and then never fires follow-down or the boot timeout. Read as an averaged ADC voltage with hysteresis (`sense_low_mv` / `sense_high_mv`); the ADC saturates near 3.1 V, so a healthy rail logs ~2.9–3.1 V |
-| GPIO8 (`led`, `null` = none) | optional feedback: the board's own little LED *blinks* while the button reads pressed, so button wiring can be eyeballed without a PSU. GPIO8 is the plain onboard LED on common C3 dev boards; a blink shows regardless of the LED's polarity |
+| GPIO8 (`led`, `null` = none) | optional feedback: the board's own little LED *blinks* while the button reads pressed (and through a wake pulse), so the wiring can be eyeballed without a PSU. GPIO8 is the plain onboard LED on common C3 dev boards; a blink shows regardless of the LED's polarity |
+| `wake` (`null` = not wired; GPIO20 on the carrier's J11) | optional **wake input**: a 3.3 V active-high pulse from another device that wants the machine on — see *Waking from an OpenPuck* below. Internal pull-down; a rising edge while OFF powers on, and a pulse in any other state is dropped, so it can never shut anything down |
 | 5VSB + GND | PSU standby rail, so the receiver runs while the machine is off — **read the warning below before also plugging in USB** |
 
 > ⚠️ **Critical — 5VSB and USB at the same time.** In this role the receiver
@@ -611,6 +613,7 @@ ESP32-C3  (running on the PSU's 5VSB standby rail — see the USB warning above)
   GPIO21  ──  button  NO          (pins.button_gnd)  ── or a real GND, and null here
   GPIO2   ──  BC-250 TPMS1 pin 9  (pins.sense)       ── board sense (3.3 V rail)
   GPIO8   ──  onboard LED         (pins.led)         ── feedback, no wiring
+  GPIO20  ──  OpenPuck pin 017    (pins.wake)        ── optional wake pulse; null here
 
 
 PS_ON# drive — low-side N-channel MOSFET (2N7000)
@@ -670,6 +673,41 @@ seconds after every power-on. Third, the defaults are C3-specific: on a plain
 ESP32, GPIO1/3 are its UART0 console and 0/2 are strapping pins — pick
 different ones.
 
+**Waking from an OpenPuck.** An [OpenPuck](https://github.com/safijari/openpuck)
+(open firmware for a SuperMini nRF52840 that stands in for the Steam
+Controller 2's puck) has a *ColdBoot* feature: when the paired controller's
+Steam button is pressed while the host reads USB-unmounted, the puck drives a
+GPIO high for 300 ms — on a motherboard, through a transistor across the
+power-switch header. Here the receiver is the motherboard, so the transistor
+goes: the puck's ColdBoot pin (silkscreen `017`, its default) straight to
+the `wake` pin, puck GND to the GND beside it — both are 3.3 V logic. It
+is a plain active-high edge, debounced like the button and read with the
+internal pull-down, so an unplugged or unpowered puck reads idle. Two rules
+make it safe to hang a stranger's output on the machine's power: it is
+edge-triggered and **armed only after reading idle for 1 s** (both boards come
+up together on 5VSB and the puck's pin floats until its firmware runs; a level
+held high across a receiver reset is not a press), and a pulse in BOOTING or
+ON is **logged and dropped** — on a PC that same pulse would mean "shut down",
+here it can only ever mean "on", whatever the puck's own gating decides.
+Build the puck with `EXTRA_FLAGS="-DOPK_PWR_SWITCH=1"`; its pulse polarity is
+a build flag too (`PWR_SWITCH_ACTIVE`), and the receiver expects the default,
+active-high.
+
+Power the puck from 5VSB so it keeps listening while the machine is off: on
+the SuperMini that is its **BAT** pin (the board has no pin on the USB side —
+the Pro Micro "RAW" position is unconnected). BAT reaches the board's supply
+node through a P-MOSFET that the host's USB VBUS switches off, and is isolated
+from the USB connector by the charger and a Schottky (BAT60B), so 5VSB cannot
+back-feed the host's port and the puck's USB cable stays **intact** — it must:
+the nRF's VBUS pin sits on the connector side, and the host's VBUS dropping
+when the machine dies is what clears OpenPuck's "USB mounted" gate. (This is
+the one place the 5VSB-and-USB warning above does *not* apply; the receiver's
+own dev board has no such diode.) 5 V on a charger's battery pin is off-label
+but harmless — the charger sees a full cell and idles, the LDO takes up to
+6 V; a 1N5817 in series brings it nearer a battery's voltage if that bothers
+you. Once the machine's OS enumerates the puck it stops firing on its own; a
+second Steam press during BIOS lands in BOOTING and is dropped.
+
 The feature is **off until opted into**: its settings are the config's
 `power_switch` block, and they live on the receiver in a small dedicated flash
 partition (`pwrcfg`), not in the firmware image, so the prebuilt image works
@@ -689,7 +727,8 @@ firmware. Three guardrails to know about:
   firmware (or an older `FW_RELEASE` pinned) writes a sector that firmware
   never reads: a silent no-op. Update the firmware itself first. (Individual
   settings added later are simply ignored by firmware that predates them —
-  e.g. v1.6.0 exactly reads everything but the `led` pin.)
+  e.g. v1.6.0 exactly reads everything but the `led` pin, and the `wake` pin
+  needs the firmware from Sep 2026 on.)
 - The block is validated before anything is written: `tools/pwrcfg.py`
   rejects pins the firmware would silently drop (nonexistent on `target`,
   SPI-flash or host-link pads, a non-ADC sense pin, a collision with the

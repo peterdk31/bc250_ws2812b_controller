@@ -9,12 +9,14 @@ The settings come from the daemon config's "power_switch" block (--config):
         "enabled": true,
         "hold_seconds": 2, "boot_timeout_seconds": 10,
         "sense_low_mv": 800, "sense_high_mv": 2000,
-        "pins": { "ps_on": 3, "button": 1, "button_gnd": null, "sense": 2, "led": 8 },
+        "pins": { "ps_on": 3, "button": 1, "button_gnd": null, "sense": 2, "led": 8,
+                  "wake": null },
         "short_press": "systemctl poweroff"     // the daemon's; null = ignore
     }
 
 A pin of null is "not wired" (button_gnd: the button goes to a real GND;
-sense: no sense wire; led: no feedback LED). With NO block at all this exits
+sense: no sense wire; led: no feedback LED; wake: no wake input — the
+active-high power-on pulse from e.g. an OpenPuck). With NO block at all this exits
 3 and writes nothing — the Makefile then leaves whatever is on the chip
 alone. That is deliberately not the fans' rule (no block = written off):
 writing the power switch off releases PS_ON# once the receiver reboots, i.e.
@@ -25,7 +27,7 @@ The layout must match Config::decode in firmware/main/power_switch.cpp:
     "PWR1" magic, then
     enabled(1) button_pin(1) ps_on_pin(1) button_gnd_pin(1) sense_pin(1)
     hold_ms(2) boot_timeout_ms(2) sense_low_mv(2) sense_high_mv(2)
-    led_pin(1)
+    led_pin(1) wake_pin(1)
 
 u16s little-endian; pins are GPIO numbers, 0xFF = not wired. Fields are only
 ever APPENDED (firmware older than a field reads a shorter blob and ignores
@@ -52,7 +54,7 @@ from pincheck import CHIPS, MAX_PIN, parse_avoid, pin_byte as pin
 
 KEYS = ('enabled', 'hold_seconds', 'boot_timeout_seconds', 'sense_low_mv',
         'sense_high_mv', 'pins', 'short_press')
-PIN_KEYS = ('ps_on', 'button', 'button_gnd', 'sense', 'led')
+PIN_KEYS = ('ps_on', 'button', 'button_gnd', 'sense', 'led', 'wake')
 NO_BLOCK = 3  # exit code: no power_switch block, leave the chip alone
 
 p = argparse.ArgumentParser(description=__doc__,
@@ -158,7 +160,7 @@ pins = {k: -1 for k in PIN_KEYS}
 pb = block['pins']
 if not isinstance(pb, dict):
     err('power_switch.pins', 'expected { "ps_on": 3, "button": 1, "button_gnd": null, '
-                             '"sense": 2, "led": 8 }')
+                             '"sense": 2, "led": 8, "wake": null }')
 else:
     for k in pb:
         if k not in PIN_KEYS:
@@ -232,7 +234,8 @@ if enabled and not errors:
             err(where(k), f'GPIO{v} is {chip["reserved"][v]} on {a.target}')
         elif v in chip['input_only'] and k != 'sense':
             err(where(k), f'GPIO{v} is input-only on {a.target} (and has no '
-                          'internal pull-up, so not even the button works there)')
+                          'internal pull-up or pull-down, so neither the button '
+                          'nor the wake input works there)')
         if k == 'sense' and v not in chip['adc']:
             err(where(k), f'GPIO{v} is not ADC-capable on {a.target} — the '
                           'firmware would silently run without sense (no '
@@ -244,6 +247,13 @@ if enabled and not errors:
                 'off (on the BC-250 it is a dead 3.3 V rail) — so a reset while '
                 'the machine is down can drop the chip into the wrong boot '
                 'mode. Prefer an ADC pin that is not a boot-mode strap')
+        if k == 'wake' and v in chip['strap']:
+            warnings.append(
+                f'{where(k)}: GPIO{v} selects the boot mode on {a.target} at '
+                'reset, and the wake input idles LOW (the puck\'s released '
+                'level; the pull-down when nothing is connected) — so a reset '
+                'can drop the chip into the wrong boot mode. Prefer a pin that '
+                'is not a boot-mode strap (on the C3: 20, 21 or 0)')
         if k == 'ps_on' and chip['hold'] is not None and v not in chip['hold']:
             warnings.append(
                 f'{where(k)}: gpio_hold cannot latch GPIO{v} through a reset on '
@@ -266,12 +276,12 @@ if not a.out:
     sys.exit(1)
 
 blob = b'PWR1' + struct.pack(
-    '<5B4HB',
+    '<5B4H2B',
     1 if enabled else 0,
     pin(pins['button']), pin(pins['ps_on']), pin(pins['button_gnd']), pin(pins['sense']),
     hold_ms, boot_timeout_ms,
     sense_low, sense_high,
-    pin(pins['led']))
+    pin(pins['led']), pin(pins['wake']))
 
 with open(a.out, 'wb') as f:
     f.write(blob)

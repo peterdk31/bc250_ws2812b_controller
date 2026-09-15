@@ -9,7 +9,9 @@
 // for HOLD_MS while the machine is up forces the PSU off; and a short press
 // while the machine is up asks the host, over the link, to shut its OS down
 // gracefully (hostreq.hpp — the receiver cannot do that itself, and does
-// nothing to the PSU either way). An
+// nothing to the PSU either way). An optional WAKE input — a 3.3 V
+// active-high pulse from e.g. an OpenPuck when its Steam Controller connects —
+// is a second way to power on and can never do anything else. An
 // optional analog sense wire (BC-250 TPMS1 pin 9, the board's main 3.3 V rail
 // — not pin 15, which is 3VSB) tells it when the board is
 // actually up, which adds: follow a graceful OS shutdown down (release PS_ON#
@@ -49,7 +51,7 @@ int senseState();
 uint32_t powerOnSeq();
 
 // does the power switch use this GPIO (button, PS_ON#, button ground, sense,
-// LED)? For sibling features choosing a pin at runtime — the fan controller
+// LED, wake)? For sibling features choosing a pin at runtime — the fan controller
 // refuses a PWM input on one of ours. False while the feature is off.
 bool usesPin(int gpio);
 

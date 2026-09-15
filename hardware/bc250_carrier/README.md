@@ -118,7 +118,7 @@ wire for 3 A); XHP-4 with SXH-001T-P0.6 for the button.
 | STRIP J3 | 1 `3.3V`, 2 `DIN`, 3 `GND` | the WS2812B strip. 3.3V is the PSU's 3.3 V rail straight through; DIN is GPIO4 |
 | BUTTON J9 | 1 `12V`, 2 `GND`, 3 `NO`, 4 `C` | the illuminated button: 1–2 feed its ring LED (a 12 V LED, i.e. one with its own resistor — the pins are the raw 12 V rail), 3–4 are the switch: `NO` → GPIO1, `C` is a **real ground**. Use the normally-open terminal: the firmware sees a press as the contact closing, and the NC terminal makes the PSU click on and off (Jul 2026) |
 | SENSE J10 | 1 `SNS` | BC-250 TPMS1 pin 9 (the main 3.3 V rail) → GPIO2; single wire, the ground is shared through the PSU |
-| J11 | rows top to bottom, outer pin (odd, nearest the board edge) / inner pin (even): 1+2 `3.3V`, 3+4 `5VSB`, 5+6 `12V`, 7 `GND` / 8 `GPIO8`, 9 `GND` / 10 `GPIO9`, 11 `GND` / 12 `GPIO20`, 13 `GND` / 14 `GPIO21`, 15 `GND` / 16 `GPIO0` | optional breakout: the three rails straight from the PSU header on two pins each (see the current budget below), then every GPIO the board leaves unused with a ground beside it. GPIO8 is also the module's blue LED. GPIO8 and GPIO9 are ESP32-C3 strapping pins: leave them high or floating at reset (GPIO9 low at reset enters download mode). GPIO0 is a plain GPIO on the C3. GPIO0, GPIO20 and GPIO21 are the pins a `gpio:N` fan source can read a PWM signal on (the BC-250's own fan header's PWM and GND, two wires, to the GPIO and the GND beside it — never the header's +12 V; see the main README's Fans); 20 and 21 are also the J5 UART candidates, so GPIO0 first |
+| J11 | rows top to bottom, outer pin (odd, nearest the board edge) / inner pin (even): 1+2 `3.3V`, 3+4 `5VSB`, 5+6 `12V`, 7 `GND` / 8 `GPIO8`, 9 `GND` / 10 `GPIO9`, 11 `GND` / 12 `GPIO20`, 13 `GND` / 14 `GPIO21`, 15 `GND` / 16 `GPIO0` | optional breakout: the three rails straight from the PSU header on two pins each (see the current budget below), then every GPIO the board leaves unused with a ground beside it. GPIO8 is also the module's blue LED. GPIO8 and GPIO9 are ESP32-C3 strapping pins: leave them high or floating at reset (GPIO9 low at reset enters download mode). GPIO0 is a plain GPIO on the C3. GPIO20 is the pin for an OpenPuck's wake pulse (`power_switch.pins.wake`, README "Power switch"): the puck's `017` straight to pin 12, puck GND to pin 11, and the puck's BAT to a 5VSB pin (3 or 4). GPIO0, GPIO20 and GPIO21 are the pins a `gpio:N` fan source can read a PWM signal on (the BC-250's own fan header's PWM and GND, two wires, to the GPIO and the GND beside it — never the header's +12 V; see the main README's Fans); 20 and 21 are also the J5 UART candidates, so GPIO0 first |
 | FAN1 J5 … FAN4 J8 | 1 `G`, 2 `12V`, 3 `T`, 4 `PWM` | standard 4-pin fan pinout, tach unconnected |
 
 The fan headers are mounted rotated, so on the board their pins read
@@ -210,7 +210,8 @@ Two things to check when the parts arrive, before soldering:
 
 Everything is the config's: the shipped `power_switch` block already has this
 board's pins (`ps_on` 3, `button` 1, `button_gnd` null — the button's second
-pin is a real GND, not GPIO21 — `sense` 2, `led` 8), and `header1..header4` in
+pin is a real GND, not GPIO21 — `sense` 2, `led` 8, `wake` null, or 20 with an
+OpenPuck on J11), and `header1..header4` in
 the `fans` block are FAN1..FAN4 (GPIO 5, 6, 7, 10). Set `enabled` on what you
 use, then:
 

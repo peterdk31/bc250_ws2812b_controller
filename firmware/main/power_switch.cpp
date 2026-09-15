@@ -43,6 +43,21 @@
 //     the press (as soon as the press debounces, not on release) so that
 //     keeping it held afterwards is free to mean something else — see the
 //     failsafe below.
+//   * The optional WAKE input is a second way to power on and nothing else:
+//     a 3.3 V active-HIGH pulse from another device that wants the machine up
+//     — an OpenPuck (github.com/safijari/openpuck), whose ColdBoot drives its
+//     GPIO high for 300 ms when the paired Steam Controller's Steam button is
+//     pressed while the host reads USB-unmounted. On a motherboard that pulse
+//     closes the power-switch header, which means "on" or "shut down"
+//     depending on state; here it only ever means "on" — a pulse in BOOTING or
+//     ON is logged and dropped, so nothing the puck does can shut the machine
+//     down, whatever its own gating decides. Read with the internal pull-down
+//     (an unpowered or unplugged puck reads idle), debounced like the button,
+//     edge-triggered, and ARMED only once it has read idle for WAKE_ARM_MS:
+//     both boards come up together on 5VSB and the puck's pin floats until its
+//     firmware sets it, and a level held high across one of our resets is not
+//     a fresh press either. The feedback LED blinks through the pulse, so the
+//     wiring can be eyeballed without a PSU, as with the button.
 //   * The sense wire (TPMS1 pin 9 on the BC-250) is the board's main 3.3 V
 //     rail — a stiff, well-decoupled node, NOT a soft signal line. It is the
 //     right thing to sense because the BC-250 runs on 12 V alone and derives
@@ -95,7 +110,10 @@ namespace pwr
 // ---- fixed tuning (values proven on the BC-250 by the reference project) ----
 
 static const uint32_t POLL_MS = 10;             // task cadence; all debounces count in these
-static const uint32_t DEBOUNCE_MS = 30;         // button, and sense going UP
+static const uint32_t DEBOUNCE_MS = 30;         // button, wake, and sense going UP
+static const uint32_t WAKE_ARM_MS = 1000;       // wake input must read idle this long before
+                                                // its first edge counts (floats during the
+                                                // puck's own boot)
 static const uint32_t LED_BLINK_MS = 100;       // feedback LED half-period while pressed
 static const uint32_t BOARD_OFF_DEBOUNCE_MS = 1500; // sense must stay down this long
                                                     // (filters dips during boot/reset)
@@ -117,7 +135,7 @@ static const int SENSE_OVERSAMPLE = 16; // ADC reads averaged per sample: TPMS1 
 //     "PWR1" magic, then
 //     enabled(1) button_pin(1) ps_on_pin(1) button_gnd_pin(1) sense_pin(1)
 //     hold_ms(2) boot_timeout_ms(2) sense_low_mv(2) sense_high_mv(2)
-//     led_pin(1)
+//     led_pin(1) wake_pin(1)
 //
 // u16s little-endian; pins are GPIO numbers, 0xFF = not wired. An erased
 // partition (no magic) leaves the feature off, so a fresh board or a plain
@@ -125,7 +143,7 @@ static const int SENSE_OVERSAMPLE = 16; // ADC reads averaged per sample: TPMS1 
 // get APPENDED: a blob written before led_pin existed reads 0xFF (erased
 // flash) there, i.e. not wired — both directions stay compatible.
 
-static const uint16_t WIRE_LEN = 14;
+static const uint16_t WIRE_LEN = 15;
 
 struct Config
 {
@@ -135,6 +153,7 @@ struct Config
     int8_t buttonGndPin = -1;
     int8_t sensePin = -1;
     int8_t ledPin = -1;             // feedback LED: blinks while the button reads pressed
+    int8_t wakePin = -1;            // wake input: active-HIGH pulse = power on (only)
     uint16_t holdMs = 2000;         // hold the button this long to force off
     uint16_t bootTimeoutMs = 10000; // sense never came up after power-on -> release
     uint16_t senseLowMv = 800;      // hysteresis: below = board down...
@@ -160,6 +179,7 @@ struct Config
         senseLowMv = u16(p + 9);
         senseHighMv = u16(p + 11);
         ledPin = pin(p[13]);
+        wakePin = pin(p[14]);
         return true;
     }
 };
@@ -219,6 +239,14 @@ static bool btnLongFired = false; // this press can no longer force off: either
                                   // powered on / was already held when the
                                   // chip came up (holding to keep the failsafe
                                   // alive must never cut the power it protects)
+
+// wake input debounce / arming. wakeArmed is set once the debounced input has
+// read idle for WAKE_ARM_MS since the chip came up (or since the last time it
+// dropped to idle before arming) — only then does a rising edge power on.
+static bool wakeStable = false; // debounced "asserted"
+static bool wakeLastRaw = false;
+static uint32_t wakeLastChange = 0;
+static bool wakeArmed = false;
 
 // graceful-shutdown request in flight: millis() when we asked the host (0 =
 // nothing outstanding), and when the "nobody answered" LED burst began
@@ -482,6 +510,48 @@ static void loop()
                  stateName(g_state));
     }
 
+    if (g_cfg.wakePin >= 0)
+    {
+        // active HIGH — OpenPuck's PWR_SWITCH_ACTIVE default; the pull-down
+        // makes "nothing connected" read idle
+        bool raw = gpio_get_level((gpio_num_t)g_cfg.wakePin) == 1;
+
+        if (raw != wakeLastRaw)
+        {
+            wakeLastRaw = raw;
+            wakeLastChange = now;
+        }
+
+        if (raw != wakeStable && now - wakeLastChange >= DEBOUNCE_MS)
+        {
+            wakeStable = raw;
+
+            if (wakeStable)
+            {
+                // the rising edge: power on, and only that. Every other
+                // outcome is logged, because from the outside a dropped pulse
+                // looks like a puck that didn't fire.
+                if (!wakeArmed)
+                    PLOG("wake: pulse before the input had settled idle, ignored");
+                else if (g_state == OFF)
+                {
+                    PLOG("wake: power on");
+                    powerOn(now);
+                }
+                else
+                    PLOG("wake: pulse ignored in state %s", stateName(g_state));
+            }
+        }
+
+        // arm once the raw level has sat idle for WAKE_ARM_MS — measured on
+        // the raw input so a bounce during the window restarts it
+        if (!wakeArmed && !raw && now - wakeLastChange >= WAKE_ARM_MS)
+        {
+            wakeArmed = true;
+            PLOG("wake: input idle, armed");
+        }
+    }
+
     if (g_cfg.buttonPin >= 0)
     {
         bool raw = gpio_get_level((gpio_num_t)g_cfg.buttonPin) == 0;
@@ -548,6 +618,9 @@ static void loop()
 
             if (btnStable)
                 low = (now - btnPressStart) / LED_BLINK_MS % 2 == 0;
+            else if (wakeStable)
+                // a wake pulse (300 ms from an OpenPuck) blinks the same way
+                low = (now - wakeLastChange) / LED_BLINK_MS % 2 == 0;
             else if (g_nakBlink && now - g_nakBlink < NAK_BLINK_MS)
                 low = (now - g_nakBlink) / NAK_BLINK_HALF_MS % 2 == 0;
             else
@@ -705,7 +778,7 @@ bool usesPin(int gpio)
     if (!g_cfg.enabled || gpio < 0)
         return false;
     return gpio == g_cfg.buttonPin || gpio == g_cfg.psOnPin || gpio == g_cfg.buttonGndPin ||
-           gpio == g_cfg.sensePin || gpio == g_cfg.ledPin;
+           gpio == g_cfg.sensePin || gpio == g_cfg.ledPin || gpio == g_cfg.wakePin;
 }
 
 void start()
@@ -733,9 +806,9 @@ void start()
         return;
     }
 
-    PLOG("cfg button=%d gnd=%d ps_on=%d sense=%d led=%d hold=%u boottmo=%u",
+    PLOG("cfg button=%d gnd=%d ps_on=%d sense=%d led=%d wake=%d hold=%u boottmo=%u",
          g_cfg.buttonPin, g_cfg.buttonGndPin, g_cfg.psOnPin, g_cfg.sensePin,
-         g_cfg.ledPin, g_cfg.holdMs, g_cfg.bootTimeoutMs);
+         g_cfg.ledPin, g_cfg.wakePin, g_cfg.holdMs, g_cfg.bootTimeoutMs);
     bool held = psOnHeld();
     PLOG("start: reset=%d savedOn=%d held=%d", (int)esp_reset_reason(),
          (int)g_savedOn, (int)held);
@@ -795,6 +868,23 @@ void start()
         io.mode = GPIO_MODE_OUTPUT;
         gpio_config(&io);
         gpio_set_level((gpio_num_t)g_cfg.buttonGndPin, 0);
+    }
+
+    if (g_cfg.wakePin >= 0)
+    {
+        // the wake input: pull-down, so it reads idle with nothing (or an
+        // unpowered puck) on it. Not armed yet — loop() waits for WAKE_ARM_MS
+        // of idle first, so a level already high here is never a press.
+        gpio_config_t io = {};
+        io.pin_bit_mask = 1ULL << g_cfg.wakePin;
+        io.mode = GPIO_MODE_INPUT;
+        io.pull_up_en = GPIO_PULLUP_DISABLE;
+        io.pull_down_en = GPIO_PULLDOWN_ENABLE;
+        gpio_config(&io);
+        wakeLastChange = millis();
+        wakeLastRaw = gpio_get_level((gpio_num_t)g_cfg.wakePin) == 1;
+        if (wakeLastRaw)
+            PLOG("start: wake input already high -> waiting for it to settle idle");
     }
 
     if (g_cfg.ledPin >= 0)
