@@ -47,8 +47,9 @@ STRIP_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),4)
 # explicit "enabled": false may do it (pwrcfg.py exits 3 for "no block").
 
 # The fans' standalone part (which headers there are, each one's fallback
-# duty and boost, the boost length) is what fancfg holds; curves are the
-# daemon's. The header → GPIO map is the carrier board's (tools/pincheck.py
+# duty and boost, the boost length, the ramp, and a "gpio:N" header's input
+# pin and curve, which the receiver runs itself) is what fancfg holds; host
+# curves are the daemon's. The header → GPIO map is the carrier board's (tools/pincheck.py
 # FAN_PINS; "pins" in the block overrides it for a hand-wired build). Each
 # encoder's --list-pins feeds the other's collision check below.
 FAN_PINS_USED = $(if $(CONFIG),$(shell python3 tools/fancfg.py --config "$(CONFIG)" --target $(TARGET) --list-pins 2>/dev/null))
@@ -65,7 +66,7 @@ PWR_PINS_USED = $(if $(CONFIG),$(shell python3 tools/pwrcfg.py --config "$(CONFI
 comma := ,
 FAN_AVOID = $(foreach p,$(subst $(comma), ,$(PWR_PINS_USED)),--avoid "$(p):claimed by the power switch (the config's power_switch block)") \
 	$(if $(KNOWN),--avoid-hard)
-PWR_AVOID = $(foreach p,$(subst $(comma), ,$(FAN_PINS_USED)),--avoid "$(p):a fan header (the config's fans block)") \
+PWR_AVOID = $(foreach p,$(subst $(comma), ,$(FAN_PINS_USED)),--avoid "$(p):a fan header's output or a gpio source's input (the config's fans block)") \
 	$(if $(KNOWN),--avoid-hard)
 flash flash-source: KNOWN := 1
 

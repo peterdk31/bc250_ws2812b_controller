@@ -234,8 +234,8 @@ running — the second half the host's rendering:
         "hysteresis": 3,        // header, all with the same keys
         "ramp": 5,
         "boost_seconds": 5,
-        "header1": { "name": "pump", "source": "constant",
-                     "curve": "65", "boost": 100, "fallback": 100 },
+        "header1": { "name": "pump", "source": "fallback",
+                     "boost": 100, "fallback": 65 },
         "header2": { ... }
     },
 
@@ -740,9 +740,10 @@ tach (sense) wires stay unconnected. On the carrier board the four headers are
 labelled FAN1–FAN4; elsewhere, see the wiring table below.
 
 Everything about the fans is the config's `fans` block. Each header gets one
-entry, every entry has the same five keys, and a header listed here is
-driven — its curve runs, its output is wired at flash time. Delete a header's
-block to take it out of service (and reflash fancfg, since that is wiring).
+entry with a `name`, a `source`, a `boost` and a `fallback`, plus a `curve`
+for every source but `fallback`; a header listed here is driven — its curve
+runs, its output is wired at flash time. Delete a header's block to take it
+out of service (and reflash fancfg, since that is wiring).
 
 ```jsonc
 "fans": {
@@ -751,12 +752,11 @@ block to take it out of service (and reflash fancfg, since that is wiring).
     "boost_seconds": 5,    // how long a header with a `boost` runs it after the host powers on
 
     "header1": {
-        "name": "pump",             // log lines only
-        "source": "constant",       // fixed speed: curve is one value. AIO pumps want a steady 100 (70-80 for quiet)
-        "curve": "65",
-        "boost": 100,               // duty for the first `boost_seconds` after power-on, or null for no boost
-        "fallback": 100             // what the receiver runs at boot and whenever the daemon isn't driving it
-    },
+        "name": "pump",             // log lines and the phone's card
+        "source": "fallback",       // fixed speed: the header runs its fallback, always — no curve.
+        "boost": 100,               //   AIO pumps want a steady 100 (70-80 for quiet)
+        "fallback": 65              // duty for the first `boost_seconds` after power-on, or null for
+    },                              //   no boost; what the receiver runs whenever nothing else drives the header
     "header2": {
         "name": "radiator",
         "source": "temp",           // the top-level `sensors` pick, in °C
@@ -766,9 +766,9 @@ block to take it out of service (and reflash fancfg, since that is wiring).
     },
     "header3": {
         "name": "exhaust",
-        "source": "nct6686:pwm1",   // mirror the BC-250's own fan header; pwm outputs read 0..100 %
-        "curve": "0:25 100:80",     // floor of 25, scaled to 80 % of what the board asks for
-        "boost": null,
+        "source": "gpio:0",         // the BC-250's own fan header's PWM wire, on receiver GPIO0: the
+        "curve": "0:25 100:80",     //   RECEIVER reads it and runs this curve — daemon or no daemon.
+        "boost": null,              //   floor of 25, scaled to 80 % of what the board asks for
         "fallback": 100
     },
     "header4": {
@@ -781,45 +781,74 @@ block to take it out of service (and reflash fancfg, since that is wiring).
 }
 ```
 
-**`source`** is what the curve reads, and the x unit of the curve follows it:
+**`source`** is what the curve reads; the x unit of the curve follows it, and
+so does *where the curve runs* — on whichever side can read the input:
 
-| source | reads | x unit |
-|---|---|---|
-| `constant` | nothing — the curve is one value | — |
-| `temp` | the top-level `sensors` pick | °C |
-| `chip:label` | any hwmon temperature, same syntax as `sensors` (`amdgpu:edge`, `nct6686:CPU`; a comma list of candidates works too) | °C |
-| `chip:pwmN` | a hwmon pwm *output* — the board's own fan header, i.e. what its BIOS fan curve is asking for | % (0..255 read as 0..100) |
-| `cpu_load` / `gpu_load` | the rule conditions' readings | % |
+| source | reads | x unit | runs on |
+|---|---|---|---|
+| `fallback` | nothing — the header runs its `fallback` value, always; no `curve` | — | receiver |
+| `gpio:N` | the duty of a PWM signal on the receiver's GPIO N — a fan header's PWM wire (the BC-250's own, say), so the receiver follows the board's BIOS curve with no daemon and the machine off | % | receiver |
+| `temp` | the top-level `sensors` pick | °C | daemon |
+| `chip:label` | any hwmon temperature, same syntax as `sensors` (`amdgpu:edge`, `nct6686:CPU`; a comma list of candidates works too) | °C | daemon |
+| `chip:pwmN` | a hwmon pwm *output* — the board's own fan header, i.e. what its BIOS fan curve is asking for, read over the host instead of a wire | % (0..255 read as 0..100) | daemon |
+| `cpu_load` / `gpu_load` | the rule conditions' readings | % | daemon |
 
-**`curve`** is `x:percent` points in one string, linear between points and
-flat beyond the ends, so a curve never has to spell out 0 or 100 on the x
-axis. Floors, ceilings and scaling all live in the curve (`"0:25 100:80"` is a
-floor of 25 scaled to 80 %). A `constant` source takes a single bare value,
-and a bare value requires `constant` — the daemon (and `make flash`) refuse
-the other combinations, along with an unknown or missing key, so a typo is a
-startup error rather than a silently odd fan.
+**`curve`** is `x:percent` points in one string (up to eight), linear
+between points and flat beyond the ends, so a curve never has to spell out 0
+or 100 on the x axis. Floors, ceilings and scaling all live in the curve
+(`"0:25 100:80"` is a floor of 25 scaled to 80 %). A `fallback` source takes
+no curve and every other source needs one — the daemon (and `make flash`)
+refuse the other combinations, along with an unknown or missing key, so a
+typo is a startup error rather than a silently odd fan. A `gpio` curve's
+inputs are whole percents 0..100 (it travels to the receiver as bytes). The
+old `constant` source, a bare value in `curve`, is refused with a line saying
+it became `fallback`: move the value into `fallback` and delete `curve`.
+
+**`gpio:N`** is the wired twin of `chip:pwmN`: a two-wire lead from the fan
+header's PWM (pin 4) and GND pins to a free receiver GPIO and its GND — only
+those two, never the header's +12 V, which would parallel the board's fan
+rail with the PSU's. The receiver reads the pin with its internal pull-up (a
+PC fan header drives its PWM open-drain, so the level is the receiver's own
+3.3 V; a push-pull 5 V driver needs a series resistor — check with a meter),
+samples the duty four times a second, and runs the curve with the same
+`ramp` the daemon uses. Unplugged, the pin reads high — 100 %, the fan
+spec's own answer to a missing signal. On the carrier board the free pins
+are GPIO0, 20 and 21 on J11 (each with a GND beside it; 20 and 21 are also
+the J5 UART candidates), and `make flash` refuses anything else: a listed
+header's output, the strip, the power switch's pins, the flash pads, the USB
+pair, and the strap pins (8, 9 — a PWM at 0 % is a pin held low at reset,
+which is the download-mode strap). A pin that arrives at runtime (a phone
+edit, a daemon push) is checked again on the receiver, which logs a refusal
+and runs the fallback.
 
 **`boost`** and **`fallback`** are the header's *standalone* settings — what
 the receiver does on its own. Full speed is the safe answer for cooling, which
 is why `fallback` is 100 in most examples; a header with `boost: null` starts
-at its fallback instead of boosting. Reading the pump above as a timeline:
+at its fallback instead of boosting. Reading the radiator above as a timeline:
 
 1. Power button pressed. The receiver asserts PS_ON#, sees the rail up, and
-   runs the pump at 100 % for `boost_seconds`.
-2. Boost ends; the daemon isn't up yet, so the pump runs its fallback, 100 %.
-3. The daemon starts and pushes 65 %. The pump settles there.
+   runs the pump (which has one) at 100 % for `boost_seconds`.
+2. Boost ends; the daemon isn't up yet, so the radiator runs its fallback,
+   100 %.
+3. The daemon starts, reads the temperature and pushes the curve's 35 %. The
+   radiator settles there.
 4. The daemon crashes or is stopped under a running machine. Fifteen seconds
-   later the receiver notices the silence and the pump goes back to 100 %.
+   later the receiver notices the silence and the radiator goes back to 100 %.
 5. Normal shutdown. The daemon's shutdown notice says the machine itself is
    powering off, and the receiver *holds* the last live duties instead, so the
    fans wind down from where they are when the PSU cuts — no full-speed blip.
    (A plain `systemctl restart` or `stop` doesn't say that, and the fans fall
    back as in step 4 if no daemon comes back.)
 
-Each header's duty comes from three places, strongest first: the **boost**
-while its window runs; the daemon's **live** duty (its curve's output, pushed
-on the 0.5 s rule tick when it changes and refreshed every 5 s, never
-persisted); and the **fallback**. With the power switch configured, "host
+The pump, a `fallback` source, runs 65 % from step 2 on and never notices the
+daemon; the exhaust, a `gpio` source, follows the board's own fan header from
+step 2 on the same way.
+
+Each header's duty comes from four places, strongest first: the **boost**
+while its window runs; the receiver's own **curve** for a `gpio` source; the
+daemon's **live** duty (a host curve's output, pushed on the 0.5 s rule tick
+when it changes and refreshed every 5 s, never persisted); and the
+**fallback**. With the power switch configured, "host
 powers on" means *its* power-on event — the button press asserting PS_ON# —
 confirmed by the sense wire reading the rail up, so a reset of the receiver
 itself (a crash, a reflash, a daemon reconnect) never re-fires the boost.
@@ -827,32 +856,36 @@ Without the power switch, USB host presence stands in (debounced 3 s so a bus
 reset doesn't re-fire it), else the boost fires once at receiver boot.
 `boost_seconds: 0` disables boosting altogether.
 
-**The fallback is a slider on the phone**, on every header's card, and it
-writes to wherever the value lives. While a daemon is connected, to the
-daemon: into the config file like every other edit, and the daemon pushes
-the standalone values to the receiver. **With no daemon at all**,
-straight to the receiver (a control op over BLE, nothing relayed to a host),
-stored in its flash so it survives power cycles. So the receiver is a fan
-controller on its own — a manual one: every wired header runs its fallback,
-the boost still primes a pump at power-on, and the phone dials each header.
-That is the bench case (a carrier board, a PSU and fans, no BC-250 booting)
-and the machine-off case too — dial the fans down at night without waking
-anything. What the receiver can't do alone is a curve: it has no temperature
-to read and no tach to hear, so the slider is a fixed duty. There is one
-source of truth, and it is the config: a daemon connecting pushes the file's
-`fallback` and `boost` for every header in its block over
-whatever the receiver held — so a value dialled standalone lasts exactly
-until then, and the slider writes into the file whenever a daemon is there.
+**The fallback is a slider on the phone**, on every header's card, and the
+**source is a picker** in the card's editor; both write to wherever the value
+lives. While a daemon is connected, to the daemon: into the config file like
+every other edit, and the daemon pushes the standalone values to the
+receiver. **With no daemon at all**, straight to the receiver (a control op
+over BLE, nothing relayed to a host), stored in its flash so it survives
+power cycles — and the picker then offers just the two sources a receiver
+runs by itself, `fallback` and `gpio:N`. So the receiver is a fan controller
+on its own: every wired header runs its fallback or its gpio curve, the boost
+still primes a pump at power-on, and the phone dials each header. That is the
+bench case (a carrier board, a PSU and fans, no BC-250 booting) and the
+machine-off case too — dial the fans down at night without waking anything.
+What the receiver can't do alone is a *host* curve: it has no temperature to
+read, so a `temp` or load header runs its fallback until a daemon connects.
+There is one source of truth, and it is the config: a daemon connecting
+pushes the file's `fallback`, `boost`, source and gpio curve for every header
+in its block over whatever the receiver held — so a value dialled standalone
+lasts exactly until then, and the phone writes into the file whenever a
+daemon is there.
 
 **`hysteresis`** and **`ramp`** are global, because they exist to stop hunting
 and apply the same way to every fan. Hysteresis applies to temperature sources
-only; a constant ignores both.
+only; a fallback ignores both; the receiver rounds `ramp` to whole percent
+per second for its own curves.
 
 **There is no enable switch.** A header in the block is driven; one that
 isn't gets no pin at flash time, so the receiver never touches that output.
 Note that is not "off" — a 4-pin fan with a floating PWM input runs at full
 speed, per the fan spec. A fan you want *stopped* is a header with
-`"source": "constant", "curve": "0"` (most fans stop at 0 % duty; the spec
+`"source": "fallback", "fallback": 0` (most fans stop at 0 % duty; the spec
 allows a fan to keep a minimum speed instead, so check yours). The old
 `enabled` key is refused at startup with a line saying so: it meant two things
 at once — wiring at flash time and "run the curve" at runtime — which let the
@@ -863,12 +896,13 @@ phone switch on a header the receiver had no pin for.
 Two consumers read the same block:
 
 - **`make flash` / `make flash-source`** bake the standalone part — which
-  headers there are, their pins, `fallback`, `boost`, `boost_seconds` —
+  headers there are, their pins, `fallback`, `boost`, `boost_seconds`,
+  `ramp`, each header's source kind and a `gpio` header's pin and curve —
   into the receiver's `fancfg` flash partition, exactly as `strip.pin` is
   baked. So a box that never runs the daemon is configured by editing the
   block and running `sudo make flash-fan` (the fancfg partition alone, a couple
-  of seconds); its fans run their `fallback` duties, because that is what
-  fallback means. The config is `/etc/led-controller/config.json` when it
+  of seconds); its fans run their `fallback` duties and their gpio curves,
+  because those are the receiver's own. The config is `/etc/led-controller/config.json` when it
   exists, else the repo's (`CONFIG=path` overrides).
 - **The daemon** reads the block at runtime, drives the curves, and pushes the
   same standalone part once at startup, so an edit plus a daemon restart
@@ -885,15 +919,17 @@ led /etc/led-controller/config.json --fan-status   # what each header resolves t
 ```
 
 `--fan-status` prints every header's source, the sysfs file it resolved to,
-its current reading and the duty it would run — the first thing to run when a
-fan isn't doing what the curve says, and whether dashboard edits can be
-written back to the config.
+its current reading and the duty it would run (a `fallback` or `gpio` header
+is marked as the receiver's to run) — the first thing to run when a fan isn't
+doing what the curve says, and whether dashboard edits can be written back to
+the config.
 
 ### Editing curves from the phone
 
 With the BLE remote on, the web page shows every header live and lets you
-redraw its curve, set boost and fallback, and change hysteresis, ramp and
-boost length — see the dashboard under [BLE remote](#ble-remote). An edit
+redraw its curve, pick its source, set boost and fallback, and change
+hysteresis, ramp and boost length — see the dashboard under
+[BLE remote](#ble-remote). An edit
 (the fallback slider's included)
 travels phone → receiver → daemon, which validates it exactly as it validates
 the config, applies it on its next tick, and **writes it into the config
@@ -907,9 +943,12 @@ install, diff it, and the phone's edits come along. The same file watch that rel
 ([Live reload](#live-reload)) works the other way too: edit a curve in the
 file, and the phone's dashboard shows the new curve a moment later.
 
-Names (up to 16 characters) are editable from the phone too. Sources and
-the set of headers are yours alone — the phone can't add or remove a header,
-or point one at a different sensor. The dashboard is read-only when the daemon
+Names (up to 16 characters) are editable from the phone too, and so is the
+source: the picker lists every kind above, with a pin field for `gpio` and a
+`chip:label` field for the hwmon kinds; a sensor that isn't on the machine is
+refused there and then (a hand edit in the file may name one that turns up
+later). The set of headers is yours alone — the phone can't add or remove
+one, that is wiring. The dashboard is read-only when the daemon
 can't write its config (the page hides the edit buttons); a write that fails
 mid-way is reported in the journal and the edit runs until the next restart.
 The daemon takes edits only from the receiver's link, which only the
@@ -922,6 +961,7 @@ Wiring (channel order = header order):
 |---|---|---|
 | header1–header4 | GPIO5, 6, 7, 10 — the carrier board's FAN1–FAN4 | one fan's PWM input each (pin 4 on the 4-pin connector) |
 | — | — | fan +12 V and GND come from the PSU, **sharing a common ground** with the receiver; tach (pin 3) unconnected |
+| a `gpio:N` source | GPIO0, 20 or 21 — J11 pins 16, 12, 14, each with a GND beside it | a fan header's PWM (pin 4) and GND, two wires only — see `gpio:N` above |
 
 The header → GPIO map is the board's, not the config's (`tools/pincheck.py`,
 `FAN_PINS`; the plain ESP32 gets 16, 17, 18, 19, untested). A hand-wired build
@@ -936,8 +976,8 @@ firmware has no console and a bad pin just looks like a fan that never spins.
 
 Two guardrails, mirroring the power switch's:
 
-- **The chip must run a firmware that reads this block's layout** (the `FAN2`
-  fancfg, from this change on) **and whose partition table has the `fancfg`
+- **The chip must run a firmware that reads this block's layout** (the `FAN3`
+  fancfg, from the gpio sources on; `FAN2` and `FAN1` blobs are still read) **and whose partition table has the `fancfg`
   entry** (v1.13.0 or newer). `make flash-fan` against an older layout writes
   a sector that firmware never reads — a silent no-op, except the receiver's
   debug log says `no fancfg partition` at boot — and a firmware that knows
@@ -1021,9 +1061,12 @@ Under the power ring, once connected, the page shows what the box is doing:
   and where it came from (a `live` chip for the daemon's curve, `boost` for
   the power-on boost, `fallback` when nothing is driving it, `hold` while the
   machine powers down), the curve's own input (`58.3 °C`, `GPU 62 %`, …), and
-  the curve itself with the current operating point marked on it. "Edit
-  curve" makes the points draggable (or type them; add and remove up to six)
-  and opens boost; **Save** sends just that header's change and
+  the curve itself with the current operating point marked on it (a `curve`
+  chip is the receiver's own `gpio` curve, running with or without the
+  daemon). "Edit" opens the source picker — every kind in the
+  [Fans](#fans) table, with a pin field for `gpio` and a sensor field for the
+  hwmon kinds — makes the points draggable (or type them; add and remove up
+  to eight) and opens boost; **Save** sends just that header's change and
   the card says `saved` only when the daemon has applied it, written it into
   the config and pushed the config back — see
   [Editing curves from the phone](#editing-curves-from-the-phone). The
@@ -1032,7 +1075,11 @@ Under the power ring, once connected, the page shows what the box is doing:
   **fallback slider** — what the header runs when nothing drives it —
   applying on release like the strip's: into the config while a daemon is
   connected, straight
-  onto the receiver when there is none (see [Fans](#fans)).
+  onto the receiver when there is none (see [Fans](#fans)). With no daemon
+  at all the cards come from the receiver's own stored settings: the picker
+  then offers `fallback` and `gpio` — the two sources a receiver runs
+  alone — and Save stores the header on the receiver until a daemon next
+  connects and the config wins again.
 - **Fan behaviour** — hysteresis, ramp-down rate and boost length, editable
   the same way.
 - **Strip** — the config's `strip` block: brightness, white balance (one
@@ -1164,7 +1211,10 @@ fan-curve edit (`0x01`), "a phone is watching" (`0x02`) or a strip edit
 as the daemon runs it), `0x0B` (its live readings) and `0x0C` (the strip
 settings and scenes). All of these payloads are small JSON texts in the shapes
 `daemon/fans.hpp` and `daemon/strip_remote.hpp` document — the receiver relays
-them to the phone without parsing them.
+them to the phone without parsing them. The fans' standalone settings
+(`0x08`) are binary — fallback and boost per header, then ramp and per header
+its source kind and a `gpio` source's pin and curve — because the receiver
+does read those: they are what it runs on its own.
 
 Byte values and payload formats live in `common/protocol.hpp`, shared by host
 and firmware. The receiver drops bad-checksum frames and rescans for sync, so a

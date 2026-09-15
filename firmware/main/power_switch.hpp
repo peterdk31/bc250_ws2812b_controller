@@ -48,6 +48,11 @@ int senseState();
 // this. Lock-free aligned read, as senseState().
 uint32_t powerOnSeq();
 
+// does the power switch use this GPIO (button, PS_ON#, button ground, sense,
+// LED)? For sibling features choosing a pin at runtime — the fan controller
+// refuses a PWM input on one of ours. False while the feature is off.
+bool usesPin(int gpio);
+
 // coarse PSU state for sibling features (the BLE remote's status
 // characteristic): -1 = feature off, else 0 = OFF, 1 = BOOTING, 2 = ON.
 // Lock-free aligned read, as senseState().

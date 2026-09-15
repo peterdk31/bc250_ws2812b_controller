@@ -33,7 +33,7 @@
 
 #define BLOG(fmt, ...) dbglog::line("ble: " fmt, ##__VA_ARGS__)
 
-// The GATT surface — one custom service, eight characteristics:
+// The GATT surface — one custom service, nine characteristics:
 //
 //   control (write):        token(16) op(1) [args]. Token is the flash-time
 //                           shared secret, byte-for-byte (short tokens
@@ -47,7 +47,17 @@
 //                           position, 0-based), applied and persisted by the
 //                           fan module without any daemon — what makes this
 //                           board a fan controller on its own. Rejected
-//                           (VALUE_ERR) for a slot that isn't wired.
+//                           (VALUE_ERR) for a slot that isn't wired. op 0x11
+//                           = set a fan header's source, args slot(1)
+//                           kind(1) gpio(1) npts(1) pts(2*npts): kind is
+//                           protocol.hpp FAN_KIND_FALLBACK (the header runs
+//                           its fallback) or FAN_KIND_GPIO (this board
+//                           samples the PWM on GPIO `gpio` and runs the
+//                           (input %, duty %) curve itself) — the two
+//                           sources a receiver runs with no daemon; a host
+//                           source, a bad curve or a pin this board can't
+//                           read on is rejected (VALUE_ERR, reason in the
+//                           debug log). Persisted like op 0x10.
 //                           A wrong token is rejected with "write not
 //                           permitted" (TOKEN_ERR, below); a right power op
 //                           stages the request with the pwr task and
@@ -76,6 +86,13 @@
 //                           forwarded to the daemon as MSG_FAN_CONFIG; the
 //                           daemon's answering CMD_FAN_CONFIG notifies the
 //                           new value.
+//   fansa (read + notify):  this board's standalone fan settings as stored —
+//                           CMD_FAN_STANDALONE's layout (protocol.hpp): per
+//                           header fallback, boost, source kind, and a gpio
+//                           header's pin and curve, plus boost length and
+//                           ramp. What the page shows and edits with no
+//                           daemon around (ops 0x10/0x11 write it); notified
+//                           when it changes.
 //   stripcfg (read + write + notify):
 //                           the same for the strip: the last CMD_STRIP_CONFIG
 //                           (brightness, gamma, white balance, the file: rule
@@ -89,7 +106,7 @@
 // NimBLE wants them little-endian:
 //   service a5f20001-8f11-4e0e-9b3a-0bc250e0c001, control ...0002,
 //   status ...0003, fans ...0004, fancfg ...0005, info ...0006, telem ...0007,
-//   stripcfg ...0008
+//   stripcfg ...0008, fansa ...0009
 namespace ble
 {
 static const uint32_t POLL_MS = 250; // policy task cadence
@@ -147,10 +164,16 @@ static const ble_uuid128_t STRIPCFG_UUID = BLE_UUID128_INIT(
     0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
     0x0e, 0x4e, 0x11, 0x8f, 0x08, 0x00, 0xf2, 0xa5);
 
+static const ble_uuid128_t FANSA_UUID = BLE_UUID128_INIT(
+    0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
+    0x0e, 0x4e, 0x11, 0x8f, 0x09, 0x00, 0xf2, 0xa5);
+
 static const uint8_t OP_POWER_ON = 0x01;
 static const uint8_t OP_SHUTDOWN = 0x02;
 static const uint8_t OP_HARD_OFF = 0x03;
 static const uint8_t OP_FAN_FALLBACK = 0x10; // + slot(1) percent(1)
+static const uint8_t OP_FAN_SOURCE = 0x11;   // + slot(1) kind(1) gpio(1) npts(1) pts(2*npts)
+static const uint16_t OP_FAN_SOURCE_MAX = 4 + 2 * proto::FAN_CURVE_POINTS;
 
 // dashboard cadence: the fans value is notified this often while subscribed
 // (the daemon's telemetry moves on its 0.5 s tick, the fan task's on 100 ms;
@@ -231,10 +254,12 @@ static uint16_t g_fancfgHandle = 0;
 static uint16_t g_infoHandle = 0;
 static uint16_t g_telemHandle = 0;
 static uint16_t g_stripcfgHandle = 0;
+static uint16_t g_fansaHandle = 0;
 static volatile bool g_fansSub = false;   // a client has fans notifications on
 static volatile bool g_fancfgSub = false; // ...fancfg's
 static volatile bool g_telemSub = false;  // ...telem's (= the daemon should send)
 static volatile bool g_stripcfgSub = false; // ...stripcfg's
+static volatile bool g_fansaSub = false;    // ...fansa's
 
 // policy task locals
 static int g_lastState = -2;   // last pwr::psuState() seen (-2 = never)
@@ -247,24 +272,28 @@ static bool g_watching = false;    // the daemon has been told a phone watches
 static uint32_t g_lastCfgSeq = 0;  // dash FAN_CONFIG seq last notified
 static uint32_t g_lastTelSeq = 0;  // dash FAN_TELEM seq last notified
 static uint32_t g_lastStripSeq = 0; // dash STRIP_CONFIG seq last notified
+static uint32_t g_lastSaSeq = 0;    // fan::standalone() seq last notified
 
 // ---- the fans value ----
 
 // FANS_LEN bytes, all little-endian — this board's side only; the daemon's
 // numbers are in the telem value, and the page joins the two:
-//   ver(1) = 2 (1 had no fallback byte per header; the page reads both)
+//   ver(1) = 3 (1 had no fallback byte per header, 2 no kind/in; the page
+//            reads all three)
 //   flags(1): bit0 fan feature on, bit1 boosting, bit2 hold (host powering
 //             off), bit3 live (daemon duties in force), bit4 host present on
 //             the link, bit5 telemetry fresh (younger than TELEM_FRESH_MS)
 //   psu(1): 0 off, 1 booting, 2 on
 //   telemAge(1): seconds since the daemon's last telemetry, 255 = none/stale
-//   per header ×6: state(1) duty(1) fallback(1)
-//     state: bit0 wired, bits1-2 source (fan::SRC_*)
+//   per header ×6: state(1) duty(1) fallback(1) kind(1) in(1)
+//     state: bit0 wired, bits1-3 source (fan::SRC_*)
 //     duty: the duty this board applies (0xFF unwired)
 //     fallback: the resting duty in force — the control op 0x10 sets it, so
 //               the page's slider shows what is stored (0xFF unwired)
+//     kind: the source kind in force (protocol.hpp FAN_KIND_*, 0xFF unwired)
+//     in: a gpio header's sampled input percent (0xFF = no reading)
 //   uptime(4): this board's seconds since reset
-static const uint16_t FANS_LEN = 4 + proto::FAN_CHANNELS * 3 + 4;
+static const uint16_t FANS_LEN = 4 + proto::FAN_CHANNELS * 5 + 4;
 
 static const uint8_t F_ACTIVE = 0x01, F_BOOST = 0x02, F_HOLD = 0x04, F_LIVE = 0x08,
                      F_HOST = 0x10, F_TELEM = 0x20;
@@ -281,7 +310,7 @@ static uint16_t buildFans(uint8_t* p)
 
     int st = pwr::psuState();
     uint16_t at = 0;
-    p[at++] = 2;
+    p[at++] = 3;
     p[at++] = (s.active ? F_ACTIVE : 0) | (s.boosting ? F_BOOST : 0) |
               (s.hold ? F_HOLD : 0) | (s.live ? F_LIVE : 0) |
               (link::hostPresent() ? F_HOST : 0) | (fresh ? F_TELEM : 0);
@@ -290,9 +319,11 @@ static uint16_t buildFans(uint8_t* p)
 
     for (int i = 0; i < proto::FAN_CHANNELS; i++)
     {
-        p[at++] = (s.wired[i] ? 0x01 : 0) | ((s.source[i] & 3) << 1);
+        p[at++] = (s.wired[i] ? 0x01 : 0) | ((s.source[i] & 7) << 1);
         p[at++] = s.duty[i];
         p[at++] = s.fallback[i];
+        p[at++] = s.kind[i];
+        p[at++] = s.in[i];
     }
 
     uint32_t up = (uint32_t)(esp_timer_get_time() / 1000000);
@@ -309,9 +340,9 @@ static int ctrlAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
         return BLE_ATT_ERR_UNLIKELY;
 
-    // token, op, and up to two argument bytes (the fan op's); the length
-    // is checked per op below, once the token has been
-    uint8_t buf[TOKEN_LEN + 3];
+    // token, op, and the arguments (the fan source op's are the longest);
+    // the length is checked per op below, once the token has been
+    uint8_t buf[TOKEN_LEN + 1 + OP_FAN_SOURCE_MAX];
     uint16_t len = 0;
     if (ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof buf, &len) != 0 ||
         len < TOKEN_LEN + 1)
@@ -343,6 +374,23 @@ static int ctrlAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
             return VALUE_ERR;
         }
         BLOG("fan fallback header%u=%u%% set from the phone", slot + 1u, pct);
+        return 0;
+    }
+
+    if (op == OP_FAN_SOURCE)
+    {
+        const uint8_t* a = buf + TOKEN_LEN + 1;
+        if (args < 4 || args != 4 + 2 * (uint16_t)a[3])
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        const char* why = nullptr;
+        if (!fan::setSource(a[0], a[1], a[2], a[3], a + 4, &why))
+        {
+            BLOG("fan source header%u kind=%u gpio=%u rejected — %s", a[0] + 1u, a[1],
+                 a[2], why ? why : "?");
+            return VALUE_ERR;
+        }
+        BLOG("fan source header%u kind=%u gpio=%u (%u points) set from the phone",
+             a[0] + 1u, a[1], a[2], a[3]);
         return 0;
     }
 
@@ -446,6 +494,17 @@ static int fancfgAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     return relayEdit(ctxt, proto::MSG_FAN_CONFIG, "fan");
 }
 
+// this board's stored standalone fan settings (fan::standalone)
+static int fansaAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR)
+        return BLE_ATT_ERR_UNLIKELY;
+
+    uint8_t b[proto::FAN_STANDALONE_LEN];
+    uint16_t n = fan::standalone(b, sizeof b);
+    return n == 0 || os_mbuf_append(ctxt->om, b, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
 static int stripcfgAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
 {
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)
@@ -479,7 +538,7 @@ static int infoAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
 // built in start() with plain field assignment: NimBLE's struct layouts have
 // grown fields across IDF versions, and C++ designated initializers would
 // pin this file to one ordering
-static ble_gatt_chr_def g_chrs[8];
+static ble_gatt_chr_def g_chrs[9];
 static ble_gatt_svc_def g_svcs[2];
 
 // ---- GAP / advertising ----
@@ -504,6 +563,7 @@ static int gapEvent(ble_gap_event* ev, void*)
         g_fancfgSub = false;
         g_telemSub = false;
         g_stripcfgSub = false;
+        g_fansaSub = false;
         BLOG("phone disconnected (reason=%d)", ev->disconnect.reason);
         break;
 
@@ -518,6 +578,8 @@ static int gapEvent(ble_gap_event* ev, void*)
             g_telemSub = ev->subscribe.cur_notify != 0;
         else if (ev->subscribe.attr_handle == g_stripcfgHandle)
             g_stripcfgSub = ev->subscribe.cur_notify != 0;
+        else if (ev->subscribe.attr_handle == g_fansaHandle)
+            g_fansaSub = ev->subscribe.cur_notify != 0;
         break;
 
     default:
@@ -634,6 +696,14 @@ static void dashboard(uint32_t now)
         if (g_stripcfgSub)
             ble_gatts_chr_updated(g_stripcfgHandle);
     }
+
+    fan::standalone(nullptr, 0, &seq);
+    if (seq != g_lastSaSeq)
+    {
+        g_lastSaSeq = seq;
+        if (g_fansaSub)
+            ble_gatts_chr_updated(g_fansaHandle);
+    }
 }
 
 // owns the advertising pace: quick while the PSU is off, slow while it is on
@@ -747,7 +817,12 @@ void start()
     g_chrs[6].access_cb = stripcfgAccess;
     g_chrs[6].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY;
     g_chrs[6].val_handle = &g_stripcfgHandle;
-    g_chrs[7] = {}; // terminator
+    g_chrs[7] = {};
+    g_chrs[7].uuid = &FANSA_UUID.u;
+    g_chrs[7].access_cb = fansaAccess;
+    g_chrs[7].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY;
+    g_chrs[7].val_handle = &g_fansaHandle;
+    g_chrs[8] = {}; // terminator
 
     g_svcs[0] = {};
     g_svcs[0].type = BLE_GATT_SVC_TYPE_PRIMARY;

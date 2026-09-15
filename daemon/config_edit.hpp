@@ -44,6 +44,17 @@ inline json::Value& member(json::Value& obj, const std::string& key)
     return obj.members.back().second;
 }
 
+// drop a member, if present (a key the running values no longer have)
+inline void erase(json::Value& obj, const std::string& key)
+{
+    for (size_t i = 0; i < obj.members.size(); i++)
+        if (obj.members[i].first == key)
+        {
+            obj.members.erase(obj.members.begin() + i);
+            return;
+        }
+}
+
 inline json::Value number(double v)
 {
     json::Value n;

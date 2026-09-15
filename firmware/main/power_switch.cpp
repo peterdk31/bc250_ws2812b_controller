@@ -700,6 +700,14 @@ void remoteRequest(Remote r)
         g_remote = r;
 }
 
+bool usesPin(int gpio)
+{
+    if (!g_cfg.enabled || gpio < 0)
+        return false;
+    return gpio == g_cfg.buttonPin || gpio == g_cfg.psOnPin || gpio == g_cfg.buttonGndPin ||
+           gpio == g_cfg.sensePin || gpio == g_cfg.ledPin;
+}
+
 void start()
 {
     bool loaded = loadConfig(g_cfg);

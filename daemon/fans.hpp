@@ -22,6 +22,7 @@
 
 #include "config_edit.hpp"
 #include "config_loader.hpp"
+#include "fancurve.hpp"
 #include "hwmon.hpp"
 #include "protocol.hpp"
 #include "sink.hpp"
@@ -32,40 +33,55 @@
 //
 //     "fans": {
 //         "hysteresis": 3, "ramp": 5, "boost_seconds": 5,
-//         "header1": { "name": "pump", "source": "constant",
-//                      "curve": "65", "boost": 100, "fallback": 100 },
+//         "header1": { "name": "pump", "source": "fallback",
+//                      "boost": 100, "fallback": 65 },
 //         "header2": { ... "source": "temp", "curve": "45:35 60:55 75:100",
+//                      "boost": null, "fallback": 100 },
+//         "header3": { ... "source": "gpio:0", "curve": "0:25 100:80",
 //                      "boost": null, "fallback": 100 },
 //         ...
 //     }
 //
-// Every header has the same five keys, and a header listed here is driven:
-// its curve runs, its output is wired at flash time. To take one out of
-// service, delete its block (and reflash fancfg); to stop its fan, give it
-// a constant curve of 0. There is no enable flag — one existed, and meant
-// two things at once (wiring at flash time, curve at runtime), so a phone
-// could switch on a header the receiver had no pin for; the key is now a
-// startup error. `source` is what the curve reads:
-// `constant` (no reading; the curve is one value), `temp` (the top-level
-// `sensors` pick, °C), a hwmon `chip:label` temperature (same syntax as the
-// sensors list, °C), a hwmon `chip:pwmN` output (the board's own fan header,
-// read as 0..100 %), or `cpu_load` / `gpu_load` (0..100 %). `curve` is
-// "x:percent" points, linear between and flat beyond the ends; the x unit is
-// the source's. `boost` is the duty for the first boost_seconds after the host
-// powers on (null = sits it out) and `fallback` what the receiver runs
-// whenever this daemon isn't driving the header. Both of those, plus
-// boost_seconds, are the receiver's standalone settings: pushed once at
-// startup (CMD_FAN_STANDALONE) and also baked into its fancfg partition at
-// flash time from this same block (tools/fancfg.py). They are pushed for
-// every header in this block — the config is the one source of truth while
-// a daemon is connected, and a value dialled on the receiver from the phone
-// while no daemon ran is overwritten by it.
+// Every header has name, source, boost and fallback, plus a curve for every
+// source but "fallback"; a header listed here is driven: its curve runs, its
+// output is wired at flash time. To take one out of service, delete its
+// block (and reflash fancfg); to stop its fan, give it source "fallback" and
+// a fallback of 0. There is no enable flag — one existed, and meant two
+// things at once (wiring at flash time, curve at runtime), so a phone could
+// switch on a header the receiver had no pin for; the key is now a startup
+// error. `source` is what the curve reads, and WHERE the curve runs follows
+// from what can read it:
 //
-// The curves run on the rules' 0.5 s tick, sharing the reads the rule
-// conditions already do. Their output goes out as CMD_FAN_LIVE whole percents
-// when something changed, plus a refresh every few seconds so the receiver
-// can treat a silence as "the daemon is gone" and fall back — which is also
-// why a live duty is never persisted on the receiver.
+//   fallback     nothing: the header runs its fallback value, always
+//   gpio:N       the duty of a PWM signal on the RECEIVER's GPIO N (the
+//                BC-250's own fan header, wired over) — the receiver samples
+//                it and runs the curve itself, so this works with no daemon
+//                and the machine off. x is 0..100 %
+//   temp         the top-level `sensors` pick, °C            (this daemon)
+//   chip:label   any hwmon temperature, °C                   (this daemon)
+//   chip:pwmN    a hwmon pwm output, read as 0..100 %        (this daemon)
+//   cpu_load / gpu_load   0..100 %                           (this daemon)
+//
+// A daemon-evaluated ("host") curve's output goes out as CMD_FAN_LIVE whole
+// percents on the rules' 0.5 s tick, sharing the reads the rule conditions
+// already do — when something changed, plus a refresh every few seconds so
+// the receiver can treat a silence as "the daemon is gone" and fall back,
+// which is also why a live duty is never persisted on the receiver. A
+// fallback or gpio header is never the daemon's to drive: its live slot is
+// always FAN_NONE.
+//
+// `curve` is "x:percent" points (up to fancurve::MAX_POINTS), linear between
+// and flat beyond the ends; the x unit is the source's. `boost` is the duty
+// for the first boost_seconds after the host powers on (null = sits it out)
+// and `fallback` what the receiver runs whenever nothing else drives the
+// header. Those two, boost_seconds, ramp, and every header's source kind
+// (with a gpio header's pin and curve) are the receiver's standalone
+// settings: pushed at startup and after any edit that moves them
+// (CMD_FAN_STANDALONE, common/protocol.hpp) and also baked into its fancfg
+// partition at flash time from this same block (tools/fancfg.py). They are
+// pushed for every header in this block — the config is the one source of
+// truth while a daemon is connected, and a value dialled on the receiver
+// from the phone while no daemon ran is overwritten by it.
 //
 // The BLE dashboard (README "BLE remote") sees and edits this block through
 // the receiver, all of it as JSON text the receiver relays without reading:
@@ -83,25 +99,30 @@
 //
 //     { "editable": true,        // the config file is writable
 //       "hysteresis": 3, "ramp": 5, "boost_seconds": 5,
-//       "header2": { "n": "radiator", "s": "temp",   // s is read-only
+//       "header1": { "n": "pump", "s": "fallback", "b": 100, "f": 65 },
+//       "header2": { "n": "radiator", "s": "temp",
 //                    "c": "45:35 60:55 75:100", "f": 100 }, ... }
 //
-// c/b/f are curve, boost and fallback in the config's own notation (b absent
-// = null, no boost), n the name; s is the source's kind (constant,
-// temp, pwm, cpu_load, gpu_load) and the one thing the phone can't change.
-// Keys are short because a GATT attribute holds 512 bytes at most and six
-// headers have to fit — pushConfig says so in the journal when they don't.
+// s is the source exactly as the config spells it, c/b/f are curve, boost
+// and fallback in the config's own notation (c absent for a fallback source,
+// b absent = null, no boost), n the name. All of them are editable; a phone
+// that changes s sends the curve for the new source in the same edit. Keys
+// are short because a GATT attribute holds 512 bytes at most and six headers
+// have to fit — pushConfig says so in the journal when they don't.
 namespace fans
 {
 static const int CHANNELS = proto::FAN_CHANNELS;
 static const double REFRESH_S = 5.0; // resend unchanged live duties this often
                                      // (the receiver drops them after 15 s of
                                      // silence — see firmware fan.cpp)
+static const int MAX_GPIO = 48;      // the highest GPIO on any target (S3);
+                                     // the flasher and the receiver know the
+                                     // real chip and check the pin properly
 
-struct Point
-{
-    float x, y;
-};
+static_assert(proto::FAN_CURVE_POINTS == fancurve::MAX_POINTS,
+              "the wire's point count is the evaluator's");
+
+using fancurve::Point;
 
 struct Header
 {
@@ -110,9 +131,10 @@ struct Header
     std::string name;
     std::string source;              // as written
 
-    enum Kind { Constant, Temp, Pwm, CpuLoad, GpuLoad } kind = Constant;
-    std::vector<Point> curve;        // sorted by x; Constant = one point
-    std::string curveText;           // the curve, canonical "x:y x:y" (or "y")
+    enum Kind { Fallback, Gpio, Temp, Pwm, CpuLoad, GpuLoad } kind = Fallback;
+    int gpio = -1;                   // Gpio: the receiver's input pin
+    std::vector<Point> curve;        // sorted by x; empty for Fallback
+    std::string curveText;           // the curve, canonical "x:y x:y"
     int boost = -1;                  // percent, -1 = null (no boost)
     int fallback = 100;
 
@@ -128,28 +150,12 @@ struct Header
     float lastIn = 0;                // last raw reading (for --fan-status)
     bool lastInOk = false;
 
-    // the curve at x: linear between points, flat beyond the ends
+    // the daemon evaluates this header's curve (the receiver runs the rest)
+    bool hostRun() const { return kind != Fallback && kind != Gpio; }
+
     float eval(float x) const
     {
-        if (curve.empty())
-            return fallback;
-        if (x <= curve.front().x)
-            return curve.front().y;
-        if (x >= curve.back().x)
-            return curve.back().y;
-
-        for (size_t i = 1; i < curve.size(); i++)
-        {
-            if (x <= curve[i].x)
-            {
-                const Point& a = curve[i - 1];
-                const Point& b = curve[i];
-                float t = (x - a.x) / (b.x - a.x);
-                return a.y + t * (b.y - a.y);
-            }
-        }
-
-        return curve.back().y;
+        return curve.empty() ? fallback : fancurve::eval(curve.data(), (int)curve.size(), x);
     }
 };
 
@@ -270,32 +276,51 @@ public:
 
     bool writable() const { return writer_ && writer_->writable(); }
 
-    // the receiver's standalone settings — once, at startup, and again when
-    // an edit moves them. Every header in the block: the config wins over
-    // whatever the receiver held (see the header comment)
+    // the receiver's standalone settings (protocol.hpp CMD_FAN_STANDALONE) —
+    // once, at startup, and again when an edit moves them. Every header in
+    // the block: the config wins over whatever the receiver held (see the
+    // header comment)
     void pushStandalone(std::vector<std::unique_ptr<Sink>>& sinks)
     {
         if (!active())
             return;
 
-        uint8_t p[1 + 2 * CHANNELS];
+        uint8_t p[proto::FAN_STANDALONE_LEN];
         memset(p, proto::FAN_NONE, sizeof p);
         p[0] = (uint8_t)boostSeconds_;
+        p[proto::FAN_STANDALONE_V1_LEN] = ramp_ > 255 ? 255 : (uint8_t)(ramp_ + 0.5f);
 
         for (auto& h : headers_)
         {
             p[1 + 2 * h.slot] = (uint8_t)h.fallback;
             p[2 + 2 * h.slot] = h.boost < 0 ? proto::FAN_NONE : (uint8_t)h.boost;
+
+            uint8_t* q = p + proto::FAN_STANDALONE_V1_LEN + 1 +
+                         h.slot * (3 + 2 * proto::FAN_CURVE_POINTS);
+            q[0] = h.kind == Header::Fallback ? proto::FAN_KIND_FALLBACK
+                   : h.kind == Header::Gpio   ? proto::FAN_KIND_GPIO
+                                              : proto::FAN_KIND_HOST;
+            q[1] = h.kind == Header::Gpio ? (uint8_t)h.gpio : proto::FAN_NONE;
+            q[2] = 0;
+            if (h.kind == Header::Gpio)
+            {
+                q[2] = (uint8_t)h.curve.size();
+                for (size_t i = 0; i < h.curve.size(); i++)
+                {
+                    q[3 + 2 * i] = (uint8_t)(h.curve[i].x + 0.5f);
+                    q[4 + 2 * i] = (uint8_t)(h.curve[i].y + 0.5f);
+                }
+            }
         }
 
         for (auto& s : sinks)
             s->sendCommand(proto::CMD_FAN_STANDALONE, p, sizeof p);
     }
 
-    // one evaluation: read every header's source, run the curves, and send
-    // the live duties if they changed (or the refresh is due). Call it on the
-    // rules tick; it costs nothing when there are no headers and no phone is
-    // watching (a watcher still gets the host tiles' readings).
+    // one evaluation: read every host-run header's source, run the curves,
+    // and send the live duties if they changed (or the refresh is due). Call
+    // it on the rules tick; it costs nothing when there are no headers and no
+    // phone is watching (a watcher still gets the host tiles' readings).
     void tick(double now, std::vector<std::unique_ptr<Sink>>& sinks)
     {
         bool watch = watching(now);
@@ -344,7 +369,7 @@ public:
             // drop this; say so once rather than leave the phone showing nothing
             if (!warnedSize_)
                 fprintf(stderr, "fans: config is %zu bytes as JSON, over the dashboard's "
-                                "%d — shorten header names\n", j.size(), WIRE_MAX);
+                                "%d — shorten header names or sources\n", j.size(), WIRE_MAX);
             warnedSize_ = true;
             return;
         }
@@ -398,8 +423,11 @@ public:
         {
             fprintf(out, "  %s %-10s", h.key.c_str(), h.name.c_str());
 
-            if (h.kind == Header::Constant)
-                fprintf(out, "  constant %g%%", h.curve[0].y);
+            if (h.kind == Header::Fallback)
+                fprintf(out, "  fallback (the receiver runs it at %d%%)", h.fallback);
+            else if (h.kind == Header::Gpio)
+                fprintf(out, "  %s \"%s\" (the receiver reads the pin and runs the curve)",
+                        h.source.c_str(), h.curveText.c_str());
             else
             {
                 fprintf(out, "  %s", h.source.c_str());
@@ -409,9 +437,9 @@ public:
                     fprintf(out, " = %g%s", h.lastIn, h.kind == Header::Temp ? " °C" : " %");
                 else
                     fprintf(out, " = (no reading)");
+                fprintf(out, "  -> %d%%", (int)live_[h.slot]);
             }
 
-            fprintf(out, "  -> %d%%", (int)live_[h.slot]);
             fprintf(out, "   boost %s, fallback %d%%\n",
                     h.boost < 0 ? "none" : (std::to_string(h.boost) + "%").c_str(),
                     h.fallback);
@@ -425,8 +453,92 @@ private:
         return false;
     }
 
-    // "45:35 60:55 75:100" (or "65" for a constant) → sorted points
-    bool parseCurve(const std::string& text, bool constant, const std::string& where,
+    static const char* SOURCE_HELP()
+    {
+        return "expected fallback, gpio:N, temp, cpu_load, gpu_load, or a hwmon "
+               "chip:label / chip:pwmN";
+    }
+
+    // what a source string means: kind, and for gpio the pin, for hwmon
+    // sources the spec. "" when it parses, else what is wrong with it. Only
+    // the source fields of h are touched.
+    static std::string parseSource(const std::string& src, const std::string& sensors,
+                                   Header& h)
+    {
+        h.gpio = -1;
+        h.spec.clear();
+        h.pwmFile.clear();
+
+        if (src.empty())
+            return SOURCE_HELP();
+
+        if (src == "constant")
+            return "renamed: a fixed speed is source \"fallback\" — the header runs its "
+                   "fallback value and takes no curve (move the constant into fallback)";
+
+        if (src == "fallback")
+        {
+            h.kind = Header::Fallback;
+            return "";
+        }
+
+        if (src == "temp")
+        {
+            h.kind = Header::Temp;
+            h.spec = sensors;
+            return "";
+        }
+
+        if (src == "cpu_load")
+        {
+            h.kind = Header::CpuLoad;
+            return "";
+        }
+
+        if (src == "gpu_load")
+        {
+            h.kind = Header::GpuLoad;
+            return "";
+        }
+
+        size_t colon = src.find(':');
+        if (colon == std::string::npos)
+            return SOURCE_HELP();
+
+        std::string chip = src.substr(0, colon);
+        std::string label = src.substr(colon + 1);
+
+        if (chip == "gpio")
+        {
+            char* end = nullptr;
+            long n = label.empty() ? -1 : strtol(label.c_str(), &end, 10);
+            if (label.empty() || *end || n < 0 || n > MAX_GPIO)
+                return "gpio:N names a receiver GPIO, 0.." + std::to_string(MAX_GPIO) +
+                       " (the flasher checks it against the chip and the pins other "
+                       "features use)";
+            h.kind = Header::Gpio;
+            h.gpio = (int)n;
+            return "";
+        }
+
+        bool pwm = label.size() > 3 && label.compare(0, 3, "pwm") == 0 &&
+                   label.find_first_not_of("0123456789", 3) == std::string::npos;
+        if (pwm)
+        {
+            h.kind = Header::Pwm;
+            h.spec = chip;
+            h.pwmFile = label;
+        }
+        else
+        {
+            h.kind = Header::Temp;
+            h.spec = src;
+        }
+        return "";
+    }
+
+    // "45:35 60:55 75:100" → sorted points, for a header of kind `kind`
+    bool parseCurve(const std::string& text, Header::Kind kind, const std::string& where,
                     std::vector<Point>& out)
     {
         std::vector<std::string> toks;
@@ -445,6 +557,8 @@ private:
 
         if (toks.empty())
             return bad(where, "empty curve");
+        if ((int)toks.size() > fancurve::MAX_POINTS)
+            return bad(where, "at most " + std::to_string(fancurve::MAX_POINTS) + " points");
 
         auto number = [](const std::string& s, float& v) -> bool
         {
@@ -455,29 +569,21 @@ private:
             return end && *end == '\0';
         };
 
-        if (constant)
-        {
-            float v;
-            if (toks.size() != 1 || !number(toks[0], v))
-                return bad(where, "a constant source takes one value, e.g. \"65\"");
-            if (v < 0 || v > 100)
-                return bad(where, "percent must be 0..100");
-            out.push_back({0, v});
-            return true;
-        }
-
         for (auto& t : toks)
         {
             size_t colon = t.find(':');
             float x, y;
             if (colon == std::string::npos)
                 return bad(where, "\"" + t + "\": expected source:percent points, e.g. "
-                                  "\"45:35 60:55 75:100\" (a bare value needs "
-                                  "source \"constant\")");
+                                  "\"45:35 60:55 75:100\" (a fixed speed is source "
+                                  "\"fallback\" with no curve)");
             if (!number(t.substr(0, colon), x) || !number(t.substr(colon + 1), y))
                 return bad(where, "\"" + t + "\": not a number pair");
             if (y < 0 || y > 100)
                 return bad(where, "\"" + t + "\": percent must be 0..100");
+            if (kind == Header::Gpio && (x < 0 || x > 100 || x != floorf(x)))
+                return bad(where, "\"" + t + "\": a gpio curve's input is whole percents "
+                                  "0..100 (it travels to the receiver as bytes)");
             for (auto& p : out)
                 if (p.x == x)
                     return bad(where, "two points at " + t.substr(0, colon));
@@ -504,8 +610,8 @@ private:
             if (m.first == "enabled")
                 return bad(where + ".enabled",
                            "retired — a header listed here is always driven; delete "
-                           "the header's block to drop it, or give it a constant "
-                           "curve of 0 to stop the fan");
+                           "the header's block to drop it, or give it source "
+                           "\"fallback\" with a fallback of 0 to stop the fan");
             bool known = false;
             for (const char* k : KEYS)
                 known |= m.first == k;
@@ -513,10 +619,11 @@ private:
                 return bad(where + "." + m.first, "unknown key");
         }
         for (const char* k : KEYS)
-            if (!v.find(k))
+            if (strcmp(k, "curve") != 0 && !v.find(k))
                 return bad(where, std::string("missing \"") + k +
-                                      "\" (every header has name, source, "
-                                      "curve, boost, fallback)");
+                                      "\" (every header has name, source, boost, "
+                                      "fallback, and a curve unless the source is "
+                                      "fallback)");
 
         const json::Value& name = *v.find("name");
         if (!name.isString())
@@ -524,48 +631,31 @@ private:
         h.name = name.text;
 
         const json::Value& src = *v.find("source");
-        if (!src.isString() || src.text.empty())
-            return bad(where + ".source", "expected constant, temp, cpu_load, "
-                                          "gpu_load, or a hwmon chip:label / chip:pwmN");
+        if (!src.isString())
+            return bad(where + ".source", SOURCE_HELP());
         h.source = src.text;
+        std::string e = parseSource(h.source, sensors, h);
+        if (!e.empty())
+            return bad(where + ".source", e);
 
-        if (h.source == "constant")
-            h.kind = Header::Constant;
-        else if (h.source == "temp")
+        const json::Value* curve = v.find("curve");
+        if (h.kind == Header::Fallback)
         {
-            h.kind = Header::Temp;
-            h.spec = sensors;
+            if (curve)
+                return bad(where + ".curve", "a fallback source takes no curve — the header "
+                                             "runs its fallback value; delete this key");
         }
-        else if (h.source == "cpu_load")
-            h.kind = Header::CpuLoad;
-        else if (h.source == "gpu_load")
-            h.kind = Header::GpuLoad;
         else
         {
-            size_t colon = h.source.find(':');
-            std::string label = colon == std::string::npos ? "" : h.source.substr(colon + 1);
-            bool pwm = label.size() > 3 && label.compare(0, 3, "pwm") == 0 &&
-                       label.find_first_not_of("0123456789", 3) == std::string::npos;
-            if (pwm)
-            {
-                h.kind = Header::Pwm;
-                h.spec = h.source.substr(0, colon);
-                h.pwmFile = label;
-            }
-            else
-            {
-                h.kind = Header::Temp;
-                h.spec = h.source;
-            }
+            if (!curve)
+                return bad(where, "missing \"curve\" (source:percent points, e.g. "
+                                  "\"45:35 60:55 75:100\")");
+            if (!curve->isString())
+                return bad(where + ".curve", "expected a string like \"45:35 60:55 75:100\"");
+            if (!parseCurve(curve->text, h.kind, where + ".curve", h.curve))
+                return false;
+            h.curveText = curveToText(h.curve);
         }
-
-        const json::Value& curve = *v.find("curve");
-        if (!curve.isString() && !curve.isNumber())
-            return bad(where + ".curve", "expected a string like \"45:35 60:55 75:100\"");
-        if (!parseCurve(json::toString(curve), h.kind == Header::Constant,
-                        where + ".curve", h.curve))
-            return false;
-        h.curveText = curveToText(h.curve, h.kind == Header::Constant);
 
         const json::Value& boost = *v.find("boost");
         if (boost.type == json::Value::Type::Null)
@@ -656,9 +746,9 @@ private:
     {
         switch (h.kind)
         {
-            case Header::Constant:
-                v = 0;
-                return true;
+            case Header::Fallback:
+            case Header::Gpio:
+                return false; // the receiver's, never read here
 
             case Header::CpuLoad:
                 v = cpuLoad_;
@@ -703,16 +793,13 @@ private:
         return false;
     }
 
-    // one header's duty this tick: read, hysteresis (temperatures), curve,
-    // ramp. A header whose source can't be read runs its fallback.
+    // one header's live duty this tick: read, hysteresis (temperatures),
+    // curve, ramp. A header whose source can't be read runs its fallback; a
+    // header the receiver runs itself is FAN_NONE — not this side's to drive.
     int compute(Header& h, float dt)
     {
-        if (h.kind == Header::Constant)
-        {
-            h.out = h.curve[0].y;
-            h.haveOut = true;
-            return (int)(h.out + 0.5f);
-        }
+        if (!h.hostRun())
+            return proto::FAN_NONE;
 
         float in;
         h.lastInOk = readInput(h, in);
@@ -735,18 +822,7 @@ private:
             h.effIn = in;
         h.haveIn = true;
 
-        float target = h.eval(h.effIn);
-
-        // ramp: speed-ups are immediate (cooling first), slow-downs are eased
-        // at `ramp` percent per second so a curve never hunts audibly
-        if (!h.haveOut || target >= h.out || ramp_ <= 0)
-            h.out = target;
-        else
-        {
-            h.out -= ramp_ * dt;
-            if (h.out < target)
-                h.out = target;
-        }
+        h.out = fancurve::ramp(h.eval(h.effIn), h.out, h.haveOut, ramp_, dt);
         h.haveOut = true;
 
         return (int)(h.out + 0.5f);
@@ -760,19 +836,7 @@ private:
 
     bool watching(double now) const { return watchUntil_ > 0 && now <= watchUntil_; }
 
-    static const char* kindName(Header::Kind k)
-    {
-        switch (k)
-        {
-            case Header::Temp: return "temp";
-            case Header::Pwm: return "pwm";
-            case Header::CpuLoad: return "cpu_load";
-            case Header::GpuLoad: return "gpu_load";
-            default: return "constant";
-        }
-    }
-
-    static std::string curveToText(const std::vector<Point>& c, bool constant)
+    static std::string curveToText(const std::vector<Point>& c)
     {
         char buf[32];
         std::string out;
@@ -780,10 +844,7 @@ private:
         {
             if (!out.empty())
                 out += ' ';
-            if (constant)
-                snprintf(buf, sizeof buf, "%g", (double)p.y);
-            else
-                snprintf(buf, sizeof buf, "%g:%g", (double)p.x, (double)p.y);
+            snprintf(buf, sizeof buf, "%g:%g", (double)p.x, (double)p.y);
             out += buf;
         }
         return out;
@@ -801,9 +862,10 @@ private:
         for (auto& h : headers_)
         {
             j += ",\"" + h.key + "\":{\"n\":\"" + cfgedit::escape(h.name) + "\",\"s\":\"" +
-                 kindName(h.kind) + "\"";
-            j += ",\"c\":\"" + h.curveText + "\"" +
-                 (h.boost < 0 ? std::string() : ",\"b\":" + std::to_string(h.boost)) +
+                 cfgedit::escape(h.source) + "\"";
+            if (h.kind != Header::Fallback)
+                j += ",\"c\":\"" + h.curveText + "\"";
+            j += (h.boost < 0 ? std::string() : ",\"b\":" + std::to_string(h.boost)) +
                  ",\"f\":" + std::to_string(h.fallback) + "}";
         }
         return j + "}";
@@ -813,7 +875,8 @@ private:
     // cards: { "temp": 58.3, "cpu": 37, "gpu": 62,
     //          "header2": { "in": 58.3, "duty": 52 }, ... }
     // — a reading is absent when there is none, "in" when the header has no
-    // input (a constant, a sensor not found)
+    // input (a sensor not found), and a header the receiver runs (fallback,
+    // gpio) has no entry at all: the receiver's own view carries those
     std::string telemetryJson() const
     {
         char buf[64];
@@ -827,8 +890,10 @@ private:
             snprintf(buf, sizeof buf, "\"gpu\":%d", (int)(gpuLoad_ + 0.5f)), add(buf);
         for (auto& h : headers_)
         {
+            if (!h.hostRun())
+                continue;
             std::string e = "\"" + h.key + "\":{";
-            if (h.kind != Header::Constant && h.lastInOk)
+            if (h.lastInOk)
                 snprintf(buf, sizeof buf, "\"in\":%.1f,", h.lastIn), e += buf;
             snprintf(buf, sizeof buf, "\"duty\":%d}", (int)live_[h.slot]);
             add((e + buf).c_str());
@@ -849,10 +914,12 @@ private:
     }
 
     // One header's editable fields as text — what a JSON edit reduces to, so
-    // the config's own parseCurve and range checks validate every source.
+    // the config's own parseSource/parseCurve and range checks validate every
+    // edit exactly as they validate the file.
     struct HeaderEdit
     {
         Header* h;
+        std::string source;
         std::string curve;
         int boost;    // -1 = none
         int fallback;
@@ -878,13 +945,43 @@ private:
         if (hyst < 0 || ramp < 0 || boostSecs < 0 || boostSecs > 255)
             return bad(where, "hysteresis, ramp or boost_seconds out of range");
 
-        std::vector<std::vector<Point>> curves;
+        // each edit's source and curve, parsed into a scratch copy of its header
+        std::vector<Header> next;
         for (auto& e : edits)
         {
             std::string at = where + "." + e.h->key;
-            curves.emplace_back();
-            if (!parseCurve(e.curve, e.h->kind == Header::Constant, at + ".c", curves.back()))
-                return false;
+            next.push_back(*e.h);
+            Header& t = next.back();
+            bool moved = e.source != e.h->source;
+
+            if (moved)
+            {
+                std::string err = parseSource(e.source, sensors_, t);
+                if (!err.empty())
+                    return bad(at + ".s", err);
+                t.source = e.source;
+                t.path.clear();
+                if (t.kind == Header::Temp || t.kind == Header::Pwm)
+                {
+                    // a hand in the file may name a sensor that turns up later;
+                    // a phone pointing at one that isn't there is told now
+                    resolve(t);
+                    if (t.path.empty())
+                        return bad(at + ".s", "\"" + e.source + "\" is not a sensor on this "
+                                              "machine (nothing in /sys/class/hwmon matches)");
+                }
+            }
+
+            t.curve.clear();
+            if (t.kind != Header::Fallback)
+            {
+                if (e.curve.empty())
+                    return bad(at + ".c", "source \"" + t.source + "\" needs a curve");
+                if (!parseCurve(e.curve, t.kind, at + ".c", t.curve))
+                    return false;
+            }
+            t.curveText = curveToText(t.curve);
+
             if (e.boost < -1 || e.boost > 100)
                 return bad(at + ".b", "expected a percent 0..100, or null");
             if (e.fallback < 0 || e.fallback > 100)
@@ -893,29 +990,31 @@ private:
             // hold any name, and a curve edit echoes it back untouched
             if (e.name != e.h->name && (e.name.empty() || utf8Chars(e.name) > NAME_CHARS))
                 return bad(at + ".n", "a name is 1.." + std::to_string(NAME_CHARS) + " characters");
+            t.boost = e.boost;
+            t.fallback = e.fallback;
+            t.name = e.name;
+
+            if (moved)
+            {
+                // a fresh source starts its filters over; the ramp otherwise
+                // eases from the old duty to the new curve
+                t.haveIn = t.haveOut = false;
+                t.reported = false;
+            }
         }
 
         hysteresis_ = hyst;
         ramp_ = ramp;
         boostSeconds_ = boostSecs;
         for (size_t i = 0; i < edits.size(); i++)
-        {
-            Header& h = *edits[i].h;
-            h.curve = std::move(curves[i]);
-            h.curveText = curveToText(h.curve, h.kind == Header::Constant);
-            h.boost = edits[i].boost;
-            h.fallback = edits[i].fallback;
-            h.name = edits[i].name;
-            // haveOut stays: the ramp eases from the old duty to the new curve
-        }
+            *edits[i].h = std::move(next[i]);
 
         return true;
     }
 
     // apply a phone's partial edit (the shape in the header comment): every
-    // key optional, a header's c/b/f each optional (the rest keeps its value),
-    // the read-only keys ignored, anything else an error. Validated as a whole
-    // by applyValues.
+    // key optional, a header's s/c/b/f/n each optional (the rest keeps its
+    // value), anything else an error. Validated as a whole by applyValues.
     bool applyJson(const json::Value& root, const std::string& where)
     {
         float hyst = hysteresis_, ramp = ramp_;
@@ -948,14 +1047,14 @@ private:
                 if (!h)
                     return bad(where + "." + k, "no such header in the config");
 
-                HeaderEdit e{h, h->curveText, h->boost, h->fallback, h->name};
+                HeaderEdit e{h, h->source, h->curveText, h->boost, h->fallback, h->name};
                 for (auto& f : v.members)
                 {
                     const std::string& fk = f.first;
                     const json::Value& fv = f.second;
-                    if (fk == "s")
-                        continue;
-                    if (fk == "n" && fv.isString())
+                    if (fk == "s" && fv.isString())
+                        e.source = fv.text;
+                    else if (fk == "n" && fv.isString())
                         e.name = fv.text;
                     else if (fk == "c" && (fv.isString() || fv.isNumber()))
                         e.curve = json::toString(fv);
@@ -1009,12 +1108,18 @@ private:
         return writeConfig();
     }
 
-    // the receiver's standalone settings as one comparable string
+    // the receiver's standalone settings as one comparable string — what
+    // pushStandalone would send
     std::string standaloneKey() const
     {
-        std::string k = std::to_string(boostSeconds_);
+        std::string k = std::to_string(boostSeconds_) + "/" + std::to_string(ramp_);
         for (auto& h : headers_)
-            k += "|" + std::to_string(h.boost) + ":" + std::to_string(h.fallback);
+        {
+            k += "|" + std::to_string(h.boost) + ":" + std::to_string(h.fallback) + ":" +
+                 std::to_string((int)h.kind);
+            if (h.kind == Header::Gpio)
+                k += ":" + std::to_string(h.gpio) + ":" + h.curveText;
+        }
         return k;
     }
 
@@ -1036,7 +1141,23 @@ private:
             if (!hv.isObject())
                 continue;
             cfgedit::member(hv, "name") = cfgedit::string(h.name);
-            cfgedit::member(hv, "curve") = cfgedit::string(h.curveText);
+            cfgedit::member(hv, "source") = cfgedit::string(h.source);
+            if (h.kind == Header::Fallback)
+                cfgedit::erase(hv, "curve");
+            else
+            {
+                // a curve where the file had none goes after source, where a
+                // hand would write it, not at the end
+                if (!hv.find("curve"))
+                    for (size_t i = 0; i < hv.members.size(); i++)
+                        if (hv.members[i].first == "source")
+                        {
+                            hv.members.insert(hv.members.begin() + i + 1,
+                                              std::make_pair(std::string("curve"), json::Value()));
+                            break;
+                        }
+                cfgedit::member(hv, "curve") = cfgedit::string(h.curveText);
+            }
             cfgedit::member(hv, "boost") = h.boost < 0 ? json::Value() : cfgedit::number(h.boost);
             cfgedit::member(hv, "fallback") = cfgedit::number(h.fallback);
         }

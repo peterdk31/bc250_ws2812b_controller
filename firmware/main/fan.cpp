@@ -9,12 +9,18 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "esp_partition.h"
+#include "esp_timer.h"
 #include "nvs.h"
+#include "soc/gpio_reg.h"
+#include "soc/soc.h"
+#include "soc/soc_caps.h"
 
 #include "dbglog.hpp"
+#include "fancurve.hpp"
 #include "link.hpp"
 #include "power_switch.hpp"
 #include "protocol.hpp"
+#include "render.hpp"
 #include "util.hpp"
 
 #define FLOG(fmt, ...) dbglog::line("fan: " fmt, ##__VA_ARGS__)
@@ -30,6 +36,7 @@ static const ledc_timer_bit_t PWM_RES = LEDC_TIMER_11_BIT; // max at 25 kHz off
 static const uint32_t PWM_MAX = 1 << 11; // LEDC duty is 0..2^res INCLUSIVE, so
                                          // 100% maps to exactly 2048 (full on)
 static const int MAX_FANS = proto::FAN_CHANNELS; // = LEDC channels on the C3
+static const int POINTS = proto::FAN_CURVE_POINTS;
 static const uint8_t NONE = proto::FAN_NONE;     // "not set" in every byte slot
 
 // how long the live duties outlive the daemon's last CMD_FAN_LIVE. The daemon
@@ -43,24 +50,46 @@ static const uint32_t LIVE_TIMEOUT_MS = 15000;
 // during re-enumeration silence SOF for ~1 s, and those are not power cycles
 static const uint32_t HOST_GONE_MS = 3000;
 
+// the gpio sources' sampler (see sampleInputs): how often a reading is
+// taken, and how long each one looks at the pins. A PC fan PWM is 21..28 kHz
+// (a 36..48 µs period), so a 2 ms window averages some fifty periods; the
+// input is read as a register, so one window covers every input pin at once
+static const uint32_t IN_PERIOD_MS = 250;
+static const int64_t IN_WINDOW_US = 2000;
+
 // ---- the standalone settings (fancfg, NVS, CMD_FAN_STANDALONE) ----
 
 // One shape on every side: what a header runs when the daemon isn't driving
-// it. Its wire form (CMD_FAN_STANDALONE's payload, and the NVS blob) is
-// boostSecs(1) then per header duty(1) boost(1).
+// it, and which headers this board runs a curve for itself. Its wire form
+// (CMD_FAN_STANDALONE's payload, the NVS blob, the tail of the fancfg blob —
+// see protocol.hpp) is
+//
+//     boostSecs(1) then per header duty(1) boost(1)                 (V1_LEN)
+//     ramp(1) then per header kind(1) gpio(1) npts(1) pts[POINTS][2]
 struct Standalone
 {
     uint8_t boostSecs = 5;
     uint8_t duty[MAX_FANS];  // resting duty percent per header
     uint8_t boost[MAX_FANS]; // boost duty percent, NONE = sits the boost out
+    uint8_t ramp = 5;        // slow-down rate, whole percent per second (0 = instant)
+    uint8_t kind[MAX_FANS];  // proto::FAN_KIND_*
+    uint8_t gpio[MAX_FANS];  // a gpio header's input pin, else NONE
+    uint8_t npts[MAX_FANS];  // a gpio header's curve: points (0 = none)
+    uint8_t pts[MAX_FANS][POINTS][2]; // (input %, duty %), sorted by input
+
+    static const uint16_t WIRE_LEN = proto::FAN_STANDALONE_LEN;
+    static const uint16_t V1_LEN = proto::FAN_STANDALONE_V1_LEN;
+    static const uint16_t PER_HEADER = 3 + 2 * POINTS;
 
     Standalone()
     {
         memset(duty, 100, sizeof duty); // full is the safe cooling answer
         memset(boost, NONE, sizeof boost);
+        memset(kind, proto::FAN_KIND_HOST, sizeof kind);
+        memset(gpio, NONE, sizeof gpio);
+        memset(npts, 0, sizeof npts);
+        memset(pts, 0, sizeof pts);
     }
-
-    static const uint16_t WIRE_LEN = 1 + 2 * MAX_FANS;
 
     void encode(uint8_t* p) const
     {
@@ -70,11 +99,38 @@ struct Standalone
             p[1 + 2 * i] = duty[i];
             p[2 + 2 * i] = boost[i];
         }
+        p[V1_LEN] = ramp;
+        for (int i = 0; i < MAX_FANS; i++)
+        {
+            uint8_t* q = p + V1_LEN + 1 + i * PER_HEADER;
+            q[0] = kind[i];
+            q[1] = gpio[i];
+            q[2] = npts[i];
+            memcpy(q + 3, pts[i], 2 * POINTS);
+        }
     }
 
-    // merge a wire blob in: a header whose duty is NONE is "not the daemon's
-    // to drive" and keeps what it has — both fields
-    void merge(const uint8_t* p)
+    // a curve as it arrives, checked and clamped: 1..POINTS points, inputs
+    // strictly rising, duties 0..100. False = keep what was there
+    static bool curveOk(uint8_t n, const uint8_t* p)
+    {
+        if (n < 1 || n > POINTS)
+            return false;
+        for (int j = 0; j < n; j++)
+        {
+            if (p[2 * j] > 100 || p[2 * j + 1] > 100)
+                return false;
+            if (j && p[2 * j] <= p[2 * j - 2])
+                return false;
+        }
+        return true;
+    }
+
+    // merge a wire blob in: `len` is V1_LEN (an older daemon: duties and
+    // boosts only) or WIRE_LEN. A header whose duty is NONE is "not the
+    // daemon's to drive" and keeps what it has — every field; a kind of NONE
+    // keeps the source part
+    void merge(const uint8_t* p, uint16_t len)
     {
         boostSecs = p[0];
         for (int i = 0; i < MAX_FANS; i++)
@@ -85,13 +141,41 @@ struct Standalone
             uint8_t b = p[2 + 2 * i];
             boost[i] = b == NONE ? NONE : b > 100 ? 100 : b;
         }
+
+        if (len < WIRE_LEN)
+            return;
+
+        if (p[V1_LEN] != NONE)
+            ramp = p[V1_LEN];
+        for (int i = 0; i < MAX_FANS; i++)
+        {
+            const uint8_t* q = p + V1_LEN + 1 + i * PER_HEADER;
+            if (p[1 + 2 * i] == NONE || q[0] == NONE)
+                continue;
+            setSource(i, q[0], q[1], q[2], q + 3);
+        }
+    }
+
+    // one header's source part; a bad curve leaves the header on its fallback
+    void setSource(int i, uint8_t k, uint8_t g, uint8_t n, const uint8_t* p)
+    {
+        kind[i] = k > proto::FAN_KIND_HOST ? proto::FAN_KIND_HOST : k;
+        gpio[i] = kind[i] == proto::FAN_KIND_GPIO ? g : NONE;
+        npts[i] = 0;
+        memset(pts[i], 0, sizeof pts[i]);
+        if (kind[i] == proto::FAN_KIND_GPIO && curveOk(n, p))
+        {
+            npts[i] = n;
+            memcpy(pts[i], p, 2 * n);
+        }
     }
 
     bool operator==(const Standalone& o) const
     {
-        return boostSecs == o.boostSecs &&
-               memcmp(duty, o.duty, sizeof duty) == 0 &&
-               memcmp(boost, o.boost, sizeof boost) == 0;
+        uint8_t a[WIRE_LEN], b[WIRE_LEN];
+        encode(a);
+        o.encode(b);
+        return memcmp(a, b, WIRE_LEN) == 0;
     }
 };
 
@@ -100,22 +184,29 @@ struct Standalone
 // Same scheme as the power switch's `pwrcfg` (see power_switch.cpp): wiring
 // in its own 4 KB partition, written at flash time by `make flash` /
 // `make flash-fan` from the daemon config's "fans" block (tools/fancfg.py
-// encodes it, and must match decode() below). Two layouts are understood:
+// encodes it, and must match decode() below). Three layouts are understood:
 //
-//     "FAN2" magic, then
+//     "FAN3" magic, then
 //     enabled(1) boost_secs(1) pin[6] duty[6] boost[6]
+//     ramp(1), then per header kind(1) gpio(1) npts(1) pts[POINTS][2]
+//
+//     "FAN2" magic: the first line of FAN3 alone
 //
 //     "FAN1" magic (the original), then
 //     enabled(1) pin[6] duty[6] boost_duty(1) boost_secs(1)
 //
 // Slot i is header i+1. Pins are GPIO numbers, 0xFF = header not wired (a
-// header the config doesn't list). Duties are percent, >100 clamps to 100 — so erased flash
-// in an appended field's place reads as a sane full-speed value. boost 0xFF =
-// that header sits the boost out; FAN1's single boost_duty applied to every
-// header. An erased partition (no magic) leaves the feature off.
+// header the config doesn't list). Duties are percent, >100 clamps to 100 —
+// so erased flash in an appended field's place reads as a sane full-speed
+// value. boost 0xFF = that header sits the boost out; FAN1's single
+// boost_duty applied to every header. FAN3's tail is the Standalone wire
+// form's second part: a kind of 0xFF (erased) means host — the header runs
+// its fallback until the daemon says otherwise, exactly what FAN2 meant. An
+// erased partition (no magic) leaves the feature off.
 
-static const uint16_t WIRE_LEN_V1 = 15;
-static const uint16_t WIRE_LEN_V2 = 20;
+static const uint16_t BODY_LEN_V1 = 15;
+static const uint16_t BODY_LEN_V2 = 20;
+static const uint16_t BODY_LEN_V3 = BODY_LEN_V2 + 1 + MAX_FANS * Standalone::PER_HEADER;
 
 struct Config
 {
@@ -129,7 +220,8 @@ struct Config
         { return (v == 0xFF || v >= GPIO_NUM_MAX) ? -1 : (int8_t)v; };
         auto pct = [](uint8_t v) -> uint8_t { return v > 100 ? 100 : v; };
 
-        if (memcmp(b, "FAN2", 4) == 0 && len >= 4 + WIRE_LEN_V2)
+        bool v3 = memcmp(b, "FAN3", 4) == 0;
+        if ((v3 || memcmp(b, "FAN2", 4) == 0) && len >= 4 + BODY_LEN_V2)
         {
             const uint8_t* p = b + 4;
             enabled = p[0] != 0;
@@ -140,10 +232,23 @@ struct Config
                 sa.duty[i] = pct(p[8 + i]);
                 sa.boost[i] = p[14 + i] == NONE ? NONE : pct(p[14 + i]);
             }
+
+            if (v3 && len >= 4 + BODY_LEN_V3)
+            {
+                const uint8_t* t = p + BODY_LEN_V2;
+                if (t[0] != NONE)
+                    sa.ramp = t[0];
+                for (int i = 0; i < MAX_FANS; i++)
+                {
+                    const uint8_t* q = t + 1 + i * Standalone::PER_HEADER;
+                    if (q[0] != NONE)
+                        sa.setSource(i, q[0], q[1], q[2], q + 3);
+                }
+            }
             return true;
         }
 
-        if (memcmp(b, "FAN1", 4) == 0 && len >= 4 + WIRE_LEN_V1)
+        if (memcmp(b, "FAN1", 4) == 0 && len >= 4 + BODY_LEN_V1)
         {
             const uint8_t* p = b + 4;
             enabled = p[0] != 0;
@@ -175,7 +280,7 @@ static bool loadConfig(Config& c, bool& partitionFound)
     if (!part)
         return false;
 
-    uint8_t b[4 + WIRE_LEN_V2];
+    uint8_t b[4 + BODY_LEN_V3];
     if (esp_partition_read(part, 0, b, sizeof b) != ESP_OK)
         return false;
 
@@ -188,22 +293,41 @@ static nvs_handle_t g_nvs = 0;
 static bool g_wired[MAX_FANS];  // header i has a pin and an LEDC channel (= i)
 static Standalone g_sa;         // standalone settings in force (flash
                                 // defaults, overridden by a persisted push)
+static volatile uint32_t g_saSeq = 1; // bumps when g_sa changes (standalone())
 static uint8_t g_live[MAX_FANS]; // the daemon's live duties, NONE = not driven
 static uint32_t g_liveMs = 0;    // millis() of the last live push
 static bool g_hold = false;      // host announced shutdown: live never expires
 static bool g_started = false;   // gate for the setters; set before the led_rx
                                  // task exists, so never raced
 
+// the gpio sources: the pin each header samples (-1 = none: not a gpio
+// header, or a pin this board can't read), the last reading, and the curve's
+// ramped output
+static int8_t g_inPin[MAX_FANS];
+static uint8_t g_in[MAX_FANS];    // input percent, NONE = no reading
+static uint8_t g_curve[MAX_FANS]; // the curve's duty, NONE = none in force
+static float g_curveF[MAX_FANS];  // ...and its ramp state
+static bool g_curveHave[MAX_FANS];
+static uint32_t g_lastSample = 0;
+static uint8_t g_applied[MAX_FANS]; // the duty last written to each channel
+
 // host pushes in flight from the led_rx task to this one — each whole blob
 // moves under one short critical section, the hostreq pattern
 static portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t g_pendSa[Standalone::WIRE_LEN];
-static bool g_pendSaSet = false;
+static uint16_t g_pendSaLen = 0; // 0 = none pending
 static uint8_t g_pendLive[MAX_FANS];
 static bool g_pendLiveSet = false;
 static bool g_pendShutdown = false;
 static uint8_t g_pendFb[MAX_FANS]; // the phone's per-header fallback edits,
                                    // NONE = none pending for that header
+struct PendSource                  // the phone's per-header source edits
+{
+    bool set;
+    uint8_t kind, gpio, npts;
+    uint8_t pts[2 * POINTS];
+};
+static PendSource g_pendSrc[MAX_FANS];
 
 // boost state (see boostCheck): with the power switch present, an armed
 // one-shot keyed to its power-on events; without it, an edge detector on USB
@@ -223,11 +347,14 @@ static uint32_t dutyOf(uint8_t pct)
     return ((uint32_t)pct * PWM_MAX + 50) / 100;
 }
 
-// the duty header i runs right now: boost, then live, then resting
+// the duty header i runs right now: boost, then this board's own curve,
+// then the daemon's live duty, then resting
 static uint8_t effective(int i)
 {
     if (g_boosting && g_sa.boost[i] != NONE)
         return g_sa.boost[i];
+    if (g_curve[i] != NONE)
+        return g_curve[i];
     if (g_live[i] != NONE)
         return g_live[i];
     return g_sa.duty[i];
@@ -239,8 +366,11 @@ static void applyAll()
     {
         if (!g_wired[i])
             continue;
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)i,
-                      dutyOf(effective(i)));
+        uint8_t d = effective(i);
+        if (d == g_applied[i])
+            continue;
+        g_applied[i] = d;
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)i, dutyOf(d));
         ledc_update_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)i);
     }
 }
@@ -259,6 +389,168 @@ static const char* fmtDuties(const uint8_t* d, char* buf, size_t n,
             at += snprintf(buf + at, n - at, "%s%u", i ? "/" : "", d[i]);
     }
     return buf;
+}
+
+// ---- the gpio sources ----
+
+// can this board read a PWM on GPIO g? The flasher checks a configured pin
+// against the same facts (tools/fancfg.py, pincheck.py); this is the check
+// for a pin that arrives at runtime — a daemon push, a phone edit — and the
+// one place the phone's edit can be refused with a reason. Pins that would
+// hurt: another feature's, one of our own outputs, the flash pads, the host
+// link, and the boot straps (a PWM at 0 % is a pin held low at reset).
+static bool inputPinFree(int g, const char** why)
+{
+    const char* r = nullptr;
+    if (g < 0 || g >= GPIO_NUM_MAX || !GPIO_IS_VALID_GPIO(g))
+        r = "not a GPIO on this chip";
+    else if (pwr::usesPin(g))
+        r = "the power switch's pin";
+    else if (render::up() && render::pin() == g)
+        r = "the strip's data pin"; // known once the strip device exists
+    else
+    {
+        for (int i = 0; i < MAX_FANS; i++)
+            if (g_cfg.pin[i] == g)
+                r = "a fan header's PWM output";
+    }
+#if CONFIG_IDF_TARGET_ESP32C3
+    if (!r && g >= 11 && g <= 17)
+        r = "an SPI flash pad";
+    else if (!r && (g == 18 || g == 19))
+        r = "the USB pair (the host link)";
+    else if (!r && (g == 8 || g == 9))
+        r = "a boot strap pin";
+#elif CONFIG_IDF_TARGET_ESP32
+    if (!r && g >= 6 && g <= 11)
+        r = "an SPI flash pad";
+    else if (!r && (g == 1 || g == 3))
+        r = "UART0 (the host link)";
+    else if (!r && (g == 0 || g == 2 || g == 5 || g == 12 || g == 15))
+        r = "a boot strap pin";
+#endif
+    if (why)
+        *why = r;
+    return r == nullptr;
+}
+
+// (re)configure the input pins after the standalone settings moved: every
+// wired gpio header with a usable pin gets it as an input with the internal
+// pull-up (a fan header's PWM is open-drain; unplugged, the pin then reads
+// high = 100 % = the fan spec's own answer to a missing signal). A pin no
+// longer used stays an input, which is harmless.
+static void setupInputs()
+{
+    for (int i = 0; i < MAX_FANS; i++)
+    {
+        int8_t was = g_inPin[i];
+        g_inPin[i] = -1;
+        if (!g_wired[i] || g_sa.kind[i] != proto::FAN_KIND_GPIO)
+            continue;
+
+        const char* why = nullptr;
+        if (!inputPinFree(g_sa.gpio[i], &why))
+        {
+            // once per change of settings, which is the only time this runs
+            FLOG("header%d: source gpio:%u refused — %s; running the fallback",
+                 i + 1, g_sa.gpio[i], why);
+            continue;
+        }
+
+        g_inPin[i] = (int8_t)g_sa.gpio[i];
+        if (was == g_inPin[i])
+            continue;
+
+        gpio_config_t io = {};
+        io.pin_bit_mask = 1ULL << g_inPin[i];
+        io.mode = GPIO_MODE_INPUT;
+        io.pull_up_en = GPIO_PULLUP_ENABLE;
+        io.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        io.intr_type = GPIO_INTR_DISABLE;
+        if (gpio_config(&io) != ESP_OK)
+        {
+            FLOG("header%d: gpio%d input init FAILED — running the fallback",
+                 i + 1, g_inPin[i]);
+            g_inPin[i] = -1;
+            continue;
+        }
+        FLOG("header%d reads its PWM input on gpio%d (%u-point curve)", i + 1,
+             g_inPin[i], g_sa.npts[i]);
+        g_curveHave[i] = false;
+    }
+}
+
+// one reading of every input pin: a busy window of IN_WINDOW_US reading the
+// GPIO input register, counting the samples each pin was high. The loop is a
+// register read and a few bit tests, so a 2 ms window is tens of thousands
+// of samples — well under a percent of jitter — and a task that preempts it
+// mid-window only pauses the count at a random phase, which biases nothing.
+// No interrupts and no peripheral: the PWM's frequency is irrelevant, and a
+// constant level reads as 0 or 100 like any other duty.
+static void sampleInputs()
+{
+    bool any = false;
+    for (int i = 0; i < MAX_FANS; i++)
+        any |= g_inPin[i] >= 0;
+    if (!any)
+    {
+        memset(g_in, NONE, sizeof g_in);
+        return;
+    }
+
+    uint32_t hi[MAX_FANS] = {};
+    uint32_t total = 0;
+    int64_t end = esp_timer_get_time() + IN_WINDOW_US;
+    do
+    {
+        for (int k = 0; k < 16; k++)
+        {
+            uint32_t r0 = REG_READ(GPIO_IN_REG);
+#if SOC_GPIO_PIN_COUNT > 32
+            uint32_t r1 = REG_READ(GPIO_IN1_REG);
+#endif
+            for (int i = 0; i < MAX_FANS; i++)
+            {
+                int p = g_inPin[i];
+                if (p < 0)
+                    continue;
+#if SOC_GPIO_PIN_COUNT > 32
+                hi[i] += p >= 32 ? (r1 >> (p - 32)) & 1 : (r0 >> p) & 1;
+#else
+                hi[i] += (r0 >> p) & 1;
+#endif
+            }
+            total++;
+        }
+    } while (esp_timer_get_time() < end);
+
+    for (int i = 0; i < MAX_FANS; i++)
+        g_in[i] = g_inPin[i] < 0 ? NONE : (uint8_t)((hi[i] * 100 + total / 2) / total);
+}
+
+// the board's own curves: each gpio header's reading through its curve, then
+// the ramp, into g_curve. A header with no reading or no curve is NONE and
+// falls through to the live duty or the fallback.
+static void runCurves(float dt)
+{
+    for (int i = 0; i < MAX_FANS; i++)
+    {
+        if (!g_wired[i] || g_inPin[i] < 0 || g_in[i] == NONE || g_sa.npts[i] == 0)
+        {
+            g_curve[i] = NONE;
+            g_curveHave[i] = false;
+            continue;
+        }
+
+        fancurve::Point pts[POINTS];
+        for (int j = 0; j < g_sa.npts[i]; j++)
+            pts[j] = {(float)g_sa.pts[i][j][0], (float)g_sa.pts[i][j][1]};
+
+        float target = fancurve::eval(pts, g_sa.npts[i], (float)g_in[i]);
+        g_curveF[i] = fancurve::ramp(target, g_curveF[i], g_curveHave[i], (float)g_sa.ramp, dt);
+        g_curveHave[i] = true;
+        g_curve[i] = (uint8_t)(g_curveF[i] + 0.5f);
+    }
 }
 
 // ---- NVS ----
@@ -284,7 +576,7 @@ static void loadSaved()
         return; // fancfg was re-flashed with new values since this was saved
 
     Standalone s = g_cfg.sa;
-    s.merge(saved);
+    s.merge(saved, sizeof saved);
     g_sa = s;
 }
 
@@ -296,66 +588,91 @@ static void persist()
     nvs_set_blob(g_nvs, "sa", sa, sizeof sa);
     nvs_set_blob(g_nvs, "sabase", base, sizeof base);
     nvs_commit(g_nvs);
+    g_saSeq = g_saSeq + 1;
 }
 
 // ---- the task ----
 
-// drain whatever the host pushed since the last tick. Standalone settings
-// persist (writes only on change, so a daemon restarting with the same config
-// costs no flash wear); live duties never do
+// drain whatever the host or the phone pushed since the last tick. Standalone
+// settings persist (writes only on change, so a daemon restarting with the
+// same config costs no flash wear); live duties never do
 static void drainPending(uint32_t now)
 {
     uint8_t sa[Standalone::WIRE_LEN], live[MAX_FANS], fb[MAX_FANS];
-    bool saSet, liveSet, shutdown, fbSet = false;
+    PendSource src[MAX_FANS];
+    uint16_t saLen;
+    bool liveSet, shutdown, fbSet = false, srcSet = false;
 
     taskENTER_CRITICAL(&g_mux);
-    saSet = g_pendSaSet;
+    saLen = g_pendSaLen;
     liveSet = g_pendLiveSet;
     shutdown = g_pendShutdown;
-    if (saSet)
-        memcpy(sa, g_pendSa, sizeof sa);
+    if (saLen)
+        memcpy(sa, g_pendSa, saLen);
     if (liveSet)
         memcpy(live, g_pendLive, sizeof live);
     memcpy(fb, g_pendFb, sizeof fb);
     memset(g_pendFb, NONE, sizeof g_pendFb);
-    g_pendSaSet = g_pendLiveSet = g_pendShutdown = false;
+    memcpy(src, g_pendSrc, sizeof src);
+    memset(g_pendSrc, 0, sizeof g_pendSrc);
+    g_pendSaLen = 0;
+    g_pendLiveSet = g_pendShutdown = false;
     taskEXIT_CRITICAL(&g_mux);
 
-    bool changed = false;
+    bool changed = false, saChanged = false;
     char b1[40], b2[40];
 
-    if (saSet)
+    if (saLen)
     {
         Standalone s = g_sa;
-        s.merge(sa);
+        s.merge(sa, saLen);
         if (!(s == g_sa))
         {
             g_sa = s;
-            persist();
-            FLOG("host set fallback %s, boost %s for %us",
+            saChanged = true;
+            FLOG("host set fallback %s, boost %s for %us, ramp %u%%/s",
                  fmtDuties(g_sa.duty, b1, sizeof b1),
-                 fmtDuties(g_sa.boost, b2, sizeof b2), g_sa.boostSecs);
-            changed = true;
+                 fmtDuties(g_sa.boost, b2, sizeof b2), g_sa.boostSecs, g_sa.ramp);
         }
     }
 
-    // the phone's fallback edits land after the host's blob so that, in the
-    // one tick both could arrive, the hand on the dial wins
+    // the phone's edits land after the host's blob so that, in the one tick
+    // both could arrive, the hand on the dial wins
     for (int i = 0; i < MAX_FANS; i++)
+    {
         fbSet |= fb[i] != NONE;
-    if (fbSet)
+        srcSet |= src[i].set;
+    }
+    if (fbSet || srcSet)
     {
         Standalone s = g_sa;
         for (int i = 0; i < MAX_FANS; i++)
+        {
             if (fb[i] != NONE)
                 s.duty[i] = fb[i];
+            if (src[i].set)
+                s.setSource(i, src[i].kind, src[i].gpio, src[i].npts, src[i].pts);
+        }
         if (!(s == g_sa))
         {
             g_sa = s;
-            persist();
-            FLOG("phone set fallback %s", fmtDuties(g_sa.duty, b1, sizeof b1));
-            changed = true;
+            saChanged = true;
+            if (fbSet)
+                FLOG("phone set fallback %s", fmtDuties(g_sa.duty, b1, sizeof b1));
+            for (int i = 0; i < MAX_FANS; i++)
+                if (src[i].set)
+                    FLOG("phone set header%d source %s%u (%u points)", i + 1,
+                         g_sa.kind[i] == proto::FAN_KIND_GPIO ? "gpio:" : "fallback ",
+                         g_sa.kind[i] == proto::FAN_KIND_GPIO ? g_sa.gpio[i] : 0u,
+                         g_sa.npts[i]);
         }
+    }
+
+    if (saChanged)
+    {
+        persist();
+        setupInputs();
+        changed = true;
     }
 
     if (liveSet)
@@ -502,6 +819,27 @@ static void boostCheck(uint32_t now)
     }
 }
 
+// the gpio sources' turn: a reading every IN_PERIOD_MS, the curves and the
+// ramp every tick (the ramp eases at percent per second, and 100 ms steps
+// keep a slow-down smooth)
+static void inputCheck(uint32_t now)
+{
+    bool any = false;
+    for (int i = 0; i < MAX_FANS; i++)
+        any |= g_inPin[i] >= 0;
+    if (!any)
+        return;
+
+    if (!g_lastSample || now - g_lastSample >= IN_PERIOD_MS)
+    {
+        g_lastSample = now ? now : 1;
+        sampleInputs();
+    }
+
+    runCurves(POLL_MS / 1000.0f);
+    applyAll();
+}
+
 static void taskMain(void*)
 {
     for (;;)
@@ -511,6 +849,7 @@ static void taskMain(void*)
         drainPending(now);
         liveCheck(now);
         boostCheck(now);
+        inputCheck(now);
     }
 }
 
@@ -518,12 +857,16 @@ static void taskMain(void*)
 
 void setStandalone(const uint8_t* payload, uint16_t len)
 {
-    if (!g_started || len < Standalone::WIRE_LEN)
+    if (!g_started || len < Standalone::V1_LEN)
         return;
 
+    // an older daemon sends the duties and boosts alone; the source part is
+    // then left as it stands
+    uint16_t n = len >= Standalone::WIRE_LEN ? Standalone::WIRE_LEN : Standalone::V1_LEN;
+
     taskENTER_CRITICAL(&g_mux);
-    memcpy(g_pendSa, payload, Standalone::WIRE_LEN);
-    g_pendSaSet = true;
+    memcpy(g_pendSa, payload, n);
+    g_pendSaLen = n;
     taskEXIT_CRITICAL(&g_mux);
 }
 
@@ -547,6 +890,38 @@ bool setFallback(uint8_t slot, uint8_t pct)
 
     taskENTER_CRITICAL(&g_mux);
     g_pendFb[slot] = pct;
+    taskEXIT_CRITICAL(&g_mux);
+    return true;
+}
+
+bool setSource(uint8_t slot, uint8_t kind, uint8_t gpio, uint8_t npts,
+               const uint8_t* pts, const char** why)
+{
+    const char* r = nullptr;
+    if (!g_started || slot >= MAX_FANS || !g_wired[slot])
+        r = "not a wired header";
+    else if (kind != proto::FAN_KIND_FALLBACK && kind != proto::FAN_KIND_GPIO)
+        r = "a source only the daemon can run";
+    else if (kind == proto::FAN_KIND_GPIO && !Standalone::curveOk(npts, pts))
+        r = "a malformed curve";
+    else if (kind == proto::FAN_KIND_GPIO)
+        inputPinFree(gpio, &r);
+
+    if (why)
+        *why = r;
+    if (r)
+        return false;
+
+    PendSource s = {};
+    s.set = true;
+    s.kind = kind;
+    s.gpio = kind == proto::FAN_KIND_GPIO ? gpio : NONE;
+    s.npts = kind == proto::FAN_KIND_GPIO ? npts : 0;
+    if (s.npts)
+        memcpy(s.pts, pts, 2 * s.npts);
+
+    taskENTER_CRITICAL(&g_mux);
+    g_pendSrc[slot] = s;
     taskEXIT_CRITICAL(&g_mux);
     return true;
 }
@@ -580,13 +955,19 @@ void snapshot(Snapshot& s)
         {
             s.duty[i] = NONE;
             s.fallback[i] = NONE;
+            s.kind[i] = NONE;
+            s.in[i] = NONE;
             s.source[i] = SRC_NONE;
             continue;
         }
         s.duty[i] = effective(i);
         s.fallback[i] = g_sa.duty[i];
+        s.kind[i] = g_sa.kind[i];
+        s.in[i] = g_inPin[i] < 0 ? NONE : g_in[i];
         if (g_boosting && g_sa.boost[i] != NONE)
             s.source[i] = SRC_BOOST;
+        else if (g_curve[i] != NONE)
+            s.source[i] = SRC_CURVE;
         else if (g_live[i] != NONE)
         {
             s.source[i] = SRC_LIVE;
@@ -595,6 +976,16 @@ void snapshot(Snapshot& s)
         else
             s.source[i] = SRC_FALLBACK;
     }
+}
+
+uint16_t standalone(uint8_t* out, uint16_t max, uint32_t* seq)
+{
+    if (seq)
+        *seq = g_saSeq;
+    if (!g_started || max < Standalone::WIRE_LEN)
+        return 0;
+    g_sa.encode(out); // best-effort, as snapshot()
+    return Standalone::WIRE_LEN;
 }
 
 void start()
@@ -630,6 +1021,12 @@ void start()
 
     memset(g_live, NONE, sizeof g_live);
     memset(g_pendFb, NONE, sizeof g_pendFb);
+    memset(g_pendSrc, 0, sizeof g_pendSrc);
+    memset(g_in, NONE, sizeof g_in);
+    memset(g_curve, NONE, sizeof g_curve);
+    memset(g_applied, NONE, sizeof g_applied);
+    for (int i = 0; i < MAX_FANS; i++)
+        g_inPin[i] = -1;
     g_sa = g_cfg.sa;
 
     nvs_open("fan", NVS_READWRITE, &g_nvs);
@@ -668,15 +1065,22 @@ void start()
             FLOG("header%d (gpio%d) init FAILED", i + 1, g_cfg.pin[i]);
             g_wired[i] = false;
         }
+        else
+            g_applied[i] = g_sa.duty[i];
     }
 
     char b1[40], b2[40], b3[40];
     uint8_t pins[MAX_FANS];
     for (int i = 0; i < MAX_FANS; i++)
         pins[i] = g_cfg.pin[i] < 0 ? NONE : (uint8_t)g_cfg.pin[i];
-    FLOG("cfg %d headers, pins %s, fallback %s, boost %s for %us", count,
+    FLOG("cfg %d headers, pins %s, fallback %s, boost %s for %us, ramp %u%%/s", count,
          fmtDuties(pins, b1, sizeof b1, false), fmtDuties(g_sa.duty, b2, sizeof b2),
-         fmtDuties(g_sa.boost, b3, sizeof b3), g_sa.boostSecs);
+         fmtDuties(g_sa.boost, b3, sizeof b3), g_sa.boostSecs, g_sa.ramp);
+
+    // the gpio sources' input pins. render::pin() isn't known yet at this
+    // point of boot (the strip comes up after us), so a configured input on
+    // the strip's pin is the flasher's to catch; a runtime one is checked here
+    setupInputs();
 
     g_started = true;
 

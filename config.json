@@ -65,10 +65,9 @@
         "boost_seconds": 5,
         "header1": {
             "name": "pump",
-            "source": "constant",
-            "curve": "65",
+            "source": "fallback",
             "boost": 100,
-            "fallback": 100
+            "fallback": 65
         },
         "header2": {
             "name": "radiator",
@@ -79,7 +78,7 @@
         },
         "header3": {
             "name": "exhaust",
-            "source": "nct6686:pwm1",
+            "source": "gpio:0",
             "curve": "0:25 100:80",
             "boost": null,
             "fallback": 100
