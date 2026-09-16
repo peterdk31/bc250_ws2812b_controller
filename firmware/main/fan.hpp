@@ -77,6 +77,13 @@ bool setFallback(uint8_t slot, uint8_t pct);
 bool setSource(uint8_t slot, uint8_t kind, uint8_t gpio, uint8_t npts,
                const uint8_t* pts, const char** why);
 
+// the GPIOs a gpio:N source may read on this board right now, bit N set:
+// exactly the pins setSource() would accept, derived from the same check.
+// The phone lists these instead of asking for a number. Fixed for a
+// connection's lifetime (the owners of the other pins are flash-time
+// features and the strip, which is up before a phone can connect).
+uint64_t inputPins();
+
 // the host sent CMD_SHUTDOWN flagged as a power-off: hold the live duties
 // through the power-down instead of letting them expire to the fallback.
 void hostShutdown();

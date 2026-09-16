@@ -102,7 +102,7 @@
        fancfg  a5f20005-... : read/notify  the daemon's fan config, JSON text
                               (daemon/fans.hpp documents the shape);
                               write  token(16) + a partial edit, same shape
-       info    a5f20006-... : read  firmware version + heap (parseInfo)
+       info    a5f20006-... : read  firmware version + heap + usable input pins (parseInfo)
        telem   a5f20007-... : read/notify  the daemon's readings, JSON text
        stripcfg a5f20008-...: read/notify  the daemon's strip view, JSON text
                               (daemon/strip_remote.hpp documents the shape);
@@ -1019,11 +1019,20 @@ function parseTelem(text) {
   return t;
 }
 
+// ver 1: version, heap. ver 2 adds the GPIOs a gpio:N source may read as a
+// 64-bit mask (bit N = GPIO N) — `pins` is that as a sorted list, or null on
+// firmware that doesn't say (the editor then asks for a number)
 function parseInfo(dv) {
-  if (dv.byteLength < 41 || dv.getUint8(0) !== 1) return null;
+  const ver = dv.byteLength ? dv.getUint8(0) : 0;
+  if (dv.byteLength < 41 || ver < 1 || ver > 2) return null;
   let v = '';
   for (let k = 1; k < 33; k++) { const ch = dv.getUint8(k); if (!ch) break; v += String.fromCharCode(ch); }
-  return { version: v, heap: u32(dv, 33), minHeap: u32(dv, 37) };
+  let pins = null;
+  if (ver >= 2 && dv.byteLength >= 49) {
+    pins = [];
+    for (let g = 0; g < 64; g++) if (dv.getUint8(41 + (g >> 3)) >> (g & 7) & 1) pins.push(g);
+  }
+  return { version: v, heap: u32(dv, 33), minHeap: u32(dv, 37), pins };
 }
 
 function dashReset() {
@@ -1469,7 +1478,10 @@ function renderEditor(ed, slot) {
   const daemon = h.route === 'daemon';
   const unit = isTempX(h) ? '°C' : '%';
   const rows = h.pts.length;
-  const shape = `${rows}/${h.kind}/${h.route}`;
+  const pins = info && info.pins; // the receiver's usable input pins, or null
+  // the pin is part of the shape only as a list: the list must include the
+  // pick, while a number being typed must not be rebuilt under the finger
+  const shape = `${rows}/${h.kind}/${h.route}/${pins ? pins.join() + '/' + h.gpio : ''}`;
   if (ed.dataset.shape !== shape) {
     ed.dataset.shape = shape;
     // the daemon runs every kind; a receiver alone only fallback and gpio (a
@@ -1480,8 +1492,14 @@ function renderEditor(ed, slot) {
     if (daemon) parts.push(`<div class="row"><label>name</label><input type="text" class="nm" maxlength="16" autocomplete="off"></div>`);
     parts.push(`<div class="row"><label>source</label><select class="src">${kinds.map(k =>
       `<option value="${k}"${k === h.kind ? ' selected' : ''}${k === 'host' ? ' disabled' : ''}>${SRC_KINDS[k].label}</option>`).join('')}</select></div>`);
-    if (h.kind === 'gpio')
-      parts.push(`<div class="row"><label>gpio</label><input type="number" class="gp" min="0" max="48" step="1"><span class="unit">${daemon ? 'a free receiver pin — the carrier breaks out 0, 20, 21' : 'a free pin: 0, 20 or 21 on the carrier'}</span></div>`);
+    if (h.kind === 'gpio' && pins) {
+      // the receiver says which pins it can read on; the header's current pin
+      // stays listed even if it no longer qualifies, so the edit can be seen
+      const opts = pins.includes(h.gpio) ? pins : [...pins, h.gpio].sort((a, b) => a - b);
+      parts.push(`<div class="row"><label>gpio</label><select class="gp">${opts.map(g =>
+        `<option value="${g}"${g === h.gpio ? ' selected' : ''}>gpio${g}</option>`).join('')}</select></div>`);
+    } else if (h.kind === 'gpio')
+      parts.push(`<div class="row"><label>gpio</label><input type="number" class="gp" min="0" max="48" step="1"><span class="unit">a free receiver pin</span></div>`);
     else if (h.kind === 'hwmon' || h.kind === 'pwm')
       parts.push(`<div class="row"><label>sensor</label><input type="text" class="sp" autocomplete="off" placeholder="${SRC_KINDS[h.kind].hint}"></div>`);
     else if (SRC_KINDS[h.kind]?.hint)
@@ -1501,6 +1519,7 @@ function renderEditor(ed, slot) {
     ed.querySelector('.src').addEventListener('change', e => { setKind(h, e.target.value); renderDash(); });
     ed.querySelector('.gp')?.addEventListener('input', e => {
       const v = parseInt(e.target.value, 10); if (!isNaN(v)) h.gpio = v; });
+    ed.querySelector('select.gp')?.addEventListener('change', e => { h.gpio = +e.target.value; renderDash(); });
     ed.querySelector('.sp')?.addEventListener('input', e => { h.spec = e.target.value.trim(); });
     ed.querySelectorAll('.px').forEach(inp => inp.addEventListener('input', () => {
       const v = parseFloat(inp.value); if (!isNaN(v)) h.pts[+inp.dataset.i].x = v; renderDash(); }));
@@ -2030,7 +2049,7 @@ function demo() {
     fans.live = fans.telem = fans.host = false; fans.age = 255; fans.psu = 0;
     fans.h.forEach(h => { if (h.wired && h.src !== 4) { h.src = 1; h.duty = h.fb; } });
   }
-  info = { version: 'v1.23.0-demo', heap: 143 * 1024, minHeap: 121 * 1024 };
+  info = { version: 'v1.23.0-demo', heap: 143 * 1024, minHeap: 121 * 1024, pins: [0, 20, 21] };
   psu = 2;
   // stand-ins for the GATT objects so the page believes it is connected
   device = { id: 'demo', gatt: { connected: true } };

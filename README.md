@@ -858,7 +858,8 @@ header's output, the strip, the power switch's pins, the flash pads, the USB
 pair, and the strap pins (8, 9 — a PWM at 0 % is a pin held low at reset,
 which is the download-mode strap). A pin that arrives at runtime (a phone
 edit, a daemon push) is checked again on the receiver, which logs a refusal
-and runs the fallback.
+and runs the fallback. The phone never has to guess: the receiver publishes
+the pins that pass that check and the dashboard's editor lists them.
 
 **`boost`** and **`fallback`** are the header's *standalone* settings — what
 the receiver does on its own. Full speed is the safe answer for cooling, which

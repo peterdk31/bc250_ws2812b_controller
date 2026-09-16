@@ -99,7 +99,8 @@
 //                           "scenes"); a write is token(16) + a partial edit
 //                           relayed as MSG_STRIP_CONFIG, answered by the
 //                           daemon's next CMD_STRIP_CONFIG.
-//   info (read):            build facts: firmware version string, free heap.
+//   info (read):            build facts: firmware version string, free heap,
+//                           and the GPIOs a gpio:N fan source may read.
 //
 // The 128-bit UUIDs are this project's own (random base, "bc250" spelled
 // into the tail); the web page must list the service UUID to find us.
@@ -514,24 +515,29 @@ static int stripcfgAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     return relayEdit(ctxt, proto::MSG_STRIP_CONFIG, "strip");
 }
 
-// ver(1) = 1, version(32, NUL-padded; the app image's PROJECT_VER — the git
-// describe of the build), freeHeap(4), minFreeHeap(4)
+// ver(1) = 2, version(32, NUL-padded; the app image's PROJECT_VER — the git
+// describe of the build), freeHeap(4), minFreeHeap(4), then since ver 2
+// inputPins(8): the GPIOs a gpio:N fan source may read (fan::inputPins),
+// little-endian, bit N = GPIO N. A ver-1 page stops at the heap.
 static int infoAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
 {
     if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR)
         return BLE_ATT_ERR_UNLIKELY;
 
-    uint8_t b[1 + 32 + 4 + 4] = {};
-    b[0] = 1;
+    uint8_t b[1 + 32 + 4 + 4 + 8] = {};
+    b[0] = 2;
     const esp_app_desc_t* d = esp_app_get_description();
     strncpy((char*)b + 1, d->version, 31);
     uint32_t heap = esp_get_free_heap_size();
     uint32_t minHeap = esp_get_minimum_free_heap_size();
+    uint64_t pins = fan::inputPins();
     for (int k = 0; k < 4; k++)
     {
         b[33 + k] = (uint8_t)(heap >> (8 * k));
         b[37 + k] = (uint8_t)(minHeap >> (8 * k));
     }
+    for (int k = 0; k < 8; k++)
+        b[41 + k] = (uint8_t)(pins >> (8 * k));
     return os_mbuf_append(ctxt->om, b, sizeof b) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 

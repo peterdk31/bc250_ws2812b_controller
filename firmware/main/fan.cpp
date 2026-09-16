@@ -937,6 +937,17 @@ bool setSource(uint8_t slot, uint8_t kind, uint8_t gpio, uint8_t npts,
     return true;
 }
 
+uint64_t inputPins()
+{
+    uint64_t m = 0;
+    if (!g_started)
+        return 0;
+    for (int g = 0; g < GPIO_NUM_MAX && g < 64; g++)
+        if (inputPinFree(g, nullptr))
+            m |= 1ULL << g;
+    return m;
+}
+
 void hostShutdown()
 {
     if (!g_started)
