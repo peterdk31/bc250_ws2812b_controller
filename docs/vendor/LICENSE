@@ -1,0 +1,10 @@
+preact-htm.mjs is htm 3.1.1's `preact/standalone.module.js`
+(https://github.com/developit/htm), which bundles Preact 10
+(https://github.com/preactjs/preact) with htm and Preact's hooks into one
+ES module, fetched from unpkg unmodified.
+
+  htm      — Apache License 2.0, Copyright 2018 Google Inc.
+  Preact   — MIT License, Copyright (c) 2015-present Jason Miller
+
+The full texts are at the projects above. The page vendors the file so it
+loads offline from the service worker's cache and never from a CDN.

@@ -340,7 +340,7 @@ as a plain light when it isn't tuning anything —
 
 — and the phone's dashboard shows every such `file:` rule as a **scene**
 with a switch (README [BLE remote](#the-dashboard)). Switch "solid" on, drag
-the white-balance sliders on the **Strip** card while looking at the strip
+the white-balance sliders on the LEDs tab while looking at the strip
 (each release applies to the live strip at once and lands in the config's
 `strip` block), pull the scene's `level` slider down for the gamma step,
 switch it off. The color picker on the scene changes the rule's `color`, so
@@ -828,8 +828,8 @@ so does *where the curve runs* — on whichever side can read the input:
 | `fallback` | nothing — the header runs its `fallback` value, always; no `curve` | — | receiver |
 | `gpio:N` | the duty of a PWM signal on the receiver's GPIO N — a fan header's PWM wire (the BC-250's own, say), so the receiver follows the board's BIOS curve with no daemon and the machine off | % | receiver |
 | `temp` | the top-level `sensors` pick | °C | daemon |
-| `chip:label` | any hwmon temperature, same syntax as `sensors` (`amdgpu:edge`, `nct6686:CPU`; a comma list of candidates works too) | °C | daemon |
-| `chip:pwmN` | a hwmon pwm *output* — the board's own fan header, i.e. what its BIOS fan curve is asking for, read over the host instead of a wire | % (0..255 read as 0..100) | daemon |
+| `chip:label` | any hwmon temperature, same syntax as `sensors` (`amdgpu:edge`, `nct6686:CPU`; a comma list of candidates works too). The phone's picker lists every labelled one the machine has, with its reading; so does `--fan-status` | °C | daemon |
+| `chip:pwmN` | a hwmon pwm *output* — the board's own fan header, i.e. what its BIOS fan curve is asking for, read over the host instead of a wire. Outputs that read alike are one line in the phone's picker (`pwm 1–8`, following the first) until they differ | % (0..255 read as 0..100) | daemon |
 | `cpu_load` / `gpu_load` | the rule conditions' readings | % | daemon |
 
 **`curve`** is `x:percent` points in one string (up to eight), linear
@@ -959,7 +959,8 @@ led /etc/led-controller/config.json --fan-status   # what each header resolves t
 ```
 
 `--fan-status` prints every header's source, the sysfs file it resolved to,
-its current reading and the duty it would run (a `fallback` or `gpio` header
+its current reading and the duty it would run, plus the catalogue of sensors
+a header could follow as the phone's picker sees it (a `fallback` or `gpio` header
 is marked as the receiver's to run) — the first thing to run when a fan isn't
 doing what the curve says, and whether dashboard edits can be written back to
 the config.
@@ -970,7 +971,6 @@ With the BLE remote on, the web page shows every header live and lets you
 redraw its curve, pick its source, set boost and fallback, and change
 hysteresis, ramp and boost length — see the dashboard under
 [BLE remote](#ble-remote). An edit
-(the fallback slider's included)
 travels phone → receiver → daemon, which validates it exactly as it validates
 the config, applies it on its next tick, and **writes it into the config
 file** — `/etc/led-controller/config.json` on a deployed box. Only the bytes
@@ -989,7 +989,7 @@ source: the picker lists every kind above, with a pin field for `gpio` and a
 refused there and then (a hand edit in the file may name one that turns up
 later). The set of headers is yours alone — the phone can't add or remove
 one, that is wiring. The dashboard is read-only when the daemon
-can't write its config (the page hides the edit buttons); a write that fails
+can't write its config (the page hides the cogs); a write that fails
 mid-way is reported in the journal and the edit runs until the next restart.
 The daemon takes edits only from the receiver's link, which only the
 receiver's BLE service writes, and that only with the flash-time token — the
@@ -1067,7 +1067,8 @@ just run `systemctl poweroff`, which is all it guards. `name` is the
 advertised device name (public by definition).
 
 Several machines: the page keeps every receiver the Bluetooth chooser has
-ever granted and lists them in a dropdown above the button — pick one to
+ever granted and lists them in the header's dropdown and on the Receiver
+tab — pick one to
 switch (the page holds one connection at a time, and reconnects to the last
 pick on its own), "Add a receiver…" opens the chooser for a new board. Tokens
 are remembered per receiver: a new board first tries the token you entered
@@ -1087,65 +1088,82 @@ edits the daemon's curves, never the power):
   config, like the button.
 - **Force off** (the hold): release PS_ON# and cut the PSU immediately — the
   crash rescue, which is the one moment a *remote* power button really earns
-  its keep. The page double-confirms it; the firmware accepts it while
-  booting too (a boot that never comes up is exactly a case for it).
+  its keep. The page asks twice (the sheet, then a confirmation); the
+  firmware accepts it while booting too (a boot that never comes up is exactly a case for it).
 
 ### The dashboard
 
-Under the power ring, once connected, the page shows what the box is doing:
+The page is four tabs, each fitting a phone screen; the tabs, the editors
+and the shutdown sheet are history entries, so the phone's back gesture
+steps out of them the way a native app does. A sticky header on every tab
+names the receiver (a dropdown when the phone knows several), shows the PSU
+state, and — while the daemon reports — the host's readings: CPU
+temperature (the top-level `sensors` pick), CPU load and GPU load.
 
-- **Host tiles** — CPU temperature (the top-level `sensors` pick), CPU load
-  and GPU load, with how long ago the daemon last reported. Blank when the
-  machine is off or the daemon isn't running.
-- **One card per fan header** — the duty the receiver is actually applying
-  and where it came from (a `live` chip for the daemon's curve, `boost` for
-  the power-on boost, `fallback` when nothing is driving it, `hold` while the
-  machine powers down), the curve's own input (`58.3 °C`, `GPU 62 %`, …), and
-  the curve itself with the current operating point marked on it (a `curve`
-  chip is the receiver's own `gpio` curve, running with or without the
-  daemon). "Edit" opens the source picker — every kind in the
-  [Fans](#fans) table, with a pin field for `gpio` and a sensor field for the
-  hwmon kinds — makes the points draggable (or type them; add and remove up
-  to eight) and opens boost; **Save** sends just that header's change and
-  the card says `saved` only when the daemon has applied it, written it into
-  the config and pushed the config back — see
-  [Editing curves from the phone](#editing-curves-from-the-phone). The
-  editor also renames the header; a header in the config but not flashed
-  onto the receiver is called out on its card. Every card has the
-  **fallback slider** — what the header runs when nothing drives it —
-  applying on release like the strip's: into the config while a daemon is
-  connected, straight
-  onto the receiver when there is none (see [Fans](#fans)). With no daemon
-  at all the cards come from the receiver's own stored settings: the picker
-  then offers `fallback` and `gpio` — the two sources a receiver runs
-  alone — and Save stores the header on the receiver until a daemon next
-  connects and the config wins again.
-- **Fan behaviour** — hysteresis, ramp-down rate and boost length, editable
-  the same way.
-- **Strip** — the config's `strip` block: brightness, white balance (one
-  slider per channel) and per-channel gamma, plus the `reverse` switch; LED
-  count and pin shown, not editable (they are wiring). No Save here: a
-  slider applies on release, a switch on the tap — the daemon corrects the
-  live strip on its next frame and writes the value into the config, and
-  the card says `saved` when the config comes back. Below them the
-  **scenes**: every rule whose condition is a bare `file:` path, as a switch
-  the daemon flips by creating or removing that file (nothing is written to
-  the config for a toggle — the rule reacts on its next tick, like a shell's
-  `touch`); a scene whose settings have a `color` gets a color picker, one
-  with a `level` a slider, both written into that rule. This is the
-  white-balance tuning flow, see [Tuning the colors](#tuning-the-colors).
-  A receiver on firmware from before the strip card shows the dashboard
-  without it.
-- **Receiver** — firmware version, uptime, free heap, whether a host is on
-  the link.
+- **Power** — the ring alone, centred where a thumb reaches. Its color is
+  the PSU state and its label the one thing a tap does: connect, power on,
+  or (while on) open the sheet with **Shut down** and **Force off**.
+- **Fans** — one row per header: its name, what it follows and that
+  source's current reading (`CPU temperature · 58.3 °C`, `PWM input on
+  GPIO0 · 65 %`), and the duty the receiver is actually applying. A chip
+  appears only when the header is *not* doing what it is set up to do:
+  `boost` for the power-on boost, `fallback` when nothing is driving it (the
+  machine off, the daemon not yet up), `hold` while the machine powers
+  down. Tapping a row shows its curve with the operating point marked; the
+  cog opens the header's editor: name, **Follows** (every kind in the
+  [Fans](#fans) table, each with its live reading beside it so the pick is
+  made on the numbers — then every labelled hwmon temperature and every
+  board pwm output the machine has, by name, from the catalogue the daemon
+  sends while a phone watches; picking one fills the `chip:label` spec, and
+  an "Other sensor…" row keeps the typed field for one that isn't present
+  right now. The catalogue is one GATT value, 512 bytes at most: a machine
+  with more sensors than fit loses pwm outputs first, then temperatures
+  from the end, never one a header follows, and the row says how many are
+  missing; a pin list for `gpio`), the curve (drag the points or type them; add and remove up
+  to eight), the **fallback speed** and the power-on **boost**. **Save**
+  sends just that header's change and the row says `saved` only when the
+  daemon has applied it, written it into the config and pushed the config
+  back — see [Editing curves from the phone](#editing-curves-from-the-phone).
+  A header in the config but not flashed onto the receiver is called out on
+  its row. With no daemon at all the rows come from the receiver's own
+  stored settings: Follows then offers `fallback` and `gpio` — the two
+  sources a receiver runs alone — and Save stores the header on the receiver
+  until a daemon next connects and the config wins again. **Fan behaviour**
+  at the bottom edits hysteresis, ramp-down rate and boost length the same
+  way.
+- **LEDs** — the config's `strip` block, no Save: a slider applies on
+  release, a switch on the tap — the daemon corrects the live strip on its
+  next frame and writes the value into the config, and the card says
+  `saved` when the config comes back. **Scenes** first: every rule whose
+  condition is a bare `file:` path, as a switch the daemon flips by creating
+  or removing that file (nothing is written to the config for a toggle —
+  the rule reacts on its next tick, like a shell's `touch`); a scene whose
+  settings have a `color` gets a color picker, one with a `level` a slider,
+  both written into that rule. Then **Brightness**, **White** — a swatch of
+  what the strip will show (the first scene carrying a color, at its level,
+  run through gamma, white balance and brightness in the daemon's order),
+  the balance as one slider per channel, gamma per channel — and
+  **Direction** (the `reverse` switch). This is the white-balance tuning
+  flow, see [Tuning the colors](#tuning-the-colors). A receiver on firmware
+  from before the strip view shows the tab empty.
+- **Receiver** — the boards this phone knows (tap to switch; "add a
+  receiver" opens the chooser), and for the current one its firmware
+  version, uptime, free memory, whether a host is on the link, plus
+  **Change token** and **Forget**.
+
+The page is Preact with htm, vendored into `docs/vendor/` so there is no
+build step and nothing loads from a CDN (`docs/ble.js` is the link and the
+protocol, `docs/app.js` the screens). Every file is precached by the
+service worker: bump its `VERSION` when any of them changes, or installed
+phones keep serving the old one.
 
 Nothing about the dashboard costs anything while no phone has it open: the
 receiver only assembles its view while a page is subscribed, and only then
 tells the daemon to read and send the readings (a keepalive every 10 s; the
 daemon stops 30 s after the last). A receiver on firmware from before the
-dashboard shows the ring alone. Open `docs/index.html?demo` (or the hosted
-page with `?demo`) to see the dashboard on sample data with no receiver at
-all.
+dashboard shows the Power tab alone. Open `docs/index.html?demo` (or the hosted
+page with `?demo`; `&tab=fans`, `&tab=leds`, `&nodaemon` for the machine-off
+view) to see the dashboard on sample data with no receiver at all.
 
 Radio policy: the receiver advertises in both PSU states — a crashed machine
 must be reachable, and it counts as "on" — but at two paces: 300 ms intervals
@@ -1248,8 +1266,10 @@ with command `0x06`), and a **message** frame (`0xAA 0x5A`) for the BLE
 dashboard — `kind(1) len(1) payload checksum`, sent once, carrying a phone's
 fan-curve edit (`0x01`), "a phone is watching" (`0x02`) or a strip edit
 (`0x03`). The dashboard's host → receiver commands are `0x0A` (the fan config
-as the daemon runs it), `0x0B` (its live readings) and `0x0C` (the strip
-settings and scenes). All of these payloads are small JSON texts in the shapes
+as the daemon runs it), `0x0B` (its live readings), `0x0C` (the strip
+settings and scenes) and `0x0D` (the sensor catalogue: every hwmon
+temperature and pwm output a header could follow, with readings, every 5 s
+while a phone watches). All of these payloads are small JSON texts in the shapes
 `daemon/fans.hpp` and `daemon/strip_remote.hpp` document — the receiver relays
 them to the phone without parsing them. The fans' standalone settings
 (`0x08`) are binary — fallback and boost per header, then ramp and per header

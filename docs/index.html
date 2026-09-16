@@ -1,119 +1,35 @@
 <!doctype html>
 <!-- BLE power remote and dashboard for the BC-250 receiver (firmware/main/ble.cpp).
 
-     A single-file Web Bluetooth client: connect to a receiver's GATT
-     service, show the PSU state, and send the commands the firmware
-     accepts, each prefixed with the shared token written at flash time
-     (the config's ble_remote.token, baked by make flash).
+     A Web Bluetooth client in three files, no build step:
+       ble.js  — the link: GATT queue, auto-reconnect, the parsers, the
+                 writes, the demo data; a store (`S`) the UI renders from.
+                 The protocol is documented at the top of that file.
+       app.js  — the screens, as Preact components written with htm
+                 (vendor/preact-htm.mjs: Preact 10 + htm 3, one ES module,
+                 vendored so the page loads offline and never from a CDN).
+       this    — the shell and the stylesheet.
 
-     The ring button IS the power remote: its color is the PSU state, its
-     label the one action a tap performs. Text below it only appears for
-     errors.
-
-     Below the ring, once connected, the dashboard: the daemon's readings
-     (CPU temperature and load, GPU load), one card per fan header — the
-     duty the receiver applies and where it came from (boost / the daemon's
-     curve / fallback), the curve's own input, and the curve itself, with the
-     current operating point marked — and the receiver's build facts. Curves
-     are editable in place: drag the points (or type them), set boost, save;
-     the write goes to the receiver, which relays it to the daemon, which
-     validates and applies it, writes it into its config file and pushes the
-     config back — the page shows "saved" only when that round trip lands.
-     Headers can be renamed the same way, and pointed at another source:
-     the picker lists every kind the daemon knows (fallback, a PWM input on
-     a receiver GPIO, the CPU temperature, any hwmon temperature or pwm
-     output, CPU/GPU load). With no daemon — the machine off, a bench with
-     just the receiver — the cards come from the receiver's own stored
-     settings, the picker offers the two kinds a receiver runs alone
-     (fallback, PWM input) and the edit is stored on the receiver until a
-     daemon next connects and the config wins again. Each card also has a
-     fallback slider — what the header runs
-     when nothing drives it — applying on release to wherever the value
-     lives: to the daemon (into the config file, which the daemon then
-     pushes to the receiver, so the file is the one source of truth) while a
-     daemon is there; straight to the receiver, stored there, when there is
-     none — the machine off, a bench with just the receiver — so the board
-     is a fan controller in its own right until a daemon next connects and
-     the config wins again.
-
-     A strip card, on firmware that has it: brightness, white balance and
-     gamma as sliders that apply on release (the daemon corrects the live
-     strip at once and writes the values into its config's strip block),
-     the reverse switch, and the "scenes" — every rule in the config whose
-     condition is a bare file: path, as a switch the daemon flips by creating
-     or removing that file; a scene whose settings carry a color (the solid
-     rule for tuning white) gets a color picker, one with a level a dim
-     slider. So white balance is tuned from the couch: scene on, drag, off.
-
-     Any number of receivers: every board the chooser has ever granted is
-     listed in the dropdown above the ring (by its advertised name — the
-     config's ble_remote.name), and
-     the page holds ONE live connection — the selected board's. Switching
-     drops that connection and runs the reconnect dance on the new pick.
-     Tokens are kept per board (each is flashed with its own); a board with
-     no token of its own tries the first token ever entered, and a rejected
-     write opens the token box for that board.
-
-     Reconnects on its own: the chooser grants a persistent permission, so
-     navigator.bluetooth.getDevices() can hand the devices back on the next
-     visit. Chrome refuses to gatt.connect() a device it hasn't seen this
-     session, so the page first calls watchAdvertisements() and waits for
-     one advertisement (the receiver advertises in both PSU states, see
-     ble.cpp) before connecting — the sequence Chrome's own sample uses.
-     The chooser is only ever needed once per board per phone.
-
-     CAVEAT: as of 2026, auto-reconnect needs TWO chrome://flags (desktop
-     AND Android): #enable-experimental-web-platform-features unlocks the
-     getDevices()/watchAdvertisements() APIs, and — separately —
-     #enable-web-bluetooth-new-permissions-backend makes the chooser grant
-     persist across sessions. With only the first flag, getDevices() exists
-     but returns [] on the next visit (the grant died with the session), so
-     the page names the missing flag instead of degrading silently. Without
-     either, tap-to-connect always works, and picking a board from the
-     dropdown opens the chooser instead of connecting straight to it.
+     Four tabs: Power (the ring — its color is the PSU state, its label the
+     one action a tap performs; tapping it while the machine is on opens the
+     shutdown sheet), Fans (one row per header: source and its reading, the
+     duty, a chip only when the header is not doing what it is set up to do;
+     a cog opens that header's editor), LEDs (scenes, brightness, white
+     balance and gamma with a preview of the resulting light, direction —
+     each applies on release, no Save) and Receiver (the boards this phone
+     knows, the token, the board's facts). Tabs, editors and the sheet are
+     history entries, so the phone's back gesture works as in a native app.
 
      Web Bluetooth needs Chrome or Edge — on Android or desktop — and HTTPS
-     (GitHub Pages qualifies). Installed from Chrome's "Add to Home screen",
-     the service worker (sw.js) makes it work fully offline, which is the
-     point: the machine travels.
-
-     iOS: Safari (and every iOS browser, all WebKit) has no Web Bluetooth and
-     WebKit has said it won't add it. What exists is a "polyfill" living
-     INSIDE a third-party browser app: Bluefy (free) and WebBLE (paid) are
-     WKWebView shells that inject a spec-shaped navigator.bluetooth bridged
-     to CoreBluetooth. This page uses nothing beyond the spec, so it runs in
-     them as-is; what it does for iOS is (a) tell a Safari visitor to open
-     the page in Bluefy — a bluefy:// link plus the App Store — instead of a
-     dead "use Chrome", (b) word the remembered-device messages for a browser
-     that isn't Chrome, (c) skip the advertisement dance: CoreBluetooth
-     connects a known peripheral without a fresh scan (the connect just pends
-     until it is in range), and the polyfills' watchAdvertisements() is
-     either missing (WebBLE) or not something to wait on, and (d) fall back
-     to writeValue() where writeValueWithResponse() is missing.
-
-     Everything protocol-shaped must match ble.cpp (JSON shapes: daemon/fans.hpp):
-       service a5f20001-8f11-4e0e-9b3a-0bc250e0c001
-       control a5f20002-... : write  token(16, NUL-padded) + op(1) [+ args]
-                              op 0x01=on 0x02=graceful shutdown 0x03=hard off
-                              op 0x10=set a fan header's fallback duty,
-                              args slot(1) percent(1) — the receiver's own
-       status  a5f20003-... : read/notify  1 byte  0=off 1=booting 2=on
-       fans    a5f20004-... : read/notify  the receiver's own fan view (parseFans)
-       fancfg  a5f20005-... : read/notify  the daemon's fan config, JSON text
-                              (daemon/fans.hpp documents the shape);
-                              write  token(16) + a partial edit, same shape
-       info    a5f20006-... : read  firmware version + heap + usable input pins (parseInfo)
-       telem   a5f20007-... : read/notify  the daemon's readings, JSON text
-       stripcfg a5f20008-...: read/notify  the daemon's strip view, JSON text
-                              (daemon/strip_remote.hpp documents the shape);
-                              write  token(16) + a partial edit, same shape
-     A receiver on older firmware has only the first two; the dashboard then
-     stays hidden and the power remote works as before. One without stripcfg
-     shows the dashboard minus the strip card. -->
+     (GitHub Pages qualifies); on iOS, the Bluefy or WebBLE browser apps.
+     Installed from Chrome's "Add to Home screen", the service worker (sw.js)
+     makes it work fully offline. ?demo shows the dashboard on sample data
+     without a receiver (?demo&nodaemon: the same board with the machine
+     off). -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0b0e14">
 <title>BC-250</title>
 <link rel="manifest" href="manifest.webmanifest">
@@ -128,2004 +44,222 @@
     --on: #38d178;
     --booting: #e8b23e;
     --danger: #d15252;
+    --border: #232a3d;
   }
   * { box-sizing: border-box; margin: 0; }
-  [hidden] { display: none !important; } /* wins over .editor/.curve display rules */
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font: 16px/1.5 system-ui, sans-serif;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 1.25rem;
-    padding: 1.5rem .75rem 2rem;
-    text-align: center;
-  }
-  h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: .08em;
-       text-transform: uppercase; color: var(--muted); }
+  html { background: var(--bg); }
+  body { background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, sans-serif; -webkit-tap-highlight-color: transparent; }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+  button:disabled { cursor: default; }
+  a { color: inherit; text-decoration: underline; }
+  code { font-size: .9em; }
+  .ic { display: block; flex: none; }
 
-  /* the power button: a big ring that carries the state color */
-  #power {
-    width: 11rem; height: 11rem;
-    border-radius: 50%;
-    border: 5px solid var(--off);
-    background: var(--panel);
-    color: var(--text);
-    font: inherit; font-size: 1.05rem; font-weight: 600;
-    cursor: pointer;
-    transition: border-color .3s, box-shadow .3s;
-    -webkit-tap-highlight-color: transparent;
-  }
-  #power:disabled { opacity: .45; cursor: default; }
-  #power.off     { border-color: var(--off); }
-  #power.booting { border-color: var(--booting);
-                   box-shadow: 0 0 2.5rem color-mix(in srgb, var(--booting) 35%, transparent); }
-  #power.on      { border-color: var(--on);
-                   box-shadow: 0 0 2.5rem color-mix(in srgb, var(--on) 35%, transparent); }
-  /* a pending connect breathes so it doesn't read as dead */
-  #power.wait .sym { animation: breathe 2.4s ease-in-out infinite; }
-  @keyframes breathe { 50% { opacity: .35; } }
-  /* power symbol drawn in CSS so there's no icon dependency */
-  #power .sym {
-    display: block; width: 2.2rem; height: 2.2rem; margin: 0 auto .6rem;
-    border: 3px solid currentColor; border-radius: 50%;
-    position: relative;
-    -webkit-mask: conic-gradient(from -35deg, transparent 70deg, #000 0);
-            mask: conic-gradient(from -35deg, transparent 70deg, #000 0);
-  }
-  #power .sym::after {
-    content: ""; position: absolute; left: 50%; top: -0.9rem;
-    transform: translateX(-50%);
-    width: 3px; height: 1.4rem; background: currentColor; border-radius: 2px;
-  }
+  .screen { max-width: 28rem; margin: 0 auto; min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; }
 
-  /* errors only — empty (and invisible) the rest of the time */
-  #state { font-size: .9rem; color: var(--danger); min-height: 1.5em; max-width: 26rem; }
-  #state.hint { color: var(--muted); } /* capability notes, not failures */
-  #state a { color: inherit; text-decoration: underline; } /* the Bluefy links, on the dark ground */
+  /* ---- the sticky header: receiver + state, then the host's readings ---- */
+  header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--border);
+           padding-top: env(safe-area-inset-top); }
+  header .top { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .9rem 1rem .6rem; }
+  header h1 { font-size: .95rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  header .ttl { font-size: .95rem; font-weight: 600; }
+  header .pill { position: relative; display: flex; align-items: center; gap: .25rem; padding: .35rem .6rem .35rem .75rem;
+                 background: var(--panel); border: 1px solid var(--border); border-radius: 999px; color: var(--muted); min-height: 2.4rem; }
+  header .pill select { appearance: none; -webkit-appearance: none; background: none; border: 0; color: var(--text);
+                        font: inherit; font-size: .95rem; font-weight: 600; padding: 0; max-width: 11rem; text-overflow: ellipsis; }
+  header .pill select:disabled { opacity: .45; }
+  header .back { display: flex; align-items: center; gap: .3rem; color: var(--muted); font-size: .95rem; min-height: 2.4rem; padding-right: .5rem; }
+  header .st { display: flex; align-items: center; gap: .45rem; font-size: .82rem; color: var(--muted); }
+  header .st i { display: block; width: 9px; height: 9px; border-radius: 50%; }
+  .readings { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .5rem; padding: 0 1rem .6rem; }
+  .readings > div { display: flex; align-items: baseline; gap: .3rem; padding: .3rem .6rem; background: var(--panel);
+                    border: 1px solid var(--border); border-radius: .6rem; min-width: 0; }
+  .readings .k { font-size: .66rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .readings .v { font-size: .95rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .readings .v small { font-size: .68rem; font-weight: 400; color: var(--muted); margin-left: 1px; }
 
-  .row { display: flex; gap: .75rem; flex-wrap: wrap; justify-content: center; }
-  button.minor, input, select {
-    background: var(--panel); color: var(--text);
-    border: 1px solid #232a3d; border-radius: .5rem;
-    padding: .55rem 1rem; font: inherit; font-size: .9rem;
-  }
-  button.minor { cursor: pointer; }
-  button.minor:disabled { opacity: .45; cursor: default; }
-  button.minor.danger { color: var(--danger); }
-  input { width: 13rem; text-align: center; letter-spacing: .05em; }
+  /* one line under the header: errors, or capability hints */
+  .msg { font-size: .85rem; color: var(--danger); padding: .5rem 1rem 0; }
+  .msg.hint { color: var(--muted); }
 
-  /* which receiver: hidden until a board has been granted at least once */
-  #picker { min-width: 13rem; text-align: center; cursor: pointer; }
-  #picker:disabled { opacity: .45; cursor: default; }
+  /* ---- cards ---- */
+  .list { display: flex; flex-direction: column; gap: .6rem; padding: .75rem 1rem 1rem; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: .75rem; padding: .75rem .8rem;
+          display: flex; flex-direction: column; gap: .5rem; min-width: 0; }
+  .card h2 { font-size: .75rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+             display: flex; justify-content: space-between; align-items: baseline; }
+  .card h2 .r { font-weight: 400; letter-spacing: 0; text-transform: none; }
+  .note { font-size: .82rem; color: var(--muted); line-height: 1.4; }
+  .note.ok { color: var(--on); }
+  .note.err { color: var(--danger); }
+  .empty { font-size: .9rem; color: var(--muted); padding: 1rem 1rem; text-align: center; }
+  .foot { font-size: .75rem; color: var(--muted); text-align: right; }
+  .sub { font-size: .75rem; color: var(--muted); padding-top: .2rem; }
 
-  #tokenbox { display: none; flex-direction: column; gap: .75rem; align-items: center; }
-  #tokenbox.show { display: flex; }
-  #tokenbox p { font-size: .85rem; color: var(--muted); }
-
-  /* ---- the dashboard: left-aligned cards under the ring. One column on a
-     phone; as many as fit (19rem each) on anything wider, the host card
-     always spanning the row. The fan cards' wrapper is transparent to the
-     grid (display: contents) so they flow with the rest. ---- */
-  #dash { display: none; width: 100%; max-width: 64rem; text-align: left;
-          grid-template-columns: repeat(auto-fill, minmax(min(100%, 19rem), 1fr));
-          gap: .75rem; align-items: start; }
-  #dash.show { display: grid; }
-  #fancards { display: contents; }
-  #hostcard { grid-column: 1 / -1; }
-  .card { background: var(--panel); border: 1px solid #232a3d; border-radius: .75rem;
-          padding: .75rem .8rem; min-width: 0; }
-  .card h2 { font-size: .75rem; font-weight: 600; letter-spacing: .08em;
-             text-transform: uppercase; color: var(--muted); margin-bottom: .5rem; }
-  .card h2 .r { float: right; font-weight: 400; letter-spacing: 0; text-transform: none; }
-  .note { font-size: .85rem; color: var(--muted); }
-
-  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: .6rem; }
-  .tile { background: var(--bg); border-radius: .6rem; padding: .55rem .6rem; }
-  .tile .k { font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
-  .tile .v { font-size: 1.35rem; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .tile .v small { font-size: .75rem; font-weight: 400; color: var(--muted); margin-left: .15rem; }
-
-  /* one card per fan header */
-  .fan { display: grid; grid-template-columns: 1fr auto; gap: .2rem .75rem; align-items: baseline; }
-  .fan .name { font-weight: 600; }
-  .fan .duty { font-size: 1.6rem; font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
-  .fan .duty small { font-size: .8rem; font-weight: 400; color: var(--muted); }
-  .fan .sub { grid-column: 1 / -1; display: flex; gap: .5rem; align-items: center;
-              font-size: .8rem; color: var(--muted); flex-wrap: wrap; }
-  .chip { border-radius: 999px; padding: .05rem .55rem; font-size: .72rem; font-weight: 600;
-          background: var(--off); color: var(--text); }
-  .chip.live { background: color-mix(in srgb, var(--on) 25%, var(--panel)); color: var(--on); }
-  .chip.boost { background: color-mix(in srgb, var(--booting) 25%, var(--panel)); color: var(--booting); }
-  .chip.hold { background: color-mix(in srgb, var(--danger) 25%, var(--panel)); color: var(--danger); }
-  .bar { grid-column: 1 / -1; height: 4px; border-radius: 2px; background: var(--off); overflow: hidden; margin: .3rem 0 .45rem; }
-  .bar i { display: block; height: 100%; background: var(--on); transition: width .4s; }
-  .bar.boost i { background: var(--booting); }
-  .bar.fallback i { background: var(--muted); }
-  /* the fallback slider on a fan card (into the config, or onto the receiver) */
-  .fan .fb { grid-column: 1 / -1; display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-bottom: .3rem; }
-  .fan .fb .sl { flex: 1 1 8rem; }
-  .fan .fb .unit { font-size: .75rem; color: var(--muted); }
-
-  /* the curve: an SVG the card owns; points drag when editing */
-  .curve { grid-column: 1 / -1; width: 100%; height: 7.5rem; display: block;
-           touch-action: none; user-select: none; -webkit-user-select: none; }
-  .curve .grid { stroke: #232a3d; stroke-width: 1; }
-  .curve .axis { fill: var(--muted); font-size: 9px; }
-  .curve .line { fill: none; stroke: var(--on); stroke-width: 2; stroke-linejoin: round; }
-  .curve.editing .line { stroke: var(--booting); }
-  .curve .pt { fill: var(--panel); stroke: var(--on); stroke-width: 2; }
-  .curve.editing .pt { stroke: var(--booting); r: 7; cursor: grab; }
-  .curve .now { stroke: var(--text); stroke-width: 1; stroke-dasharray: 3 3; }
-  .curve .nowpt { fill: var(--text); }
-
-  .fan .tools { grid-column: 1 / -1; display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-top: .3rem; }
-  .fan .tools button, .gl .tools button { padding: .35rem .8rem; font-size: .82rem; }
-  .fan .tools .msg { font-size: .8rem; color: var(--muted); flex: 1 1 8rem; min-width: 0; }
-  .fan .tools .msg.ok { color: var(--on); }
-  .fan .tools .msg.err { color: var(--danger); }
-
-  /* the editor: point rows on a fixed grid (label · x · unit · y · % · remove)
-     so a row never wraps at phone width; the two standalone fields are
-     label · input · hint, the hint taking whatever is left */
-  .editor { --lbl: 3.4rem; --inp: 4.2rem; /* label and number-field widths, shared by both row kinds */
-            grid-column: 1 / -1; display: flex; flex-direction: column; gap: .4rem; margin-top: .2rem; }
-  .editor .prow { display: grid; grid-template-columns: var(--lbl) var(--inp) auto var(--inp) auto 2rem;
-                  gap: .3rem; align-items: center; }
-  .editor .row { justify-content: flex-start; gap: .3rem; align-items: center; flex-wrap: nowrap; }
-  .editor .row label { flex: 0 0 var(--lbl); }
-  .editor .row .unit { flex: 1 1 0; min-width: 0; }
-  .editor label { font-size: .78rem; color: var(--muted); }
-  .editor input { width: var(--inp); padding: .35rem .4rem; text-align: right; letter-spacing: 0; font-size: .9rem; }
-  .editor input:invalid { border-color: var(--danger); }
-  .editor input::placeholder { font-size: .8rem; letter-spacing: -.01em; }
-  .editor .x { cursor: pointer; padding: .2rem 0; font-size: .9rem; line-height: 1; width: 2rem; }
-  .editor .unit { font-size: .78rem; color: var(--muted); white-space: nowrap; }
-  .editor .row .unit { white-space: normal; }
-  /* the narrowest phones (320 px): the point row's fixed columns must shrink
-     with the card rather than push out of it */
-  @media (max-width: 340px) {
-    .editor { --lbl: 3rem; --inp: 3.6rem; }
-    .editor .prow { grid-template-columns: var(--lbl) var(--inp) auto var(--inp) auto 1.8rem; }
-    .editor input { padding-inline: .25rem; }
-  }
-
-  .gl .fields { display: grid; grid-template-columns: auto 1fr; gap: .4rem .75rem; align-items: center; font-size: .9rem; }
-  .gl .fields span { color: var(--muted); font-size: .85rem; }
-  .gl .fields input { width: 5.5rem; text-align: right; letter-spacing: 0; padding: .3rem .4rem; }
-  .gl .tools { display: flex; gap: .5rem; align-items: center; margin-top: .6rem; flex-wrap: wrap; }
-  .gl .tools .msg { flex: 1 1 8rem; min-width: 0; }
-
-  .info { display: grid; grid-template-columns: auto 1fr; gap: .25rem .75rem; font-size: .85rem; }
-  .info span:nth-child(odd) { color: var(--muted); }
-
-  /* ---- the strip card: sliders that apply on release, a switch per scene ---- */
-  #stripcard .fields { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
-  #stripcard .fields > span { padding-top: .25rem; }
-  .sl { display: grid; grid-template-columns: 1.1rem minmax(0, 1fr) 3.2rem; gap: .4rem; align-items: center; }
-  .sl.one { grid-template-columns: minmax(0, 1fr) 3.2rem; }
-  .sl .ch { font-style: normal; font-size: .72rem; font-weight: 600; text-align: center; border-radius: .25rem; padding: .05rem 0; }
-  .sl .ch.r { color: #ff6b6b; } .sl .ch.g { color: #5fd38a; } .sl .ch.b { color: #6fa8ff; }
-  .sl .val { font-size: .8rem; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-  .wb { display: flex; flex-direction: column; gap: .3rem; }
-  input[type=range] { width: 100%; min-width: 0; padding: 0; border: 0; background: none; accent-color: var(--on); height: 1.6rem; }
-  input[type=range]:disabled { opacity: .45; }
-  .gam { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .35rem; }
-  .gam label { display: flex; gap: .25rem; align-items: center; min-width: 0; }
-  .gam .ch { font-style: normal; font-size: .72rem; font-weight: 600; flex: none; }
-  .gam .ch.r { color: #ff6b6b; } .gam .ch.g { color: #5fd38a; } .gam .ch.b { color: #6fa8ff; }
-  .gam input { width: 100%; min-width: 0; text-align: center; letter-spacing: 0; padding: .3rem .2rem; font-size: .88rem;
-               -moz-appearance: textfield; appearance: textfield; }
-  .gam input::-webkit-inner-spin-button, .gam input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  /* ---- controls ---- */
+  .btns { display: flex; gap: .5rem; justify-content: flex-end; padding-top: .25rem; }
+  .btns.two { display: grid; grid-template-columns: 1fr 2fr; }
+  .btns.two .minor:only-child { grid-column: 1 / -1; }
+  .btns.eq { grid-template-columns: 1fr 1fr; }
+  button.primary, button.minor, button.danger, button.hard {
+    display: flex; align-items: center; justify-content: center; min-height: 2.75rem; padding: 0 1rem;
+    border-radius: .6rem; border: 1px solid var(--border); background: var(--panel); font-size: .95rem; font-weight: 600; }
+  button.primary { background: var(--on); border-color: var(--on); color: var(--bg); }
+  button.danger { color: var(--danger); }
+  button.hard { background: var(--danger); border-color: var(--danger); color: var(--bg); }
+  button.primary:disabled, button.minor:disabled, button.danger:disabled, button.hard:disabled { opacity: .45; }
+  input, select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: .5rem;
+                  padding: .45rem .6rem; font: inherit; font-size: .95rem; min-height: 2.5rem; }
+  input:disabled { opacity: .45; }
+  input.text, input.tok { width: 100%; }
+  input.tok { text-align: center; letter-spacing: .1em; }
+  input[type=number] { width: 4.5rem; text-align: right; font-variant-numeric: tabular-nums; }
+  input[type=color] { width: 2.4rem; height: 2rem; min-height: 0; padding: .1rem; border-radius: .4rem; cursor: pointer; }
+  input:invalid { border-color: var(--danger); }
+  .frow { display: flex; align-items: center; gap: .5rem; font-size: .9rem; min-height: 2.5rem; }
+  .frow > span { color: var(--muted); font-size: .85rem; flex: 0 0 5.6rem; }
+  .frow > span.grow { flex: 1 1 auto; }
+  .frow small { font-size: .78rem; color: var(--muted); flex: 1 1 auto; min-width: 0; }
+  .frow input.text, .frow select { flex: 1 1 auto; min-width: 0; }
+  /* a range slider */
+  .sl { display: flex; align-items: center; gap: .6rem; flex: 1 1 auto; min-width: 0; }
+  .sl input[type=range] { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; padding: 0; border: 0; background: none;
+                          accent-color: var(--on); height: 1.75rem; }
+  .sl .val { font-size: .8rem; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 2.6rem; text-align: right; white-space: nowrap; }
   /* a switch: a checkbox drawn as a pill */
-  .sw { position: relative; display: inline-block; width: 2.4rem; height: 1.35rem; flex: none; vertical-align: middle; }
-  .sw input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+  .sw { position: relative; display: inline-block; width: 2.4rem; height: 1.35rem; flex: none; }
+  .sw input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; min-height: 0; }
   .sw i { position: absolute; inset: 0; border-radius: 999px; background: var(--off); transition: background .2s; }
   .sw i::after { content: ""; position: absolute; top: .15rem; left: .15rem; width: 1.05rem; height: 1.05rem; border-radius: 50%;
                  background: var(--text); transition: transform .2s; }
   .sw input:checked + i { background: var(--on); }
   .sw input:checked + i::after { transform: translateX(1.05rem); }
   .sw input:disabled + i { opacity: .45; }
-  .swrow { display: flex; gap: .6rem; align-items: center; }
-  .swrow .unit { font-size: .78rem; color: var(--muted); }
-  .scenes { margin-top: .7rem; display: flex; flex-direction: column; gap: .45rem; }
-  .scenes h3 { font-size: .72rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
-  .scene { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: .3rem .6rem; align-items: center;
-           background: var(--bg); border-radius: .6rem; padding: .45rem .6rem; }
-  .scene .sname { font-weight: 600; font-size: .9rem; }
-  .scene .spath { font-size: .72rem; color: var(--muted); font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
-  .scene .extra { grid-column: 2 / -1; display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
-  .scene .extra .sl { flex: 1 1 8rem; }
-  .scene .extra .unit { font-size: .75rem; color: var(--muted); }
-  input[type=color] { width: 2.6rem; height: 1.7rem; padding: .1rem; border-radius: .4rem; cursor: pointer; }
-  #stripcard .tools { margin-top: .5rem; }
-  #stripcard .ro { margin-top: .5rem; }
-  #stripcard .tools .msg.ok { color: var(--on); }
-  #stripcard .tools .msg.err { color: var(--danger); }
-  .fan .chip.off { background: var(--off); color: var(--muted); }
-  .editor .row input[type=text] { width: auto; flex: 1 1 6rem; min-width: 0; text-align: left; }
-  .editor .row select { width: auto; flex: 1 1 6rem; min-width: 0; padding: .35rem .4rem; font-size: .9rem; letter-spacing: 0; }
+  .swrow { display: flex; align-items: center; justify-content: space-between; font-size: .9rem; min-height: 2rem; }
+  .rowlink { display: flex; align-items: center; justify-content: space-between; gap: .4rem; min-height: 2.75rem;
+             padding: 0 .25rem; font-size: .9rem; color: var(--muted); width: 100%; }
+  .rowlink.add { justify-content: flex-start; }
+  .rowlink:disabled { opacity: .45; }
+
+  /* ---- Power: the ring carries the state color ---- */
+  .center { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .9rem; padding: 1rem; }
+  #power {
+    width: 10.5rem; height: 10.5rem; border-radius: 50%;
+    border: 5px solid var(--off); background: var(--panel); color: var(--text);
+    font-size: 1.05rem; font-weight: 600;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .35rem;
+    transition: border-color .3s, box-shadow .3s;
+  }
+  #power:disabled { opacity: .55; }
+  #power.booting { border-color: var(--booting); box-shadow: 0 0 2.5rem color-mix(in srgb, var(--booting) 35%, transparent); }
+  #power.on      { border-color: var(--on); box-shadow: 0 0 2.5rem color-mix(in srgb, var(--on) 35%, transparent); }
+  #power.wait .sym { animation: breathe 2.4s ease-in-out infinite; }
+  @keyframes breathe { 50% { opacity: .35; } }
+  /* the power symbol, drawn in CSS so there's no icon dependency */
+  #power .sym { display: block; width: 2.2rem; height: 2.2rem; margin-bottom: .3rem; border: 3px solid currentColor; border-radius: 50%; position: relative;
+                -webkit-mask: conic-gradient(from -35deg, transparent 70deg, #000 0); mask: conic-gradient(from -35deg, transparent 70deg, #000 0); }
+  #power .sym::after { content: ""; position: absolute; left: 50%; top: -0.9rem; transform: translateX(-50%);
+                       width: 3px; height: 1.4rem; background: currentColor; border-radius: 2px; }
+  .hint { font-size: .82rem; color: var(--muted); }
+
+  /* the shutdown sheet */
+  .scrim { position: fixed; inset: 0; z-index: 5; background: rgba(11, 14, 20, .6); display: flex; flex-direction: column; justify-content: flex-end; }
+  .sheet { max-width: 28rem; width: 100%; margin: 0 auto; background: var(--panel); border: 1px solid var(--border); border-radius: 1.1rem 1.1rem 0 0;
+           padding: .6rem 1rem calc(1.5rem + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: .6rem; }
+  .sheet .grip { width: 2.2rem; height: 4px; border-radius: 2px; background: var(--off); margin: 0 auto .3rem; }
+  .sheet .sname { font-size: .95rem; font-weight: 600; text-align: center; }
+  .sheet .ssub { font-size: .82rem; color: var(--muted); text-align: center; margin-top: -.4rem; margin-bottom: .3rem; }
+  .sheet .note { margin: -.3rem 0 .2rem; }
+
+  /* ---- Fans: one row per header ---- */
+  .fan { padding: .6rem .8rem .7rem; gap: .35rem; }
+  .fan .head { display: grid; grid-template-columns: minmax(0, 1fr) auto 2.75rem; gap: .1rem .5rem; align-items: center; }
+  .fan .nm { display: flex; align-items: center; gap: .5rem; min-width: 0; }
+  .fan .name { font-weight: 600; font-size: .95rem; }
+  .fan .duty { font-size: 1.4rem; font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+  .fan .duty small { font-size: .75rem; font-weight: 400; color: var(--muted); }
+  .fan .cog { display: flex; align-items: center; justify-content: center; width: 2.75rem; height: 2.75rem; margin: -.4rem -.8rem -.4rem 0; color: var(--muted); }
+  .fan .what { grid-column: 1 / -1; font-size: .82rem; color: var(--muted); margin-top: -.15rem; }
+  .fan .bar { grid-column: 1 / -1; height: 4px; border-radius: 2px; background: var(--off); overflow: hidden; margin-top: .3rem; }
+  .fan .bar i { display: block; height: 100%; background: var(--on); transition: width .4s; }
+  .fan .bar.boost i { background: var(--booting); }
+  .fan .bar.fallback i { background: var(--muted); }
+  .fan .bar.hold i { background: var(--danger); }
+  .fan .curve { margin-top: .4rem; }
+  .chip { border-radius: 999px; padding: .05rem .55rem; font-size: .72rem; font-weight: 600; background: var(--off); color: var(--text); white-space: nowrap; }
+  .chip.boost, .chip.fallback { background: color-mix(in srgb, var(--booting) 25%, var(--panel)); color: var(--booting); }
+  .chip.hold { background: color-mix(in srgb, var(--danger) 25%, var(--panel)); color: var(--danger); }
+
+  /* the curve: an SVG the card owns; points drag when editing */
+  .curve { width: 100%; height: 7.5rem; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .curve .grid { stroke: var(--border); stroke-width: 1; }
+  .curve .axis { fill: var(--muted); font-size: 9px; }
+  .curve .line { fill: none; stroke: var(--on); stroke-width: 2; stroke-linejoin: round; }
+  .curve.editing { height: 9rem; }
+  .curve.editing .line { stroke: var(--booting); }
+  .curve .pt { fill: var(--panel); stroke: var(--on); stroke-width: 2; }
+  .curve.editing .pt { stroke: var(--booting); cursor: grab; }
+  .curve .now { stroke: var(--text); stroke-width: 1; stroke-dasharray: 3 3; }
+  .curve .nowpt { fill: var(--text); }
+
+  /* ---- the fan editor ---- */
+  .fold { display: flex; align-items: center; gap: .6rem; width: 100%; min-height: 2rem; color: var(--muted); text-align: left; }
+  .fold h2 { flex: 1 1 auto; }
+  .fold .pick { font-weight: 600; font-size: .95rem; color: var(--text); }
+  .fold .rd { font-size: .95rem; font-variant-numeric: tabular-nums; }
+  .fold .rd.on { color: var(--on); }
+  .srcs { display: flex; flex-direction: column; }
+  .src { display: flex; align-items: center; gap: .75rem; min-height: 3rem; padding: .25rem .1rem; text-align: left; border-bottom: 1px solid var(--border); }
+  .src:last-child { border-bottom: 0; }
+  .src:disabled { opacity: .5; }
+  .mark { width: 18px; height: 18px; flex: none; color: var(--on); display: flex; align-items: center; justify-content: center; }
+  .mark i { display: block; width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--off); }
+  .lbl { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; font-size: .95rem; }
+  .lbl small { font-size: .78rem; color: var(--muted); }
+  .src.on .lbl > span { font-weight: 600; }
+  .src .rd { font-size: .95rem; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .src.on .rd { color: var(--on); }
+  .pts { display: flex; flex-direction: column; gap: .35rem; }
+  .prow { display: grid; grid-template-columns: 3.4rem 4.5rem auto 4.5rem auto 2.2rem; gap: .35rem; align-items: center; }
+  .prow label, .prow .unit { font-size: .8rem; color: var(--muted); white-space: nowrap; }
+  .prow input { width: 100%; }
+  .prow .x { width: 2.2rem; height: 2.5rem; color: var(--muted); font-size: 1.1rem; }
+  @media (max-width: 340px) { .prow { grid-template-columns: 3rem 3.8rem auto 3.8rem auto 2rem; } .prow input { padding-inline: .3rem; } }
+
+  /* ---- LEDs ---- */
+  .scene { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: .3rem .7rem; align-items: center;
+           background: var(--bg); border-radius: .6rem; padding: .55rem .7rem; min-height: 3rem; }
+  .scene .sname { font-weight: 600; font-size: .95rem; }
+  .scene .extra { grid-column: 2 / -1; display: flex; align-items: center; gap: .6rem; }
+  .scene .extra .unit { font-size: .8rem; color: var(--muted); }
+  .prev { display: flex; align-items: center; gap: .75rem; }
+  .swatch { width: 3.6rem; height: 3.6rem; border-radius: .75rem; border: 1px solid var(--border); flex: none; }
+  .chrow { display: flex; align-items: center; gap: .6rem; }
+  .ch { font-style: normal; font-size: .72rem; font-weight: 600; width: 1rem; text-align: center; flex: none; }
+  .ch.r { color: #ff6b6b; } .ch.g { color: #5fd38a; } .ch.b { color: #6fa8ff; }
+  .gam { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .5rem; }
+  .gam label { display: flex; align-items: center; gap: .3rem; min-width: 0; }
+  .gam input { width: 100%; min-width: 0; text-align: center; -moz-appearance: textfield; appearance: textfield; }
+  .gam input::-webkit-inner-spin-button, .gam input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
+  /* ---- Receiver ---- */
+  .recv { display: flex; align-items: center; gap: .75rem; min-height: 3.25rem; padding: .4rem .7rem; text-align: left;
+          background: var(--bg); border-radius: .6rem; }
+  .recv:disabled { opacity: .6; }
+  .recv .lbl > span { font-weight: 600; }
+  .facts { display: grid; grid-template-columns: auto 1fr; gap: .25rem .9rem; font-size: .88rem; }
+  .facts .k { color: var(--muted); }
+
+  /* ---- the tab bar ---- */
+  nav { position: sticky; bottom: 0; z-index: 2; margin-top: auto; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+        background: var(--panel); border-top: 1px solid var(--border); padding: 0 .5rem calc(.6rem + env(safe-area-inset-bottom)); }
+  nav button { display: flex; flex-direction: column; align-items: center; gap: .15rem; padding: .5rem 0 .25rem; min-height: 3.25rem;
+               color: var(--muted); font-size: .68rem; font-weight: 600; }
+  nav button.on { color: var(--on); }
 </style>
 </head>
 <body>
-<h1>BC-250</h1>
-
-<select id="picker" aria-label="Receiver" hidden></select>
-
-<button id="power" class="off" disabled>
-  <span class="sym"></span><span id="powerlabel">Connect</span>
-</button>
-
-<div id="state"></div>
-
-<div class="row">
-  <button id="shutdown" class="minor danger" hidden>Shut down</button>
-  <button id="hardoff" class="minor danger" hidden>Force off</button>
-  <button id="changetoken" class="minor" hidden>Change token</button>
-  <button id="forget" class="minor" hidden>Forget receiver</button>
-</div>
-
-<div id="tokenbox">
-  <p id="tokenfor">Receiver token</p>
-  <input id="token" type="password" autocomplete="off"
-         placeholder="token" maxlength="16">
-  <div class="row">
-    <button id="savetoken" class="minor">Save</button>
-    <button id="canceltoken" class="minor" hidden>Cancel</button>
-  </div>
-</div>
-
-<!-- the dashboard; filled by renderDash() once the receiver's fans
-     characteristics are open -->
-<section id="dash" aria-label="Dashboard">
-  <div class="card" id="hostcard">
-    <h2>Host <span class="r" id="hostnote"></span></h2>
-    <div class="tiles">
-      <div class="tile"><div class="k">CPU temp</div><div class="v" id="t-temp">—</div></div>
-      <div class="tile"><div class="k">CPU load</div><div class="v" id="t-cpu">—</div></div>
-      <div class="tile"><div class="k">GPU load</div><div class="v" id="t-gpu">—</div></div>
-    </div>
-  </div>
-  <div id="fancards"></div>
-  <div class="card gl" id="globals" hidden>
-    <h2>Fan behaviour</h2>
-    <div class="fields">
-      <span>Hysteresis</span><div><input id="g-hyst" type="number" min="0" max="50" step="0.5"> <span class="unit">°C before slowing</span></div>
-      <span>Ramp down</span><div><input id="g-ramp" type="number" min="0" max="100" step="0.5"> <span class="unit">%/s (0 = instant)</span></div>
-      <span>Boost</span><div><input id="g-boost" type="number" min="0" max="255" step="1"> <span class="unit">s after power-on</span></div>
-    </div>
-    <div class="tools">
-      <button class="minor" id="g-save">Save</button>
-      <button class="minor" id="g-revert">Revert</button>
-      <span class="msg" id="g-msg"></span>
-    </div>
-  </div>
-  <div class="card gl" id="stripcard" hidden>
-    <h2>Strip <span class="r" id="stripnote"></span></h2>
-    <div class="fields">
-      <span>Brightness</span>
-      <div class="sl one"><input id="s-bri" type="range" min="0" max="100" step="1" aria-label="Brightness"><span class="val" id="s-bri-v"></span></div>
-      <span>White balance</span>
-      <div class="wb">
-        <div class="sl"><i class="ch r">R</i><input id="s-wr" type="range" min="0" max="255" step="1" aria-label="White balance red"><span class="val" id="s-wr-v"></span></div>
-        <div class="sl"><i class="ch g">G</i><input id="s-wg" type="range" min="0" max="255" step="1" aria-label="White balance green"><span class="val" id="s-wg-v"></span></div>
-        <div class="sl"><i class="ch b">B</i><input id="s-wb" type="range" min="0" max="255" step="1" aria-label="White balance blue"><span class="val" id="s-wb-v"></span></div>
-      </div>
-      <span>Gamma</span>
-      <div class="gam">
-        <label><i class="ch r">R</i><input id="s-gr" type="number" min="0.5" max="5" step="0.05" aria-label="Gamma red"></label>
-        <label><i class="ch g">G</i><input id="s-gg" type="number" min="0.5" max="5" step="0.05" aria-label="Gamma green"></label>
-        <label><i class="ch b">B</i><input id="s-gb" type="number" min="0.5" max="5" step="0.05" aria-label="Gamma blue"></label>
-      </div>
-      <span>Reverse</span>
-      <div class="swrow"><label class="sw"><input id="s-rev" type="checkbox"><i></i></label><span class="unit">LED 0 at the far end</span></div>
-    </div>
-    <div class="scenes" id="scenes"></div>
-    <div class="tools"><span class="msg" id="s-msg"></span></div>
-    <p class="note ro" id="s-ro" hidden>Read-only: the daemon can't write its config file.</p>
-  </div>
-  <div class="card" id="infocard">
-    <h2>Receiver</h2>
-    <div class="info" id="info"></div>
-  </div>
-</section>
-
-<script>
-'use strict';
-
-const SVC    = 'a5f20001-8f11-4e0e-9b3a-0bc250e0c001';
-const CTRL   = 'a5f20002-8f11-4e0e-9b3a-0bc250e0c001';
-const STAT   = 'a5f20003-8f11-4e0e-9b3a-0bc250e0c001';
-const FANS   = 'a5f20004-8f11-4e0e-9b3a-0bc250e0c001';
-const FANCFG = 'a5f20005-8f11-4e0e-9b3a-0bc250e0c001';
-const INFO   = 'a5f20006-8f11-4e0e-9b3a-0bc250e0c001';
-const TELEM  = 'a5f20007-8f11-4e0e-9b3a-0bc250e0c001';
-const STRIPCFG = 'a5f20008-8f11-4e0e-9b3a-0bc250e0c001';
-const FANSA  = 'a5f20009-8f11-4e0e-9b3a-0bc250e0c001';
-const OP_ON = 0x01, OP_SHUTDOWN = 0x02, OP_HARD_OFF = 0x03;
-const OP_FAN_FALLBACK = 0x10; // + slot(1) percent(1)
-const OP_FAN_SOURCE = 0x11;   // + slot(1) kind(1) gpio(1) npts(1) pts(2*npts)
-const TOKEN_LEN = 16;
-const STATE_NAMES = ['off', 'booting', 'on'];
-const DEFAULT_NAME = 'BC250'; // what the firmware advertises without a ble_remote.name
-const ADD = '+';              // picker value of the "add a receiver" entry
-
-const $ = id => document.getElementById(id);
-const powerBtn = $('power'), powerLabel = $('powerlabel');
-const stateEl = $('state'), shutdownBtn = $('shutdown');
-const hardoffBtn = $('hardoff'), tokenBtn = $('changetoken');
-const forgetBtn = $('forget'), picker = $('picker');
-
-let device = null, ctrl = null, stat = null; // the selected receiver + its live GATT
-let fansChr = null, cfgChr = null, telemChr = null; // the dashboard's (null on older firmware)
-let stripChr = null; // the strip card's (null on firmware before it)
-let saChr = null;    // the receiver's standalone fan settings (null on firmware before gpio sources)
-let psu = -1;          // last status byte seen, -1 = unknown
-let busy = false;      // a user-initiated connect or write in flight
-let attempt = null;    // the device an auto-reconnect (watch or connect) is live for
-let retryTimer = 0;
-let watchAbort = null; // aborts the advertisement watch of the live attempt
-let editToken = false; // the token box is open on request (change / rejected)
-
-// iPhone / iPad (iPadOS 13+ claims to be a Mac; touch points tell). Bluefy
-// and WebBLE run in a WKWebView, so their UA is an iOS Safari UA as well.
-const IOS = /iP(hone|ad|od)/.test(navigator.userAgent) ||
-            (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-const BLUEFY_STORE = 'https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055';
-// Bluefy registers a URL scheme that opens a page inside it (its vendor's
-// documented way to hand a page over from Safari)
-const bluefyLink = () => 'bluefy://open?url=' + encodeURIComponent(location.href.split('#')[0]);
-
-// ---- storage (localStorage; wrapped — storage can throw in private windows) ----
-const store = {
-  get(k) { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
-};
-
-// Every receiver the chooser has ever granted, by BluetoothDevice.id:
-// { name, token }. The name caches what the board advertised so the list
-// renders before (or without) getDevices(); the token is per board because
-// each is flashed with its own ble_remote.token — a board without one of its own
-// uses the shared 'ble-token', the first token ever entered on this phone.
-const receivers = (() => {
-  try { return JSON.parse(store.get('ble-receivers')) || {}; } catch { return {}; }
-})();
-const saveReceivers = () => store.set('ble-receivers', JSON.stringify(receivers));
-// devices Chrome has handed out this session (getDevices / chooser), by id —
-// only these can be connected without going through the chooser again
-const known = new Map();
-
-// earlier versions of this page knew exactly one receiver
-if (store.get('ble-device')) {
-  receivers[store.get('ble-device')] ||= { name: '', token: '' };
-  store.set('ble-current', store.get('ble-device'));
-  store.set('ble-device', '');
-  saveReceivers();
-}
-
-const token = () => (device && receivers[device.id]?.token) || store.get('ble-token');
-const anyKnown = () => Object.keys(receivers).length > 0;
-
-function tokenBytes() {
-  const bytes = new Uint8Array(TOKEN_LEN); // NUL padding, as the firmware compares
-  const t = token();
-  for (let i = 0; i < Math.min(t.length, TOKEN_LEN); i++)
-    bytes[i] = t.charCodeAt(i);
-  return bytes;
-}
-
-function remember(d) {
-  const r = receivers[d.id] ||= { name: '', token: '' };
-  if (d.name) r.name = d.name;
-  known.set(d.id, d);
-  saveReceivers();
-}
-
-// ---- UI ----
-function say(html, hint) { stateEl.innerHTML = html; stateEl.classList.toggle('hint', !!hint); }
-
-// display names, with twins (two boards both flashed as "BC250") numbered
-let labels = {};
-function relabel() {
-  const ids = Object.keys(receivers).sort((a, b) =>
-    (receivers[a].name || DEFAULT_NAME).localeCompare(receivers[b].name || DEFAULT_NAME) ||
-    a.localeCompare(b));
-  const seen = {};
-  labels = {};
-  for (const id of ids) {
-    const base = receivers[id].name || DEFAULT_NAME;
-    const n = seen[base] = (seen[base] || 0) + 1;
-    labels[id] = n > 1 ? `${base} (${n})` : base;
-  }
-  return ids;
-}
-const label = id => labels[id] || receivers[id]?.name || DEFAULT_NAME;
-
-function renderPicker() {
-  const ids = relabel();
-  picker.hidden = !anyKnown();
-  const current = device?.id || store.get('ble-current');
-  const items = ids.map(id => [id, labels[id]]);
-  if (!ids.includes(current)) items.unshift(['', 'Receiver…']);
-  items.push([ADD, 'Add a receiver…']);
-  // rebuilding a <select> the user has open closes it — only when it changed
-  const sig = JSON.stringify(items) + '|' + current;
-  if (sig !== picker.dataset.sig) {
-    picker.dataset.sig = sig;
-    picker.replaceChildren(...items.map(([v, t]) => {
-      const o = new Option(t, v);
-      if (v === '') o.disabled = true;
-      return o;
-    }));
-    picker.value = ids.includes(current) ? current : '';
-  }
-  picker.disabled = busy;
-}
-
-function render() {
-  renderPicker();
-  if (!('bluetooth' in navigator)) { powerBtn.disabled = true; picker.hidden = true; return; }
-  const connected = !!(device && device.gatt.connected);
-  $('dash').classList.toggle('show', connected && !!fansChr);
-  const pending = !!device && attempt === device;
-  // breathe while connecting AND while a tap's write is queued behind other
-  // link traffic (the dashboard's opening reads can hold it for a second or two)
-  powerBtn.className = (STATE_NAMES[psu] || 'off') + (pending || busy ? ' wait' : '');
-  // graceful shutdown needs a running OS to ask; the hard cut only needs the
-  // PSU to be up — it's the crash rescue, so it shows while booting too
-  shutdownBtn.hidden = !(connected && psu === 2);
-  hardoffBtn.hidden = !(connected && psu >= 1);
-  tokenBtn.hidden = !token() || editToken;
-  forgetBtn.hidden = !device || busy;
-
-  const box = $('tokenbox');
-  box.classList.toggle('show', editToken || !token());
-  $('tokenfor').textContent = device
-    ? `Token for ${label(device.id)}` : 'Receiver token';
-  $('canceltoken').hidden = !token();
-  if (!token()) {
-    powerBtn.disabled = true;
-    powerLabel.textContent = 'Connect';
-    return;
-  }
-
-  if (!connected) {
-    // still tappable while an auto-reconnect pends — the tap opens the
-    // chooser, the manual escape hatch (new receiver, permission revoked)
-    powerBtn.disabled = busy;
-    powerLabel.textContent = busy || pending ? 'Connecting…' : 'Connect';
-  } else if (psu === 0) {
-    powerBtn.disabled = busy;
-    powerLabel.textContent = 'Power on';
-  } else {
-    powerBtn.disabled = true;
-    powerLabel.textContent = psu === 1 ? 'Booting…' : 'On';
-  }
-}
-
-// ---- BLE ----
-// Chrome does not queue GATT operations: on Android a read or write started
-// while another is still in flight on the same device fails outright ("GATT
-// operation failed for unknown reason"), whatever the characteristic. Every
-// operation on the link goes through this one chain, so a tap on the power
-// button can't land in the middle of a dashboard read. An operation that
-// never settles (Android occasionally loses one when the link drops without
-// saying so) would otherwise park everything behind it — including the power
-// button — so each gets a deadline, and a disconnect or a receiver switch
-// starts a fresh chain (whatever was queued belonged to the old link). A
-// deadline that fires is taken at its word: the link is dropped, so an
-// operation Chrome may still have in flight can't collide with the next
-// one, and the usual auto-reconnect brings the board back.
-const GATT_OP_TIMEOUT_MS = 10000;
-let gattChain = Promise.resolve();
-function gattQueue(op) {
-  const p = gattChain.then(() => new Promise((resolve, reject) => {
-    const t = setTimeout(() => {
-      reject(new Error('Bluetooth operation timed out — the link may be gone'));
-      try { device?.gatt.disconnect(); } catch {}
-    }, GATT_OP_TIMEOUT_MS);
-    Promise.resolve().then(op).then(resolve, reject).finally(() => clearTimeout(t));
-  }));
-  gattChain = p.then(() => {}, () => {});
-  return p;
-}
-const gattReset = () => { gattChain = Promise.resolve(); };
-const gattRead = c => gattQueue(() => c.readValue());
-// writeValueWithResponse is newer than the iOS polyfills' first releases —
-// the deprecated writeValue is the same thing (write with response) where
-// the new name is missing
-const gattWrite = (c, v) => gattQueue(() =>
-  c.writeValueWithResponse ? c.writeValueWithResponse(v) : c.writeValue(v));
-const gattSubscribe = c => gattQueue(() => c.startNotifications());
-
-// top-level named handlers: addEventListener dedupes identical refs, so
-// re-attaching across reconnects can't stack them
-const onStatusEvent = e => { if (e.target === stat) onStatus(e.target.value.getUint8(0)); };
-
-// make d the selected receiver: the live connection (if any) moves with it
-function attach(d) {
-  watchAbort?.abort(); // a pick/switch supersedes any pending auto-attempt
-  if (device && device !== d && device.gatt.connected) device.gatt.disconnect();
-  device = d;
-  ctrl = stat = null;
-  psu = -1;
-  editToken = false;
-  gattReset();
-  dashReset();
-  store.set('ble-current', d.id);
-  d.addEventListener('gattserverdisconnected', onDisconnected);
-}
-
-async function open() {
-  const d = device;
-  const gatt = await d.gatt.connect();
-  const svc = await gatt.getPrimaryService(SVC);
-  const c = await svc.getCharacteristic(CTRL);
-  const s = await svc.getCharacteristic(STAT);
-  await gattSubscribe(s);
-  const first = (await gattRead(s)).getUint8(0);
-  if (device !== d) { gatt.disconnect(); return; } // superseded while we were at it
-  ctrl = c; stat = s;
-  s.addEventListener('characteristicvaluechanged', onStatusEvent);
-  onStatus(first);
-  remember(d);
-  say('');
-  dashOpen(svc).catch(e => { dashNote(`Dashboard: ${e.message}`); });
-}
-
-function onStatus(v) {
-  psu = v;
-  render();
-}
-
-function onDisconnected(e) {
-  if (e.target !== device) return; // a stale device we already replaced
-  ctrl = stat = null;
-  psu = -1;
-  gattReset();
-  dashReset();
-  render();
-  scheduleReconnect(1000);
-}
-
-// Chrome won't gatt.connect() a getDevices() device it hasn't discovered
-// this session: watch its advertisements and connect on the first one seen.
-// Resolves 'seen' (in range, connect now), 'fallback' (watch API missing or
-// refused — attempt a blind connect, the pre-flag behavior), or 'aborted'
-// (superseded by a pick / switch / tab hidden — do nothing). On iOS the
-// blind connect IS the right path: CoreBluetooth connects a known
-// peripheral without a scan and simply pends until it is in range, and the
-// polyfill browsers' watchAdvertisements() is missing or not to be waited on.
-function waitForAdvertisement(d) {
-  if (IOS || !d.watchAdvertisements) return Promise.resolve('fallback');
-  return new Promise(resolve => {
-    watchAbort?.abort();
-    const ac = watchAbort = new AbortController();
-    ac.signal.addEventListener('abort', () => resolve('aborted'));
-    d.addEventListener('advertisementreceived',
-                       () => { resolve('seen'); ac.abort(); },
-                       { once: true, signal: ac.signal });
-    d.watchAdvertisements({ signal: ac.signal })
-      .catch(() => { resolve('fallback'); ac.abort(); });
-  });
-}
-
-// auto-reconnect: the advertisement watch pends until the receiver is in
-// range, so one live attempt is the whole loop; the retry timer only guards
-// against failures after that (connect lost the race, Bluetooth off). The
-// attempt is pinned to a device: switching boards while one pends lets the
-// stale attempt fall through and starts a fresh one for the new board.
-async function reconnect() {
-  if (!device || device.gatt.connected || attempt === device || busy) return;
-  const d = attempt = device;
-  render();
-  try {
-    const how = await waitForAdvertisement(d);
-    if (how === 'aborted' || device !== d || d.gatt.connected) return;
-    await open();
-  }
-  catch (e) {
-    if (device !== d) return; // died because we switched away — not news
-    // keep retrying, but say why the last attempt died instead of idling mute
-    say(`Auto-reconnect: ${e.message} — retrying.`, true);
-    scheduleReconnect(10000);
-  }
-  finally { if (attempt === d) attempt = null; render(); }
-}
-
-function scheduleReconnect(ms) {
-  clearTimeout(retryTimer);
-  retryTimer = setTimeout(reconnect, ms);
-}
-
-// on load (and when the tab returns — Chrome drops pending connects in the
-// background), pick up the boards the chooser permitted before and connect
-// to the one used last
-async function resume() {
-  if (device) { reconnect(); return; }
-  if (!token() || !('bluetooth' in navigator)) return;
-  if (!navigator.bluetooth.getDevices) {
-    // stock Chrome (2026): persistent-device APIs still flag-gated; on iOS
-    // it is the browser app (WebBLE has no getDevices, Bluefy has) — there
-    // is no flag to name
-    say(IOS
-      ? 'This browser can’t remember receivers between visits — tap to ' +
-        'connect (Bluefy can).'
-      : 'Auto-reconnect needs “Experimental Web Platform features” turned ' +
-        'on in <code>chrome://flags</code> — until then, tap to connect.', true);
-    return;
-  }
-  try {
-    const list = await navigator.bluetooth.getDevices();
-    for (const d of list) remember(d);
-    const d = list.find(x => x.id === store.get('ble-current')) || list[0];
-    if (!d) {
-      // we HAVE connected before (receivers are stored) yet Chrome
-      // remembers nothing. One tap re-grants it; whether THAT grant then
-      // survives the session is the second flag's doing — the page can't
-      // read flag state, so name it only as the reason this would recur
-      if (anyKnown())
-        say(IOS
-          ? 'The browser holds no permission for the receiver — tap to ' +
-            'connect once.'
-          : 'Chrome holds no permission for the receiver — tap to connect ' +
-            'once. If this keeps coming back, enable <code>chrome://flags/' +
-            '#enable-web-bluetooth-new-permissions-backend</code> and ' +
-            'relaunch Chrome.', true);
-      render();
-      return;
-    }
-    attach(d);
-    reconnect();
-  } catch (e) { say(`Auto-reconnect failed: ${e.message}`); }
-}
-
-// the chooser: grants (and thereby adds) a receiver, then connects to it
-async function pick() {
-  const d = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] });
-  remember(d);
-  if (device && device.id === d.id && device.gatt.connected) {
-    store.set('ble-current', d.id);
-    return; // picked the board we're already on
-  }
-  attach(d);
-  render();
-  await open();
-}
-
-// the dropdown: a board Chrome handed us this session connects directly
-// (through the advertisement dance); anything else needs the chooser
-function select(id) {
-  store.set('ble-current', id);
-  if (device?.id === id) { reconnect(); return; }
-  attach(known.get(id));
-  say('');
-  reconnect();
-}
-
-async function write(op, ...args) {
-  const buf = new Uint8Array(TOKEN_LEN + 1 + args.length);
-  buf.set(tokenBytes());
-  buf[TOKEN_LEN] = op;
-  buf.set(args, TOKEN_LEN + 1);
-  try {
-    await gattWrite(ctrl, buf);
-    say('');
-  } catch (e) {
-    if (tokenRejected(e)) {
-      say(`Token rejected by ${label(device.id)} — enter the one it was flashed with.`);
-      editToken = true;
-    } else {
-      say(`Write failed: ${e.message}${writeHint(e)}`);
-    }
-    throw e;
-  }
-}
-
-// What a failed write means. The firmware answers a wrong token with "write
-// not permitted" — the ATT code for an application-level refusal, and the
-// one every platform reports distinctly. On Android, Chrome folds almost
-// everything else into "GATT Error Unknown.": the receiver's other refusals
-// (a full message queue, a bad length), the Android stack's own link-loss
-// status, and the "insufficient authentication" that firmware before Sep
-// 2026 answered a wrong token with. So that text is not proof of anything
-// in particular, and is worded that way.
-const tokenRejected = e => /not permitted|not authori[sz]ed|not paired|authentication/i.test(e.message);
-const writeHint = e => /GATT Error Unknown/i.test(e.message)
-  ? ' — Android reports several things this way: the link dropping, the receiver’s queue being full, or a wrong token on older firmware'
-  : '';
-
-// ---- the dashboard ----
-// Five values off the receiver: `fans` (its own live view, binary, notified
-// once a second), `sa` (its stored standalone fan settings — fallbacks,
-// boosts, and for a "gpio:N" header its pin and curve — binary, notified when
-// they change), `cfg` and `telem` (the daemon's config and readings, JSON
-// text relayed verbatim — daemon/fans.hpp documents the shape; notified when
-// the daemon sends a new one) and `info` (build facts, read once). The page
-// keeps the last of each and redraws from them; editing works on a copy of
-// one header (or the globals) and sends back just that as a partial edit.
-//
-// A header's card is built from the daemon's config when there is one (the
-// config is the source of truth while a daemon is connected, and an edit goes
-// to the daemon, which writes its file and pushes the receiver), else from
-// the receiver's own standalone settings — then the source picker offers
-// only what a receiver can run by itself (fallback, gpio) and an edit goes
-// straight to the receiver, which stores it until a daemon next connects and
-// the config wins again.
-
-// a header's source: the config's string ("fallback", "gpio:0", "temp",
-// "amdgpu:edge", "nct6686:pwm1", "cpu_load", "gpu_load") → its kind and parts
-const SRC_KINDS = {
-  fallback: { label: 'fallback', hint: 'runs the fallback slider’s value' },
-  gpio:     { label: 'PWM input', hint: 'a fan header’s PWM wire on a receiver GPIO' },
-  temp:     { label: 'CPU temperature', hint: 'the config’s sensors pick' },
-  hwmon:    { label: 'hwmon temperature', hint: 'chip:label, e.g. amdgpu:edge' },
-  pwm:      { label: 'board pwm', hint: 'chip:pwmN, the board’s own fan header' },
-  cpu_load: { label: 'CPU load' },
-  gpu_load: { label: 'GPU load' },
-  host:     { label: 'daemon curve', hint: 'a source only the daemon reads — pick fallback or PWM input to run this header without it' },
-};
-const HOST_KINDS = ['temp', 'hwmon', 'pwm', 'cpu_load', 'gpu_load']; // the daemon runs these
-function srcInfo(s) {
-  s = String(s || '');
-  if (s === 'fallback' || s === 'constant') return { kind: 'fallback', src: 'fallback' };
-  if (s === 'temp' || s === 'cpu_load' || s === 'gpu_load') return { kind: s, src: s };
-  if (s === 'pwm') return { kind: 'pwm', src: s, spec: '' }; // an older daemon sent kind names
-  const i = s.indexOf(':'), chip = i < 0 ? s : s.slice(0, i), label = i < 0 ? '' : s.slice(i + 1);
-  if (chip === 'gpio') return { kind: 'gpio', src: s, gpio: parseInt(label, 10) };
-  if (/^pwm\d+$/.test(label)) return { kind: 'pwm', src: s, spec: s };
-  return { kind: 'hwmon', src: s, spec: s };
-}
-// the config string a working copy stands for
-const srcText = h => h.kind === 'gpio' ? `gpio:${h.gpio}` : (h.kind === 'hwmon' || h.kind === 'pwm') ? (h.spec || '') : h.kind;
-const isFixed = h => h.kind === 'fallback';          // no curve: the fallback is the duty
-const isTempX = h => h.kind === 'temp' || h.kind === 'hwmon'; // the curve's x is °C
-const NONE = 0xFF;
-const CHANNELS = 6, MAX_POINTS = 8;   // common/fancurve.hpp: the daemon and the receiver cap at this too
-const SRC_NAMES = ['', 'fallback', 'live', 'boost', 'curve']; // fan::SRC_* (curve = the receiver's own gpio curve)
-const KIND_BYTE = { fallback: 0, gpio: 1, host: 2 };  // protocol.hpp FAN_KIND_*
-// the fans view's length by layout version: 1 = state(1) duty(1) per header,
-// 2 adds the receiver's stored fallback(1), 3 the source kind(1) and input(1)
-const FANS_STRIDE = { 1: 2, 2: 3, 3: 5 };
-const FANS_LEN = ver => 4 + CHANNELS * FANS_STRIDE[ver] + 4;
-// the standalone value: protocol.hpp CMD_FAN_STANDALONE's layout
-const SA_V1_LEN = 1 + 2 * CHANNELS, SA_PER_HEADER = 3 + 2 * MAX_POINTS;
-const SA_LEN = SA_V1_LEN + 1 + CHANNELS * SA_PER_HEADER;
-const SAVE_TIMEOUT_MS = 6000;
-const utf8 = new TextDecoder();
-
-let fans = null, sa = null, cfg = null, telem = null, info = null;
-let edits = {};       // header slot (or 'g') -> working copy while being edited
-let saving = null;    // 'g' or a slot: a write waiting for the daemon's config to come back
-let saveTimer = 0;
-let dragging = null;  // { slot, idx } while a curve point is being dragged
-
-const u32 = (dv, o) => dv.getUint32(o, true);
-
-function parseFans(dv) {
-  if (dv.byteLength < 1) return null;
-  const ver = dv.getUint8(0), stride = FANS_STRIDE[ver] || 0;
-  if (!stride || dv.byteLength < FANS_LEN(ver)) return null;
-  const f = dv.getUint8(1);
-  const out = {
-    active: !!(f & 1), boosting: !!(f & 2), hold: !!(f & 4), live: !!(f & 8),
-    host: !!(f & 16), telem: !!(f & 32),
-    psu: dv.getUint8(2), age: dv.getUint8(3), h: [], uptime: u32(dv, 4 + CHANNELS * stride),
-  };
-  for (let i = 0; i < CHANNELS; i++) {
-    const o = 4 + i * stride, st = dv.getUint8(o);
-    out.h.push({ wired: !!(st & 1), src: (st >> 1) & 7, duty: dv.getUint8(o + 1),
-                 fb: stride >= 3 ? dv.getUint8(o + 2) : null,   // null: firmware before the slider
-                 kind: stride >= 5 ? dv.getUint8(o + 3) : null, // null: firmware before gpio sources
-                 in: stride >= 5 ? dv.getUint8(o + 4) : NONE });
-  }
-  return out;
-}
-
-// the receiver's standalone settings → { boostSecs, ramp, h[slot]: { fb, boost, kind, gpio, pts } }
-// (kind as a name: 'fallback', 'gpio', or 'host' — a curve only the daemon runs)
-function parseSa(dv) {
-  if (dv.byteLength < SA_LEN) return null;
-  const out = { boostSecs: dv.getUint8(0), ramp: dv.getUint8(SA_V1_LEN), h: [] };
-  for (let i = 0; i < CHANNELS; i++) {
-    const q = SA_V1_LEN + 1 + i * SA_PER_HEADER, k = dv.getUint8(q), n = Math.min(MAX_POINTS, dv.getUint8(q + 2));
-    const pts = [];
-    if (k === KIND_BYTE.gpio) for (let j = 0; j < n; j++) pts.push({ x: dv.getUint8(q + 3 + 2 * j), y: dv.getUint8(q + 4 + 2 * j) });
-    out.h.push({ fb: dv.getUint8(1 + 2 * i), boost: dv.getUint8(2 + 2 * i),
-                 kind: k === KIND_BYTE.fallback ? 'fallback' : k === KIND_BYTE.gpio ? 'gpio' : 'host',
-                 gpio: dv.getUint8(q + 1), pts });
-  }
-  return out;
-}
-
-// the header a card shows: the daemon's, when it has one (route 'daemon'),
-// else the receiver's own standalone view of a wired header (route
-// 'receiver'), else null
-function cardHeader(slot) {
-  const c = cfg && cfg.h[slot];
-  if (c) return { ...c, route: 'daemon' };
-  const f = fans && fans.h[slot], s = sa && sa.h[slot];
-  if (!f || !f.wired || !s) return null;
-  return { name: `header${slot + 1}`, kind: s.kind, src: s.kind === 'gpio' ? `gpio:${s.gpio}` : s.kind,
-           gpio: s.gpio, spec: '', pts: s.pts.map(p => ({ ...p })), boost: s.boost, fallback: s.fb, route: 'receiver' };
-}
-
-// the fallback slider's write. The value lives in one of two places and the
-// slider writes to whichever owns it: the daemon's config for a header the
-// daemon has (a partial edit like every other fan edit — into the config
-// file, which the daemon then pushes to the receiver), else
-// the receiver itself via the control op — no daemon, or a wired header the
-// daemon's config doesn't list. Either way a view (the config, or the receiver's fans
-// view once a second) echoes the value; until one does the slider holds what
-// the finger set, so a view assembled before the change applied can't yank
-// it back.
-const pendFb = new Map(); // slot -> { v, t } a write no view has echoed yet
-const PEND_FB_MS = 3000;
-async function setFallback(slot, v) {
-  pendFb.set(slot, { v, t: Date.now() });
-  if (fallbackRoute(slot) === 'daemon') {
-    if (!(await writeCfg(slot, { ['header' + (slot + 1)]: { f: v } }))) { pendFb.delete(slot); renderDash(); }
-    return;
-  }
-  try { await write(OP_FAN_FALLBACK, slot, v); flash(slot, 'set', 'ok'); }
-  catch { pendFb.delete(slot); flash(slot, 'not set', 'err'); renderDash(); } // write() said why
-}
-// where a header's fallback is written: 'daemon', 'receiver', or '' (nowhere:
-// the daemon has it but can't write its config, or the receiver isn't wired)
-function fallbackRoute(slot) {
-  const c = cfg && cfg.h[slot], f = fans && fans.h[slot];
-  if (c) return cfg.editable ? 'daemon' : '';
-  return f && f.wired && f.fb !== null && f.fb !== NONE ? 'receiver' : '';
-}
-
-// "45:35 60:55" -> [{x, y}], sorted; the daemon's notation
-function parseCurve(text) {
-  const toks = String(text || '').trim().split(/[\s,]+/).filter(Boolean);
-  return toks.map(t => { const [x, y] = t.split(':').map(parseFloat); return { x, y }; })
-             .filter(p => !isNaN(p.x) && !isNaN(p.y)).sort((a, b) => a.x - b.x);
-}
-const curveText = pts => pts.map(p => `${p.x}:${p.y}`).join(' ');
-
-// the daemon's config JSON -> { editable, hyst, ramp, boostSecs, h[slot] }
-function parseCfg(text) {
-  let j;
-  try { j = JSON.parse(text); } catch { return null; }
-  if (!j || typeof j !== 'object') return null;
-  const c = { editable: !!j.editable, hyst: +j.hysteresis || 0, ramp: +j.ramp || 0,
-              boostSecs: +j.boost_seconds || 0, h: [] };
-  for (let i = 0; i < CHANNELS; i++) {
-    const h = j['header' + (i + 1)];
-    if (!h) { c.h.push(null); continue; }
-    const s = srcInfo(h.s);
-    // an older daemon wrote a constant's value as the curve; it is the duty
-    const pts = s.kind === 'fallback' ? [] : parseCurve(h.c);
-    c.h.push({ name: String(h.n || ''), ...s, pts,
-               boost: h.b === null || h.b === undefined ? NONE : +h.b,
-               fallback: h.f === undefined ? null : +h.f });
-  }
-  return c;
-}
-
-// the daemon's telemetry JSON -> { temp, cpu, gpu, h[slot]: { in, duty } }
-function parseTelem(text) {
-  let j;
-  try { j = JSON.parse(text); } catch { return null; }
-  if (!j || typeof j !== 'object') return null;
-  const t = { temp: j.temp, cpu: j.cpu, gpu: j.gpu, h: [] };
-  for (let i = 0; i < CHANNELS; i++) t.h.push(j['header' + (i + 1)] || null);
-  return t;
-}
-
-// ver 1: version, heap. ver 2 adds the GPIOs a gpio:N source may read as a
-// 64-bit mask (bit N = GPIO N) — `pins` is that as a sorted list, or null on
-// firmware that doesn't say (the editor then asks for a number)
-function parseInfo(dv) {
-  const ver = dv.byteLength ? dv.getUint8(0) : 0;
-  if (dv.byteLength < 41 || ver < 1 || ver > 2) return null;
-  let v = '';
-  for (let k = 1; k < 33; k++) { const ch = dv.getUint8(k); if (!ch) break; v += String.fromCharCode(ch); }
-  let pins = null;
-  if (ver >= 2 && dv.byteLength >= 49) {
-    pins = [];
-    for (let g = 0; g < 64; g++) if (dv.getUint8(41 + (g >> 3)) >> (g & 7) & 1) pins.push(g);
-  }
-  return { version: v, heap: u32(dv, 33), minHeap: u32(dv, 37), pins };
-}
-
-function dashReset() {
-  fansChr = cfgChr = telemChr = stripChr = saChr = null;
-  fans = sa = cfg = telem = info = null;
-  edits = {}; saving = null; dragging = null;
-  clearTimeout(saveTimer);
-  stripReset();
-  $('dash').classList.remove('show');
-}
-
-function dashNote(text) { $('hostnote').textContent = text; }
-
-// a notification is truncated to the ATT MTU; a read isn't. The fans value
-// fits any MTU; the two JSON values and the standalone value may not. A
-// value that arrived whole (`ok`) is used as it is; one cut short is
-// re-read. One read at a time: notifications that land while a read is in
-// flight don't each start another (reading on every notification, as this
-// once did, kept the link busy whenever telemetry moved and made the user's
-// own writes fail) — they mark the read stale, so it runs once more and the
-// newest value is never dropped.
-const whole = text => { try { JSON.parse(text); return true; } catch { return false; } };
-function notifier(current, ok, apply) {
-  let reading = false, stale = false;
-  return async e => {
-    const chr = e.target;
-    if (chr !== current()) return;
-    const dv = chr.value;
-    if (ok(dv)) { apply(dv); return; }
-    if (reading) { stale = true; return; }
-    reading = true;
-    try {
-      do {
-        stale = false;
-        const v = await gattRead(chr);
-        if (chr !== current()) return; // the dashboard closed or moved on meanwhile
-        apply(v);
-      } while (stale);
-    } catch {} finally { reading = false; }
-  };
-}
-const jsonNotifier = (current, apply) => notifier(current, dv => !dv.byteLength || whole(utf8.decode(dv)), apply);
-const onFansEvent = e => {
-  if (e.target !== fansChr) return;
-  const f = parseFans(e.target.value);
-  if (f) { fans = f; renderDash(); }
-};
-const onCfgEvent = jsonNotifier(() => cfgChr, onCfg);
-const onTelemEvent = jsonNotifier(() => telemChr, dv => {
-  telem = dv.byteLength ? parseTelem(utf8.decode(dv)) : null;
-  renderDash();
-});
-const onSaEvent = notifier(() => saChr, dv => dv.byteLength >= SA_LEN, onSa);
-
-function onCfg(dv) {
-  cfg = dv.byteLength ? parseCfg(utf8.decode(dv)) : null;
-  if (saving !== null) {
-    // the daemon answered a save with its new config: that card is done
-    const key = saving;
-    saving = null;
-    clearTimeout(saveTimer);
-    delete edits[key];
-    flash(key, 'saved', 'ok');
-  }
-  renderDash();
-}
-
-// the receiver's standalone settings (also the echo of a standalone save)
-function onSa(dv) {
-  const s = parseSa(dv);
-  if (!s) return;
-  sa = s;
-  if (saving !== null && !cfg) {
-    const key = saving;
-    saving = null;
-    clearTimeout(saveTimer);
-    delete edits[key];
-    flash(key, 'stored on the receiver', 'ok');
-  }
-  renderDash();
-}
-
-async function dashOpen(svc) {
-  let f, c, t, i;
-  try {
-    f = await svc.getCharacteristic(FANS);
-    c = await svc.getCharacteristic(FANCFG);
-    t = await svc.getCharacteristic(TELEM);
-  } catch { return; } // older firmware: no dashboard, and nothing to say
-  try { i = await svc.getCharacteristic(INFO); } catch { i = null; }
-  let sc = null, s = null;
-  try { sc = await svc.getCharacteristic(STRIPCFG); } catch { sc = null; } // firmware before the strip card
-  try { s = await svc.getCharacteristic(FANSA); } catch { s = null; }      // firmware before gpio sources
-  if (!device || !device.gatt.connected) return;
-  fansChr = f; cfgChr = c; telemChr = t; saChr = s;
-  f.addEventListener('characteristicvaluechanged', onFansEvent);
-  c.addEventListener('characteristicvaluechanged', onCfgEvent);
-  t.addEventListener('characteristicvaluechanged', onTelemEvent);
-  if (s) s.addEventListener('characteristicvaluechanged', onSaEvent);
-  await gattSubscribe(f);
-  await gattSubscribe(c);
-  await gattSubscribe(t); // this one tells the daemon to start reporting
-  if (s) await gattSubscribe(s);
-  const fv = parseFans(await gattRead(f));
-  if (fv) fans = fv;
-  onCfg(await gattRead(c));
-  const tv = await gattRead(t);
-  telem = tv.byteLength ? parseTelem(utf8.decode(tv)) : null;
-  if (s) { try { onSa(await gattRead(s)); } catch {} }
-  if (i) { try { info = parseInfo(await gattRead(i)); } catch { info = null; } }
-  renderDash();
-  if (sc) await stripOpen(sc);
-}
-
-// ---- rendering ----
-const fmt1 = v => (Math.round(v * 10) / 10).toString();
-const fmtIn = (h, v) => isTempX(h) ? `${fmt1(v)} °C` : `${fmt1(v)} %`;
-const fmtUptime = s => s < 3600 ? `${Math.floor(s / 60)} min` :
-  s < 86400 ? `${Math.floor(s / 3600)} h ${Math.floor(s % 3600 / 60)} min` :
-  `${Math.floor(s / 86400)} d ${Math.floor(s % 86400 / 3600)} h`;
-
-function flash(key, text, cls) {
-  const el = key === 'g' ? $('g-msg') : document.querySelector(`.fan[data-slot="${key}"] .msg`);
-  if (!el) return;
-  el.textContent = text;
-  el.className = 'msg ' + (cls || '');
-  if (cls === 'ok') setTimeout(() => { if (el.textContent === text) el.textContent = ''; }, 2500);
-}
-
-function renderDash() {
-  const show = !!(fansChr && device && device.gatt.connected);
-  $('dash').classList.toggle('show', show);
-  if (!show) return;
-
-  // host tiles: only while the receiver says the daemon's telemetry is fresh
-  const t = fans && fans.telem && telem;
-  $('t-temp').innerHTML = t && telem.temp !== undefined ? `${fmt1(telem.temp)}<small>°C</small>` : '—';
-  $('t-cpu').innerHTML = t && telem.cpu !== undefined ? `${telem.cpu}<small>%</small>` : '—';
-  $('t-gpu').innerHTML = t && telem.gpu !== undefined ? `${telem.gpu}<small>%</small>` : '—';
-  if (!fans) dashNote('');
-  else if (fans.telem) dashNote(`daemon live · ${fans.age}s ago`);
-  else if (fans.psu !== 2) dashNote('machine off');
-  else if (!fans.host) dashNote('no host on the link');
-  else dashNote(fans.age === 255 ? 'daemon not reporting' : `daemon quiet ${fans.age}s`);
-
-  renderFans();
-  renderGlobals();
-  renderStrip();
-
-  const rows = [];
-  if (info) {
-    rows.push(['Firmware', info.version || '?']);
-    rows.push(['Free heap', `${Math.round(info.heap / 1024)} KB (min ${Math.round(info.minHeap / 1024)} KB)`]);
-  }
-  if (fans) {
-    rows.push(['Uptime', fmtUptime(fans.uptime)]);
-    rows.push(['Fan headers', fans.active ? `${fans.h.filter(h => h.wired).length} wired` : 'off (no fancfg)']);
-    rows.push(['Host link', fans.host ? 'present' : 'absent']);
-  }
-  $('info').replaceChildren(...rows.flatMap(([k, v]) => {
-    const a = document.createElement('span'), b = document.createElement('span');
-    a.textContent = k; b.textContent = v; return [a, b];
-  }));
-}
-
-// which headers get a card: every wired one (the receiver drives it) plus
-// every one the daemon's config has, so a header in the config but not
-// flashed still shows — with a note, since that is a real misconfiguration
-function cardSlots() {
-  const slots = new Set();
-  if (fans) fans.h.forEach((h, i) => { if (h.wired) slots.add(i); });
-  if (cfg) cfg.h.forEach((h, i) => { if (h) slots.add(i); });
-  return [...slots].sort((a, b) => a - b);
-}
-
-function renderFans() {
-  const wrap = $('fancards');
-  const slots = cardSlots();
-  // keep cards across redraws so an open editor (and a drag) survives
-  const have = new Map([...wrap.children].map(el => [+el.dataset.slot, el]));
-  for (const el of have.values()) if (!slots.includes(+el.dataset.slot)) el.remove();
-  let anyNote = false;
-  const cards = [];
-  for (const slot of slots) {
-    let el = have.get(slot);
-    if (!el) {
-      el = document.createElement('div');
-      el.className = 'card fan';
-      el.dataset.slot = slot;
-      wrap.appendChild(el);
-    }
-    cards.push(el);
-    anyNote |= renderFanCard(el, slot);
-  }
-  // order the cards by slot (a header appearing later lands in place), moving
-  // only a card that is out of place: re-inserting a card detaches it for a
-  // moment, which drops focus inside it — the source picker the user has open
-  // closes, and the browser scrolls to wherever focus lands
-  cards.forEach((el, i) => { if (wrap.children[i] !== el) wrap.insertBefore(el, wrap.children[i] || null); });
-  if (!slots.length) {
-    wrap.replaceChildren(Object.assign(document.createElement('div'), {
-      className: 'card note',
-      textContent: fans && !fans.active ? 'No fan headers wired on this receiver (the config’s fans block is off or unflashed).'
-                                        : 'No fan configuration from the daemon yet.' }));
-  }
-}
-
-// the reading a header's curve sees right now: a gpio header's from the
-// receiver (it samples the pin), a host source's from the daemon's telemetry
-function inputOf(slot, h) {
-  if (!h) return null;
-  if (h.kind === 'gpio') { const f = fans && fans.h[slot]; return f && f.in !== NONE ? f.in : null; }
-  const tm = fans && fans.telem && telem && telem.h[slot];
-  return tm && tm.in !== undefined ? tm.in : null;
-}
-
-// what a card says under its name about the source
-function describe(slot, h, f) {
-  if (!h) return f && f.wired ? 'not driven by the daemon — runs its fallback' : '';
-  const now = inputOf(slot, h);
-  const reading = now === null ? '' : ` · ${fmtIn(h, now)}`;
-  switch (h.kind) {
-    case 'fallback': return 'fallback — the slider is the speed';
-    case 'gpio': return `PWM input on gpio${h.gpio}${reading}${now === null ? ' · no reading' : ''}`;
-    case 'host': return 'a curve only the daemon runs — fallback until it connects';
-    case 'temp': return `CPU temperature${reading}`;
-    case 'hwmon': return `${h.spec}${reading}`;
-    case 'pwm': return `board pwm ${h.spec}${reading}`;
-    case 'cpu_load': return `CPU load${reading}`;
-    case 'gpu_load': return `GPU load${reading}`;
-  }
-  return h.src;
-}
-
-// one header card. Returns true when it shows a misconfiguration note.
-function renderFanCard(el, slot) {
-  const f = fans && fans.h[slot];
-  const c = cardHeader(slot);
-  const editing = slot in edits;
-  const work = editing ? edits[slot] : c;
-  const name = (c && c.name) || `header${slot + 1}`;
-  // the daemon's header edits when its config file is writable; the
-  // receiver's own always (it stores the edit itself)
-  const editable = !!c && (c.route === 'daemon' ? !!(cfg && cfg.editable) : true);
-
-  let src = f && f.wired ? SRC_NAMES[f.src] || '' : '';
-  if (f && f.hold) src = 'hold';
-  const duty = f && f.wired && f.duty !== NONE ? f.duty : null;
-
-  const sub = describe(slot, c, f);
-  let note = '';
-  if (c && c.route === 'daemon' && f && !f.wired) note = 'in the config but not wired on the receiver: run make flash-fan';
-
-  // first paint builds the skeleton; later paints only update text/attrs so
-  // an open editor's inputs (and the drag) aren't torn down under the finger
-  if (!el.firstChild) {
-    el.innerHTML = `
-      <div class="name"></div><div class="duty"><span class="d"></span><small>%</small></div>
-      <div class="sub"><span class="chip"></span><span class="what"></span><span class="note" hidden></span></div>
-      <div class="bar"><i></i></div>
-      <div class="fb" hidden><div class="sl one"><input type="range" class="fbv" min="0" max="100" step="1" aria-label="Fallback duty"><span class="val"></span></div><span class="unit">fallback · stored on the receiver</span></div>
-      <svg class="curve" viewBox="0 0 320 120" preserveAspectRatio="none"></svg>
-      <div class="editor" hidden></div>
-      <div class="tools"><button class="minor edit">Edit</button>
-        <button class="minor save" hidden>Save</button><button class="minor cancel" hidden>Cancel</button>
-        <span class="msg"></span></div>`;
-    el.querySelector('.edit').addEventListener('click', () => beginEdit(slot));
-    el.querySelector('.cancel').addEventListener('click', () => { delete edits[slot]; renderDash(); });
-    el.querySelector('.save').addEventListener('click', () => saveEdit(slot));
-    bindCurveDrag(el.querySelector('.curve'), slot);
-    bindSlider(el.querySelector('.fbv'), v => { el.querySelector('.fb .val').textContent = `${v} %`; },
-               v => setFallback(slot, v));
-  }
-
-  el.querySelector('.name').textContent = name;
-  el.querySelector('.d').textContent = duty === null ? '—' : duty;
-  const chip = el.querySelector('.chip');
-  chip.textContent = src;
-  chip.className = 'chip ' + (src === 'live' || src === 'curve' ? 'live' : src === 'boost' ? 'boost' : src === 'hold' ? 'hold' : '');
-  chip.hidden = !chip.textContent;
-  el.querySelector('.what').textContent = sub;
-  const noteEl = el.querySelector('.note');
-  noteEl.textContent = note; noteEl.hidden = !note;
-  const bar = el.querySelector('.bar');
-  bar.className = 'bar ' + (src === 'boost' ? 'boost' : src === 'fallback' ? 'fallback' : '');
-  bar.firstChild.style.width = `${duty === null ? 0 : duty}%`;
-
-  // the fallback slider — what the header runs when nothing drives it. Shown
-  // whenever there is a value to show: the config's for a header the daemon
-  // has (that is what the daemon pushes to the receiver), else the
-  // receiver's own stored one. setFallback routes the write the same way.
-  const fbEl = el.querySelector('.fb');
-  const route = fallbackRoute(slot);
-  const fbVal = c && c.route === 'daemon' && c.fallback !== null ? c.fallback
-              : f && f.wired && f.fb !== null && f.fb !== NONE ? f.fb : null;
-  fbEl.hidden = fbVal === null;
-  if (fbVal !== null) {
-    const inp = fbEl.querySelector('.fbv');
-    const pend = pendFb.get(slot);
-    if (pend && (pend.v === fbVal || Date.now() - pend.t > PEND_FB_MS)) pendFb.delete(slot);
-    if (!sliding.has(inp)) inp.value = pendFb.has(slot) ? pendFb.get(slot).v : fbVal;
-    inp.disabled = !route || saving !== null;
-    fbEl.querySelector('.val').textContent = `${inp.value} %`;
-    fbEl.querySelector('.unit').textContent = route === 'daemon' ? 'fallback · into the config' : 'fallback · stored on the receiver';
-  }
-
-  const svg = el.querySelector('.curve');
-  // SVG elements have no .hidden property
-  svg.toggleAttribute('hidden', !work || !work.pts.length);
-  if (work && work.pts.length) drawCurve(svg, work, editing ? null : inputOf(slot, work), editing);
-  svg.classList.toggle('editing', editing);
-
-  const ed = el.querySelector('.editor');
-  ed.hidden = !editing;
-  if (editing) renderEditor(ed, slot);
-  el.querySelector('.edit').hidden = editing || !editable;
-  el.querySelector('.save').hidden = !editing;
-  el.querySelector('.cancel').hidden = !editing;
-  el.querySelector('.save').disabled = saving !== null;
-  return !!note;
-}
-
-// ---- the curve chart ----
-// x spans the curve's points with a margin (percent kinds always 0..100), y
-// is 0..100 duty; the polyline is flat beyond the end points, as the daemon
-// evaluates it. `now` marks the current input on the curve.
-const PAD = { l: 26, r: 8, t: 6, b: 16 }, W = 320, H = 120;
-
-function xDomain(h) {
-  if (!isTempX(h)) return [0, 100];
-  const xs = h.pts.map(p => p.x);
-  let lo = Math.min(20, ...xs) - 5, hi = Math.max(90, ...xs) + 5;
-  lo = Math.floor(lo / 10) * 10; hi = Math.ceil(hi / 10) * 10;
-  return [lo, hi];
-}
-const sx = (x, d) => PAD.l + (x - d[0]) / (d[1] - d[0]) * (W - PAD.l - PAD.r);
-const sy = y => PAD.t + (1 - y / 100) * (H - PAD.t - PAD.b);
-const ux = (px, d) => d[0] + (px - PAD.l) / (W - PAD.l - PAD.r) * (d[1] - d[0]);
-const uy = py => (1 - (py - PAD.t) / (H - PAD.t - PAD.b)) * 100;
-
-function evalCurve(h, x) {
-  const p = h.pts;
-  if (x <= p[0].x) return p[0].y;
-  if (x >= p[p.length - 1].x) return p[p.length - 1].y;
-  for (let i = 1; i < p.length; i++)
-    if (x <= p[i].x) { const a = p[i - 1], b = p[i]; return a.y + (x - a.x) / (b.x - a.x) * (b.y - a.y); }
-  return p[p.length - 1].y;
-}
-
-function drawCurve(svg, h, now, editing) {
-  const d = xDomain(h);
-  const el = (tag, attrs, text) => {
-    const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
-    for (const k in attrs) e.setAttribute(k, attrs[k]);
-    if (text !== undefined) e.textContent = text;
-    return e;
-  };
-  const kids = [];
-  for (const y of [0, 25, 50, 75, 100]) {
-    kids.push(el('line', { class: 'grid', x1: PAD.l, x2: W - PAD.r, y1: sy(y), y2: sy(y) }));
-    if (y % 50 === 0) kids.push(el('text', { class: 'axis', x: PAD.l - 4, y: sy(y) + 3, 'text-anchor': 'end' }, y));
-  }
-  const step = isTempX(h) ? 10 : 25;
-  for (let x = d[0]; x <= d[1]; x += step)
-    kids.push(el('text', { class: 'axis', x: sx(x, d), y: H - 4, 'text-anchor': 'middle' }, x));
-
-  const pts = h.pts.map(p => [sx(p.x, d), sy(p.y)]);
-  const line = [[PAD.l, pts[0][1]], ...pts, [W - PAD.r, pts[pts.length - 1][1]]];
-  kids.push(el('polyline', { class: 'line', points: line.map(p => p.join(',')).join(' ') }));
-  if (now !== null && !editing) {
-    const nx = Math.max(d[0], Math.min(d[1], now)), ny = evalCurve(h, now);
-    kids.push(el('line', { class: 'now', x1: sx(nx, d), x2: sx(nx, d), y1: PAD.t, y2: H - PAD.b }));
-    kids.push(el('circle', { class: 'nowpt', cx: sx(nx, d), cy: sy(ny), r: 3.5 }));
-  }
-  pts.forEach(([x, y], i) => kids.push(el('circle', { class: 'pt', 'data-idx': i, cx: x, cy: y, r: 5 })));
-  svg.replaceChildren(...kids);
-}
-
-// dragging a point while editing: x stays between its neighbours (and in the
-// chart), y in 0..100. Pointer events cover mouse and touch alike; the svg's
-// touch-action: none keeps the page from scrolling.
-function bindCurveDrag(svg, slot) {
-  const pos = e => {
-    const r = svg.getBoundingClientRect();
-    return [(e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H];
-  };
-  svg.addEventListener('pointerdown', e => {
-    if (!(slot in edits)) return;
-    const t = e.target.closest('.pt');
-    if (!t) return;
-    dragging = { slot, idx: +t.dataset.idx };
-    svg.setPointerCapture(e.pointerId);
-    e.preventDefault();
-  });
-  svg.addEventListener('pointermove', e => {
-    if (!dragging || dragging.slot !== slot) return;
-    const h = edits[slot], p = h.pts[dragging.idx], d = xDomain(h);
-    const [px, py] = pos(e);
-    p.y = Math.round(Math.max(0, Math.min(100, uy(py))));
-    let x = ux(px, d);
-    const lo = dragging.idx > 0 ? h.pts[dragging.idx - 1].x + 0.5 : d[0];
-    const hi = dragging.idx < h.pts.length - 1 ? h.pts[dragging.idx + 1].x - 0.5 : d[1];
-    x = Math.max(lo, Math.min(hi, x));
-    p.x = isTempX(h) ? Math.round(x * 2) / 2 : Math.round(x);
-    renderDash();
-  });
-  const end = () => { if (dragging && dragging.slot === slot) { dragging = null; renderDash(); } };
-  svg.addEventListener('pointerup', end);
-  svg.addEventListener('pointercancel', end);
-}
-
-// ---- editing ----
-function beginEdit(slot) {
-  const h = cardHeader(slot);
-  if (!h) return;
-  edits[slot] = { ...h, pts: h.pts.map(p => ({ ...p })) };
-  renderDash();
-}
-
-// a starting curve for a source the header didn't have before: two points
-// in the source's own x unit
-const defaultCurve = h => isTempX(h) ? [{ x: 40, y: 30 }, { x: 70, y: 100 }] : [{ x: 0, y: 20 }, { x: 100, y: 100 }];
-
-// the source picker changed kind: keep a curve whose x unit still fits,
-// start a fresh one otherwise, none for a fallback
-function setKind(h, kind) {
-  const wasTemp = isTempX(h), hadCurve = !isFixed(h);
-  h.kind = kind;
-  if (kind === 'gpio' && !(h.gpio >= 0)) h.gpio = 0;
-  if ((kind === 'hwmon' || kind === 'pwm') && h.spec === undefined) h.spec = '';
-  if (isFixed(h)) h.pts = [];
-  else if (!hadCurve || wasTemp !== isTempX(h) || !h.pts.length) h.pts = defaultCurve(h);
-  else if (kind === 'gpio') h.pts = h.pts.map(p => ({ x: Math.round(Math.max(0, Math.min(100, p.x))), y: p.y }));
-}
-
-// the numeric side of the editor: name and source (the kinds a receiver runs
-// alone, or every kind when the daemon's config is the target), one row per
-// point, add/remove, then boost (the fallback is the card's slider). Rebuilt
-// when the shape changes, otherwise the inputs' values are refreshed in place
-// (typing must not lose focus).
-function renderEditor(ed, slot) {
-  const h = edits[slot];
-  const daemon = h.route === 'daemon';
-  const unit = isTempX(h) ? '°C' : '%';
-  const rows = h.pts.length;
-  const pins = info && info.pins; // the receiver's usable input pins, or null
-  // the pin is part of the shape only as a list: the list must include the
-  // pick, while a number being typed must not be rebuilt under the finger
-  const shape = `${rows}/${h.kind}/${h.route}/${pins ? pins.join() + '/' + h.gpio : ''}`;
-  if (ed.dataset.shape !== shape) {
-    ed.dataset.shape = shape;
-    // the daemon runs every kind; a receiver alone only fallback and gpio (a
-    // header on a daemon curve shows that as its current, unselectable pick)
-    const kinds = daemon ? ['fallback', 'gpio', ...HOST_KINDS]
-                         : h.kind === 'host' ? ['host', 'fallback', 'gpio'] : ['fallback', 'gpio'];
-    const parts = [];
-    if (daemon) parts.push(`<div class="row"><label>name</label><input type="text" class="nm" maxlength="16" autocomplete="off"></div>`);
-    parts.push(`<div class="row"><label>source</label><select class="src">${kinds.map(k =>
-      `<option value="${k}"${k === h.kind ? ' selected' : ''}${k === 'host' ? ' disabled' : ''}>${SRC_KINDS[k].label}</option>`).join('')}</select></div>`);
-    if (h.kind === 'gpio' && pins) {
-      // the receiver says which pins it can read on; the header's current pin
-      // stays listed even if it no longer qualifies, so the edit can be seen
-      const opts = pins.includes(h.gpio) ? pins : [...pins, h.gpio].sort((a, b) => a - b);
-      parts.push(`<div class="row"><label>gpio</label><select class="gp">${opts.map(g =>
-        `<option value="${g}"${g === h.gpio ? ' selected' : ''}>gpio${g}</option>`).join('')}</select></div>`);
-    } else if (h.kind === 'gpio')
-      parts.push(`<div class="row"><label>gpio</label><input type="number" class="gp" min="0" max="48" step="1"><span class="unit">a free receiver pin</span></div>`);
-    else if (h.kind === 'hwmon' || h.kind === 'pwm')
-      parts.push(`<div class="row"><label>sensor</label><input type="text" class="sp" autocomplete="off" placeholder="${SRC_KINDS[h.kind].hint}"></div>`);
-    else if (SRC_KINDS[h.kind]?.hint)
-      parts.push(`<div class="row"><label></label><span class="unit">${SRC_KINDS[h.kind].hint}</span></div>`);
-    for (let i = 0; i < rows; i++) {
-      parts.push(`<div class="prow">
-        <label>point ${i + 1}</label><input type="number" class="px" data-i="${i}" step="${isTempX(h) ? 0.5 : 1}"><span class="unit">${unit} →</span>
-        <input type="number" class="py" data-i="${i}" min="0" max="100" step="1"><span class="unit">%</span>
-        ${rows > 1 ? `<button class="minor x" data-i="${i}" title="remove point">×</button>` : '<span></span>'}
-      </div>`);
-    }
-    if (!isFixed(h) && rows < MAX_POINTS)
-      parts.push('<div class="row"><label></label><button class="minor add">+ point</button></div>');
-    if (daemon)
-      parts.push(`<div class="row"><label>boost</label><input type="number" class="boost" min="0" max="100" step="1" placeholder="none"><span class="unit">% at power-on</span></div>`);
-    ed.innerHTML = parts.join('');
-    ed.querySelector('.src').addEventListener('change', e => { setKind(h, e.target.value); renderDash(); });
-    ed.querySelector('.gp')?.addEventListener('input', e => {
-      const v = parseInt(e.target.value, 10); if (!isNaN(v)) h.gpio = v; });
-    ed.querySelector('select.gp')?.addEventListener('change', e => { h.gpio = +e.target.value; renderDash(); });
-    ed.querySelector('.sp')?.addEventListener('input', e => { h.spec = e.target.value.trim(); });
-    ed.querySelectorAll('.px').forEach(inp => inp.addEventListener('input', () => {
-      const v = parseFloat(inp.value); if (!isNaN(v)) h.pts[+inp.dataset.i].x = v; renderDash(); }));
-    ed.querySelectorAll('.py').forEach(inp => inp.addEventListener('input', () => {
-      const v = parseFloat(inp.value); if (!isNaN(v)) h.pts[+inp.dataset.i].y = Math.max(0, Math.min(100, v)); renderDash(); }));
-    ed.querySelectorAll('.x').forEach(btn => btn.addEventListener('click', () => {
-      h.pts.splice(+btn.dataset.i, 1); renderDash(); }));
-    ed.querySelector('.add')?.addEventListener('click', () => {
-      // a new point halfway along the widest gap (or past the end)
-      const p = h.pts;
-      let at = p.length, x, y;
-      if (p.length === 1) { x = p[0].x + 10; y = Math.min(100, p[0].y + 10); }
-      else {
-        let best = 0;
-        for (let i = 1; i < p.length; i++) if (p[i].x - p[i - 1].x > p[best + 1].x - p[best].x) best = i - 1;
-        at = best + 1; x = (p[best].x + p[best + 1].x) / 2; y = Math.round((p[best].y + p[best + 1].y) / 2);
-      }
-      if (!isTempX(h)) x = Math.round(x);
-      p.splice(at, 0, { x, y });
-      renderDash();
-    });
-    ed.querySelector('.nm')?.addEventListener('input', e => { h.name = e.target.value; });
-    ed.querySelector('.boost')?.addEventListener('input', e => {
-      h.boost = e.target.value === '' ? NONE : Math.max(0, Math.min(100, Math.round(+e.target.value))); });
-  }
-  // refresh values without clobbering the field being typed in
-  const set = (inp, v) => { if (inp && document.activeElement !== inp && inp.value !== String(v)) inp.value = v; };
-  ed.querySelectorAll('.px').forEach(inp => set(inp, h.pts[+inp.dataset.i].x));
-  ed.querySelectorAll('.py').forEach(inp => set(inp, h.pts[+inp.dataset.i].y));
-  set(ed.querySelector('.gp'), h.gpio);
-  set(ed.querySelector('.sp'), h.spec || '');
-  set(ed.querySelector('.boost'), h.boost === NONE ? '' : h.boost);
-  set(ed.querySelector('.nm'), h.name);
-}
-
-// what the daemon (or the receiver) will refuse, said here first (they also validate)
-function checkEdit(h) {
-  if (h.route === 'daemon') {
-    const nm = (h.name || '').trim();
-    if (!nm || [...nm].length > 16) return 'a name is 1–16 characters'; // characters, as the daemon counts
-  }
-  if (h.route !== 'daemon' && h.kind !== 'fallback' && h.kind !== 'gpio') return 'without a daemon a header runs fallback or a PWM input — pick one';
-  if (h.kind === 'gpio' && !(Number.isInteger(h.gpio) && h.gpio >= 0 && h.gpio <= 48)) return 'gpio is a pin number 0–48';
-  if ((h.kind === 'hwmon' || h.kind === 'pwm') && !/^[^:\s]+:[^:\s]+$/.test(h.spec || ''))
-    return h.kind === 'pwm' ? 'a board pwm is chip:pwmN, e.g. nct6686:pwm1' : 'a sensor is chip:label, e.g. amdgpu:edge';
-  if (h.kind === 'pwm' && !/:pwm\d+$/.test(h.spec)) return 'a board pwm is chip:pwmN, e.g. nct6686:pwm1';
-  if (!isFixed(h)) {
-    if (!h.pts.length) return 'a curve needs at least one point';
-    if (h.pts.length > MAX_POINTS) return `at most ${MAX_POINTS} points`;
-    const xs = new Set();
-    for (const p of h.pts) {
-      if (!(p.y >= 0 && p.y <= 100)) return 'duty must be 0–100 %';
-      if (h.kind === 'gpio' && !(Number.isInteger(p.x) && p.x >= 0 && p.x <= 100)) return 'a PWM input curve reads whole percents 0–100';
-      if (xs.has(p.x)) return `two points at ${p.x}`;
-      xs.add(p.x);
-    }
-  }
-  if (h.boost !== NONE && !(h.boost >= 0 && h.boost <= 100)) return 'boost must be 0–100 % or blank';
-  return '';
-}
-
-// write a partial edit (one header, or the globals — the daemon's JSON
-// shape), then wait for the daemon's config to come back (onCfg) — that is
-// what "saved" means here. True once the write itself went through (the
-// answer is still to come); false when it couldn't be sent, or failed.
-async function writeCfg(key, edit) {
-  if (!cfgChr || saving !== null) return false;
-  const text = new TextEncoder().encode(JSON.stringify(edit));
-  const buf = new Uint8Array(TOKEN_LEN + text.length);
-  buf.set(tokenBytes()); buf.set(text, TOKEN_LEN);
-  saving = key;
-  flash(key, 'saving…');
-  renderDash();
-  try {
-    await gattWrite(cfgChr, buf);
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      if (saving !== key) return;
-      saving = null;
-      flash(key, 'no answer from the daemon — is it running, and can it write its config?', 'err');
-      renderDash();
-    }, SAVE_TIMEOUT_MS);
-    return true;
-  } catch (e) {
-    saving = null;
-    if (tokenRejected(e)) {
-      flash(key, 'token rejected', 'err');
-      editToken = true;
-    } else flash(key, `write failed: ${e.message}${writeHint(e)}`, 'err');
-    renderDash();
-    return false;
-  }
-}
-
-// a standalone header's edit: the control op straight to the receiver, which
-// validates the pin and the curve itself (a refusal comes back as a write
-// error) and echoes the stored value on the standalone characteristic
-async function writeSource(slot, h) {
-  if (!ctrl || saving !== null) return;
-  const kind = KIND_BYTE[h.kind] ?? KIND_BYTE.host;
-  const pts = h.kind === 'gpio' ? h.pts.flatMap(p => [p.x, p.y]) : [];
-  saving = slot;
-  flash(slot, 'saving…');
-  renderDash();
-  try {
-    await write(OP_FAN_SOURCE, slot, kind, h.kind === 'gpio' ? h.gpio : NONE, pts.length / 2, ...pts);
-    if (!saChr) { saving = null; delete edits[slot]; flash(slot, 'stored on the receiver', 'ok'); renderDash(); return; }
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      if (saving !== slot) return;
-      saving = null;
-      flash(slot, 'the receiver did not echo the change', 'err');
-      renderDash();
-    }, SAVE_TIMEOUT_MS);
-  } catch {
-    saving = null;
-    flash(slot, 'refused by the receiver — a pin it can’t read on, or a bad curve', 'err'); // write() said more
-    renderDash();
-  }
-}
-
-function saveEdit(slot) {
-  const h = edits[slot];
-  if (!h) return;
-  h.pts.sort((a, b) => a.x - b.x);
-  const bad = checkEdit(h);
-  if (bad) { flash(slot, bad, 'err'); return; }
-  if (h.route !== 'daemon') { writeSource(slot, h); return; }
-  if (!cfg) return;
-  const e = { s: srcText(h), b: h.boost === NONE ? null : h.boost, n: h.name.trim() };
-  if (!isFixed(h)) e.c = curveText(h.pts);
-  writeCfg(slot, { ['header' + (slot + 1)]: e });
-}
-
-// ---- the global card: hysteresis, ramp, boost seconds ----
-function renderGlobals() {
-  const card = $('globals');
-  const editable = !!(cfg && cfg.editable);
-  card.hidden = !cfg;
-  if (card.hidden) return;
-  const g = edits.g || cfg;
-  const set = (inp, v) => { if (document.activeElement !== inp && inp.value !== String(v)) inp.value = v; };
-  set($('g-hyst'), g.hyst); set($('g-ramp'), g.ramp); set($('g-boost'), g.boostSecs);
-  for (const id of ['g-hyst', 'g-ramp', 'g-boost']) $(id).disabled = !editable || saving !== null;
-  $('g-save').hidden = $('g-revert').hidden = !('g' in edits);
-  $('g-save').disabled = saving !== null;
-}
-for (const [id, key] of [['g-hyst', 'hyst'], ['g-ramp', 'ramp'], ['g-boost', 'boostSecs']])
-  $(id).addEventListener('input', e => {
-    if (!cfg) return;
-    edits.g ||= { hyst: cfg.hyst, ramp: cfg.ramp, boostSecs: cfg.boostSecs };
-    const v = parseFloat(e.target.value);
-    if (!isNaN(v)) edits.g[key] = key === 'boostSecs' ? Math.max(0, Math.min(255, Math.round(v))) : Math.max(0, v);
-    renderGlobals();
-  });
-$('g-revert').addEventListener('click', () => { delete edits.g; renderDash(); });
-$('g-save').addEventListener('click', () => {
-  if (!edits.g || !cfg) return;
-  writeCfg('g', { hysteresis: edits.g.hyst, ramp: edits.g.ramp, boost_seconds: edits.g.boostSecs });
-});
-
-// ---- the strip card ----
-// The daemon's strip view (daemon/strip_remote.hpp): the strip block's knobs
-// and the scenes. Unlike the fan editor there is no Save: a slider applies
-// on release, a switch on the tap — the daemon corrects the live strip at
-// once and writes the value into its config, and the answering config is
-// what says "saved". Edits that land while one is in flight are merged and
-// sent when the answer comes, so dragging a second slider never fails.
-let scfg = null;        // the parsed view
-let sSaving = false;    // a write waiting for the daemon's view to come back
-let sInflight = null;   // that write's edit — the answer must reflect it
-let sPending = null;    // edits merged while sSaving
-let sTimer = 0;
-const hex2 = v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0');
-
-function parseStripCfg(text) {
-  let j;
-  try { j = JSON.parse(text); } catch { return null; }
-  if (!j || typeof j !== 'object') return null;
-  const g = String(j.gamma ?? '2.2').trim().split(/\s+/).map(parseFloat).filter(x => !isNaN(x));
-  const gamma = g.length === 3 ? g : [g[0] ?? 2.2, g[0] ?? 2.2, g[0] ?? 2.2];
-  const w = String(j.white_balance ?? 'ffffff').replace('#', '').padStart(6, 'f');
-  const wb = [0, 2, 4].map(i => parseInt(w.substr(i, 2), 16) || 0);
-  return { editable: !!j.editable, leds: +j.leds || 0, pin: +j.pin || 0, reverse: !!j.reverse,
-           brightness: Math.max(0, Math.min(1, +j.brightness || 0)), gamma, wb,
-           scenes: Array.isArray(j.scenes) ? j.scenes.filter(s => s && typeof s.p === 'string').map(s => ({
-             p: s.p, e: String(s.e || ''), on: !!s.on,
-             color: typeof s.color === 'string' ? s.color.replace('#', '') : null,
-             l: typeof s.l === 'number' ? s.l : null })) : [] };
-}
-
-function stripReset() {
-  scfg = null; sSaving = false; sInflight = null; sPending = null;
-  clearTimeout(sTimer);
-  $('stripcard').hidden = true;
-  $('scenes').dataset.sig = '';
-}
-
-const onStripEvent = jsonNotifier(() => stripChr, onStripCfg);
-
-// does the daemon's view carry the edit? The view is also pushed unsolicited
-// (a scene's file appearing or disappearing), so an answer is recognised by
-// its content, not its arrival; a refused edit sends nothing and times out.
-const near = (a, b) => Math.abs(a - b) < 0.006;
-function reflects(v, edit) {
-  if ('brightness' in edit && !near(v.brightness, edit.brightness)) return false;
-  if ('reverse' in edit && v.reverse !== edit.reverse) return false;
-  if ('white_balance' in edit && v.wb.map(hex2).join('') !== edit.white_balance.toLowerCase()) return false;
-  if ('gamma' in edit) {
-    const g = String(edit.gamma).split(/\s+/).map(parseFloat);
-    const want = g.length === 3 ? g : [g[0], g[0], g[0]];
-    if (!want.every((x, i) => near(x, v.gamma[i]))) return false;
-  }
-  for (const e of edit.scenes || []) {
-    const s = v.scenes.find(x => x.p === e.p);
-    if (!s) return false;
-    if ('on' in e && s.on !== e.on) return false;
-    if ('color' in e && s.color !== e.color.toLowerCase()) return false;
-    if ('l' in e && !near(s.l, e.l)) return false;
-  }
-  return true;
-}
-
-function onStripCfg(dv) {
-  scfg = dv.byteLength ? parseStripCfg(utf8.decode(dv)) : null;
-  if (sSaving && scfg && reflects(scfg, sInflight)) {
-    sSaving = false; sInflight = null;
-    clearTimeout(sTimer);
-    sflash('saved', 'ok');
-    if (sPending) { const e = sPending; sPending = null; writeStrip(e); }
-  }
-  renderStrip();
-}
-
-async function stripOpen(sc) {
-  stripChr = sc;
-  sc.addEventListener('characteristicvaluechanged', onStripEvent);
-  await gattSubscribe(sc);
-  const v = await gattRead(sc);
-  if (stripChr !== sc) return;
-  onStripCfg(v);
-}
-
-function sflash(text, cls) {
-  const el = $('s-msg');
-  el.textContent = text;
-  el.className = 'msg ' + (cls || '');
-  if (cls === 'ok') setTimeout(() => { if (el.textContent === text) el.textContent = ''; }, 2500);
-}
-
-// merge a partial edit into another (scenes by path)
-function mergeStrip(into, edit) {
-  for (const k in edit) {
-    if (k !== 'scenes') { into[k] = edit[k]; continue; }
-    into.scenes ||= [];
-    for (const s of edit.scenes) {
-      const have = into.scenes.find(x => x.p === s.p);
-      if (have) Object.assign(have, s); else into.scenes.push({ ...s });
-    }
-  }
-  return into;
-}
-
-async function writeStrip(edit) {
-  if (!stripChr || !scfg || !scfg.editable) return;
-  if (sSaving) { sPending = mergeStrip(sPending || {}, edit); return; }
-  const text = new TextEncoder().encode(JSON.stringify(edit));
-  const buf = new Uint8Array(TOKEN_LEN + text.length);
-  buf.set(tokenBytes()); buf.set(text, TOKEN_LEN);
-  sSaving = true; sInflight = edit;
-  sflash('saving…');
-  try {
-    await gattWrite(stripChr, buf);
-    clearTimeout(sTimer);
-    sTimer = setTimeout(() => {
-      if (!sSaving) return;
-      sSaving = false; sInflight = null; sPending = null;
-      sflash('no answer from the daemon — is it running, and can it write its config?', 'err');
-      renderStrip();
-    }, SAVE_TIMEOUT_MS);
-  } catch (e) {
-    sSaving = false; sInflight = null; sPending = null;
-    if (tokenRejected(e)) { sflash('token rejected', 'err'); editToken = true; render(); }
-    else sflash(`write failed: ${e.message}${writeHint(e)}`, 'err');
-    renderStrip();
-  }
-}
-
-// a slider being dragged, a field being typed in, or a value whose edit is
-// still in flight is not overwritten by an incoming view; everything else
-// follows the daemon. (A switch or color well keeps focus after a tap and
-// isn't "being edited", so only typed and dragged inputs get the focus test.)
-const sliding = new Set();
-function setIf(inp, v) {
-  const typing = inp.type === 'text' || inp.type === 'number' || inp.type === 'range';
-  if ((typing && document.activeElement === inp) || sliding.has(inp)) return;
-  if (inp.type === 'checkbox') { if (inp.checked !== !!v) inp.checked = !!v; }
-  else if (inp.value !== String(v)) inp.value = v;
-}
-// the edits the daemon hasn't answered yet, merged — their fields hold
-const pendingStrip = () => mergeStrip(mergeStrip({}, sInflight || {}), sPending || {});
-
-function renderStrip() {
-  const card = $('stripcard');
-  card.hidden = !scfg;
-  if (!scfg) return;
-  const ro = !scfg.editable;
-  $('stripnote').textContent = `${scfg.leds} LEDs on GPIO${scfg.pin}`;
-  $('s-ro').hidden = !ro;
-  for (const id of ['s-bri', 's-wr', 's-wg', 's-wb', 's-gr', 's-gg', 's-gb', 's-rev']) $(id).disabled = ro;
-
-  const pend = pendingStrip();
-  if (!('brightness' in pend)) setIf($('s-bri'), Math.round(scfg.brightness * 100));
-  $('s-bri-v').textContent = `${$('s-bri').value} %`;
-  [['s-wr', 0], ['s-wg', 1], ['s-wb', 2]].forEach(([id, i]) => {
-    if (!('white_balance' in pend)) setIf($(id), scfg.wb[i]);
-    $(id + '-v').textContent = hex2(+$(id).value);
-  });
-  if (!('gamma' in pend)) [['s-gr', 0], ['s-gg', 1], ['s-gb', 2]].forEach(([id, i]) => setIf($(id), scfg.gamma[i]));
-  if (!('reverse' in pend)) setIf($('s-rev'), scfg.reverse);
-
-  // the scenes: rebuilt only when the list itself changes, else refreshed
-  const wrap = $('scenes');
-  const sig = JSON.stringify(scfg.scenes.map(s => [s.p, s.e, s.color !== null, s.l !== null]));
-  if (wrap.dataset.sig !== sig) {
-    wrap.dataset.sig = sig;
-    wrap.replaceChildren();
-    if (scfg.scenes.length) {
-      const h = document.createElement('h3'); h.textContent = 'Scenes'; wrap.appendChild(h);
-    }
-    scfg.scenes.forEach((sc, i) => {
-      const row = document.createElement('div');
-      row.className = 'scene';
-      row.dataset.i = i;
-      row.innerHTML = `<label class="sw"><input type="checkbox" class="on"><i></i></label>
-        <div><div class="sname"></div><div class="spath"></div></div>
-        ${sc.color !== null ? '<input type="color" class="col" aria-label="Scene color">' : '<span></span>'}
-        ${sc.l !== null ? '<div class="extra"><div class="sl one"><input type="range" class="lvl" min="0" max="100" step="1" aria-label="Scene level"><span class="val"></span></div><span class="unit">level</span></div>' : ''}`;
-      row.querySelector('.sname').textContent = sc.e;
-      row.querySelector('.spath').textContent = sc.p;
-      row.querySelector('.on').addEventListener('change', e => writeStrip({ scenes: [{ p: sc.p, on: e.target.checked }] }));
-      const col = row.querySelector('.col');
-      if (col) col.addEventListener('change', e => writeStrip({ scenes: [{ p: sc.p, color: e.target.value.replace('#', '') }] }));
-      const lvl = row.querySelector('.lvl');
-      if (lvl) bindSlider(lvl, v => { row.querySelector('.extra .val').textContent = `${v} %`; },
-                          v => writeStrip({ scenes: [{ p: sc.p, l: v / 100 }] }));
-      wrap.appendChild(row);
-    });
-  }
-  scfg.scenes.forEach((sc, i) => {
-    const row = wrap.querySelector(`.scene[data-i="${i}"]`);
-    if (!row) return;
-    const pe = (pend.scenes || []).find(x => x.p === sc.p) || {};
-    const on = row.querySelector('.on'); if (!('on' in pe)) setIf(on, sc.on); on.disabled = ro;
-    const col = row.querySelector('.col');
-    if (col) { if (!('color' in pe)) setIf(col, '#' + sc.color); col.disabled = ro; }
-    const lvl = row.querySelector('.lvl');
-    if (lvl) { if (!('l' in pe)) setIf(lvl, Math.round(sc.l * 100)); lvl.disabled = ro; row.querySelector('.extra .val').textContent = `${lvl.value} %`; }
-  });
-}
-
-// a range input: live() on every move (labels), done() once on release
-function bindSlider(inp, live, done) {
-  inp.addEventListener('pointerdown', () => sliding.add(inp));
-  inp.addEventListener('input', () => live(+inp.value));
-  inp.addEventListener('change', () => { sliding.delete(inp); live(+inp.value); done(+inp.value); });
-  inp.addEventListener('pointerup', () => sliding.delete(inp));
-  inp.addEventListener('pointercancel', () => { sliding.delete(inp); renderStrip(); });
-}
-
-bindSlider($('s-bri'), v => { $('s-bri-v').textContent = `${v} %`; }, v => writeStrip({ brightness: v / 100 }));
-for (const id of ['s-wr', 's-wg', 's-wb'])
-  bindSlider($(id), v => { $(id + '-v').textContent = hex2(v); },
-             () => writeStrip({ white_balance: hex2(+$('s-wr').value) + hex2(+$('s-wg').value) + hex2(+$('s-wb').value) }));
-for (const id of ['s-gr', 's-gg', 's-gb'])
-  $(id).addEventListener('change', () => {
-    const g = ['s-gr', 's-gg', 's-gb'].map(k => parseFloat($(k).value));
-    if (g.some(x => !(x >= 0.5 && x <= 5))) { sflash('gamma is 0.5–5 per channel', 'err'); return; }
-    writeStrip({ gamma: g.every(x => x === g[0]) ? String(g[0]) : g.join(' ') });
-  });
-$('s-rev').addEventListener('change', e => writeStrip({ reverse: e.target.checked }));
-
-// ---- wiring ----
-picker.addEventListener('change', async () => {
-  const id = picker.value;
-  if (busy) { picker.dataset.sig = ''; render(); return; } // never yank a board mid-write
-  if (id !== ADD && known.has(id)) { select(id); render(); return; }
-  busy = true; say(''); render();
-  try { await pick(); }
-  catch (e) {
-    if (e.name !== 'NotFoundError') // chooser dismissed = not an error worth shouting
-      say(`Couldn’t connect: ${e.message}`);
-  } finally {
-    busy = false;
-    picker.dataset.sig = ''; // the selection may have gone nowhere: redraw
-    render();
-  }
-});
-
-powerBtn.addEventListener('click', async () => {
-  if (busy) return;
-  busy = true; say(''); render();
-  if (device && device.gatt.connected) {
-    if (psu === 0) try { await write(OP_ON); } catch {} // write() already said why
-  } else {
-    try { await pick(); }
-    catch (e) {
-      if (e.name !== 'NotFoundError') // chooser dismissed = not an error worth shouting
-        say(`Couldn’t connect: ${e.message}`);
-    }
-  }
-  busy = false; render();
-});
-
-shutdownBtn.addEventListener('click', async () => {
-  if (busy || !confirm(`Ask ${label(device.id)} to shut down?`)) return;
-  busy = true; render();
-  try { await write(OP_SHUTDOWN); }
-  catch {} finally { busy = false; render(); }
-});
-
-hardoffBtn.addEventListener('click', async () => {
-  // the remote form of holding the physical button: an immediate PSU cut,
-  // no graceful anything — for a crashed machine. Hence the louder confirm.
-  if (busy || !confirm(`FORCE ${label(device.id)} off?\n\nThis cuts the PSU like ` +
-                       'holding the button — unsaved work is lost. ' +
-                       'For a machine that is wedged, not a normal shutdown.')) return;
-  busy = true; render();
-  try { await write(OP_HARD_OFF); }
-  catch {} finally { busy = false; render(); }
-});
-
-$('savetoken').addEventListener('click', () => {
-  const v = $('token').value.trim();
-  if (v.length < 8) { say('The token is 8–16 characters.'); return; }
-  // the selected board gets it; it also becomes the shared default when
-  // there is none yet (first run) — the token boards without their own try
-  if (device) { receivers[device.id].token = v; saveReceivers(); }
-  if (!device || !store.get('ble-token')) store.set('ble-token', v);
-  $('token').value = '';
-  editToken = false;
-  say('');
-  render();
-  resume();
-});
-
-$('canceltoken').addEventListener('click', () => {
-  $('token').value = '';
-  editToken = false;
-  say('');
-  render();
-});
-
-tokenBtn.addEventListener('click', () => { editToken = true; render(); });
-
-forgetBtn.addEventListener('click', async () => {
-  if (busy || !device) return;
-  const d = device;
-  if (!confirm(`Forget ${label(d.id)}?\n\nIts token and permission go; the chooser adds it back.`))
-    return;
-  clearTimeout(retryTimer);
-  watchAbort?.abort();
-  if (d.gatt.connected) d.gatt.disconnect();
-  device = null; ctrl = stat = null; psu = -1; editToken = false;
-  dashReset();
-  delete receivers[d.id];
-  known.delete(d.id);
-  saveReceivers();
-  if (store.get('ble-current') === d.id) store.set('ble-current', '');
-  try { await d.forget?.(); } catch {} // Chrome ≥110 revokes the grant too
-  say('');
-  render();
-  resume(); // falls over to the next known board, if any
-});
-
-document.addEventListener('visibilitychange', () => {
-  // Chrome silently stops background scans: abort ours so the attempt
-  // settles cleanly, and start a fresh one when the tab returns
-  if (document.visibilityState === 'visible') resume();
-  else watchAbort?.abort();
-});
-
-// ?demo: the dashboard on sample data, no receiver needed — to see the layout
-// on a desktop, or to try the curve editor before wiring anything. Saves land
-// locally after a moment, the way a daemon round trip would.
-function demo() {
-  cfg = parseCfg(JSON.stringify({ editable: true, hysteresis: 3, ramp: 5, boost_seconds: 5,
-    header1: { n: 'pump', s: 'fallback', b: 100, f: 65 },
-    header2: { n: 'radiator', s: 'temp', c: '45:35 60:55 75:100', b: null, f: 100 },
-    header3: { n: 'exhaust', s: 'gpio:0', c: '0:25 100:80', b: null, f: 100 },
-    header4: { n: 'intake', s: 'gpu_load', c: '0:20 40:20 100:60', b: null, f: 60 } }));
-  scfg = parseStripCfg(JSON.stringify({ editable: true, leds: 33, pin: 4, reverse: false, brightness: 1,
-    gamma: '2.2', white_balance: 'ffb0f0', scenes: [
-      { p: '/tmp/led-static-color', e: 'solid', on: false, color: 'ffffff', l: 1 },
-      { p: '/tmp/led-night', e: 'drift', on: false } ] }));
-  telem = parseTelem(JSON.stringify({ temp: 58.3, cpu: 37, gpu: 62,
-    header2: { in: 58.3, duty: 52 }, header4: { in: 62, duty: 45 } }));
-  // the receiver's stored standalone settings: the config's, as the daemon
-  // pushes them (header6 is wired but not in the daemon's config — dropped
-  // from the file after flashing — and was dialled from the phone)
-  const saBytes = new Uint8Array(SA_LEN);
-  saBytes[0] = 5; saBytes[SA_V1_LEN] = 5;
-  [[65, 100, 'fallback', NONE, []], [100, NONE, 'host', NONE, []], [100, NONE, 'gpio', 0, [[0, 25], [100, 80]]],
-   [60, NONE, 'host', NONE, []], [NONE, NONE, 'host', NONE, []], [40, NONE, 'gpio', 20, [[0, 30], [100, 100]]]]
-    .forEach(([fb, b, k, g, pts], i) => {
-      saBytes[1 + 2 * i] = fb; saBytes[2 + 2 * i] = b;
-      const q = SA_V1_LEN + 1 + i * SA_PER_HEADER;
-      saBytes[q] = KIND_BYTE[k]; saBytes[q + 1] = g; saBytes[q + 2] = pts.length;
-      pts.forEach(([x, y], j) => { saBytes[q + 3 + 2 * j] = x; saBytes[q + 4 + 2 * j] = y; });
-    });
-  sa = parseSa(new DataView(saBytes.buffer));
-  const f = new Uint8Array(FANS_LEN(3)), dv = new DataView(f.buffer);
-  f[0] = 3; f[1] = 0x01 | 0x08 | 0x10 | 0x20; f[2] = 2; f[3] = 1;
-  // state: wired | src<<1 (1 = fallback, 2 = live, 4 = the receiver's own curve);
-  // duty; the stored fallback; the source kind; a gpio header's reading
-  [[0x03, 65, 100, 0, NONE], [0x05, 52, 100, 2, NONE], [0x09, 61, 100, 1, 65], [0x05, 45, 60, 2, NONE],
-   [0, NONE, NONE, NONE, NONE], [0x09, 58, 40, 1, 40]]
-    .forEach(([st, d, fb, k, inp], i) => { f.set([st, d, fb, k, inp], 4 + i * 5); });
-  dv.setUint32(4 + CHANNELS * 5, 5 * 3600 + 17 * 60, true);
-  fans = parseFans(dv);
-  // ?demo&nodaemon: the same board with the machine off — no daemon config or
-  // readings; every header on its fallback but the gpio ones, which the
-  // receiver keeps on their curves; a slider on each card, and the source
-  // picker offers what the receiver runs alone
-  if (location.search.includes('nodaemon')) {
-    cfg = telem = null;
-    fans.live = fans.telem = fans.host = false; fans.age = 255; fans.psu = 0;
-    fans.h.forEach(h => { if (h.wired && h.src !== 4) { h.src = 1; h.duty = h.fb; } });
-  }
-  info = { version: 'v1.23.0-demo', heap: 143 * 1024, minHeap: 121 * 1024, pins: [0, 20, 21] };
-  psu = 2;
-  // stand-ins for the GATT objects so the page believes it is connected
-  device = { id: 'demo', gatt: { connected: true } };
-  receivers.demo = { name: 'BC250 (demo)', token: 'demo-token' };
-  fansChr = telemChr = saChr = {};
-  ctrl = { writeValueWithResponse: async buf => {
-    // the fan ops, applied the way the receiver would; the views echoing them
-    // stand in for the next notifications
-    const op = buf[TOKEN_LEN], slot = buf[TOKEN_LEN + 1], h = fans.h[slot], st = sa.h[slot];
-    if (op === OP_FAN_FALLBACK) {
-      h.fb = st.fb = buf[TOKEN_LEN + 2];
-      if (h.src === 1) h.duty = h.fb;
-      setTimeout(renderDash, 400);
-    } else if (op === OP_FAN_SOURCE) {
-      const kind = buf[TOKEN_LEN + 2], gpio = buf[TOKEN_LEN + 3], n = buf[TOKEN_LEN + 4];
-      if (kind === KIND_BYTE.gpio && (gpio === 4 || gpio === 9 || gpio > 21)) throw new Error('GATT operation failed'); // a pin the receiver refuses
-      st.kind = kind === KIND_BYTE.gpio ? 'gpio' : 'fallback'; st.gpio = gpio; st.pts = [];
-      for (let j = 0; j < n; j++) st.pts.push({ x: buf[TOKEN_LEN + 5 + 2 * j], y: buf[TOKEN_LEN + 6 + 2 * j] });
-      h.kind = kind;
-      if (st.kind === 'gpio') { h.in = 50; h.src = 4; h.duty = Math.round(evalCurve(st, 50)); }
-      else { h.in = NONE; h.src = 1; h.duty = h.fb; }
-      const q = SA_V1_LEN + 1 + slot * SA_PER_HEADER; // the stored value, as the receiver would echo it
-      saBytes.fill(0, q, q + SA_PER_HEADER);
-      saBytes[q] = kind; saBytes[q + 1] = gpio; saBytes[q + 2] = n;
-      saBytes.set(buf.subarray(TOKEN_LEN + 5, TOKEN_LEN + 5 + 2 * n), q + 3);
-      setTimeout(() => onSa(new DataView(saBytes.buffer)), 400);
-    } } };
-  cfgChr = { writeValueWithResponse: async buf => {
-    // merge the partial edit the way the daemon would
-    const edit = JSON.parse(utf8.decode(buf.subarray(TOKEN_LEN)));
-    const cur = cfg, out = { editable: true, hysteresis: edit.hysteresis ?? cur.hyst, ramp: edit.ramp ?? cur.ramp,
-                             boost_seconds: edit.boost_seconds ?? cur.boostSecs };
-    cur.h.forEach((h, i) => { if (!h) return; const k = 'header' + (i + 1), e = edit[k] || {};
-      const s = srcInfo(e.s ?? h.src);
-      out[k] = { n: e.n ?? h.name, s: s.src, b: 'b' in e ? e.b : (h.boost === NONE ? null : h.boost), f: e.f ?? h.fallback };
-      if (s.kind !== 'fallback') out[k].c = e.c ?? curveText(h.pts); });
-    // ...and push the standalone values to the receiver, as the daemon does
-    cur.h.forEach((h, i) => { const e = edit['header' + (i + 1)]; const f = fans.h[i];
-      if (e && 'f' in e && f.wired) { f.fb = e.f; if (f.src === 1) f.duty = e.f; } });
-    setTimeout(() => onCfg(new DataView(new TextEncoder().encode(JSON.stringify(out)).buffer)), 600); } };
-  stripChr = { writeValueWithResponse: async buf => {
-    // apply the partial edit the way the daemon would, scenes by path
-    const edit = JSON.parse(utf8.decode(buf.subarray(TOKEN_LEN)));
-    const out = { editable: true, leds: scfg.leds, pin: scfg.pin, reverse: edit.reverse ?? scfg.reverse,
-                  brightness: edit.brightness ?? scfg.brightness,
-                  gamma: edit.gamma ?? (scfg.gamma.every(x => x === scfg.gamma[0]) ? String(scfg.gamma[0]) : scfg.gamma.join(' ')),
-                  white_balance: edit.white_balance ?? scfg.wb.map(hex2).join(''),
-                  scenes: scfg.scenes.map(s => { const e = (edit.scenes || []).find(x => x.p === s.p) || {};
-                    const o = { p: s.p, e: s.e, on: e.on ?? s.on };
-                    if (s.color !== null) o.color = e.color ?? s.color;
-                    if (s.l !== null) o.l = e.l ?? s.l;
-                    return o; }) };
-    setTimeout(() => onStripCfg(new DataView(new TextEncoder().encode(JSON.stringify(out)).buffer)), 600); } };
-  powerBtn.disabled = true;
-  render();
-  renderDash();
-  renderStrip();
-  if (location.search.includes('edit')) beginEdit(1);
-  say('Demo data — not connected to a receiver.', true);
-}
-
-if (location.search.includes('demo'))
-  demo();
-else if (!('bluetooth' in navigator))
-  say(IOS
-    ? 'Safari has no Web Bluetooth. Open this page in ' +
-      `<a href="${bluefyLink()}">Bluefy</a>, a free browser that has it ` +
-      `(<a href="${BLUEFY_STORE}">App Store</a>), and bookmark it there.`
-    : 'No Web Bluetooth here — use Chrome or Edge.');
-else
-  resume();
-
-if ('serviceWorker' in navigator)
-  navigator.serviceWorker.register('sw.js').catch(() => {});
-
-render();
-</script>
+<div id="app"></div>
+<script type="module" src="app.js"></script>
 </body>
 </html>

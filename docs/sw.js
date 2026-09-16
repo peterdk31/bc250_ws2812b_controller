@@ -2,9 +2,9 @@
 // internet at all (a LAN party, a hotel), so everything is pre-cached on
 // install and served cache-first forever. Bump VERSION when any cached file
 // changes — the new worker drops the old cache on activation.
-const VERSION = 'v16';
+const VERSION = 'v17';
 const CACHE = `bc250-power-${VERSION}`;
-const FILES = ['./', 'index.html', 'manifest.webmanifest', 'icon.svg'];
+const FILES = ['./', 'index.html', 'app.js', 'ble.js', 'vendor/preact-htm.mjs', 'manifest.webmanifest', 'icon.svg'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
