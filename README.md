@@ -375,6 +375,10 @@ moved (each re-render holds the strip for about a second).
 wins (a bare chip name means its `temp1_input`). Used by `temp` conditions.
 The daemon keeps rescanning until one appears. The default
 covers the BC-250 (`k10temp:Tctl`, then the NCT6686D under either nct driver).
+Two more kinds of candidate take the same slot: `pmbus:CPU VRM` / `pmbus:GPU VRM`
+read the BC-250's VRM controller over I2C, and `file:/path` reads a file
+holding one temperature — both described under [Fans](#fans), where they are
+also fan sources.
 
 ### Rules
 
@@ -829,6 +833,8 @@ so does *where the curve runs* — on whichever side can read the input:
 | `gpio:N` | the duty of a PWM signal on the receiver's GPIO N — a fan header's PWM wire (the BC-250's own, say), so the receiver follows the board's BIOS curve with no daemon and the machine off | % | receiver |
 | `temp` | the top-level `sensors` pick | °C | daemon |
 | `chip:label` | any hwmon temperature, same syntax as `sensors` (`amdgpu:edge`, `nct6686:CPU`; a comma list of candidates works too). The phone's picker lists every labelled one the machine has, with its reading; so does `--fan-status` | °C | daemon |
+| `pmbus:CPU VRM` / `pmbus:GPU VRM` | the BC-250's two VRM rails, read from the board's PMBus controller over I2C by the daemon itself — see [VRM and GDDR6 temperatures](#vrm-and-gddr6-temperatures) for the two-wire mod that exposes the bus. Listed in the picker once the controller answers | °C | daemon |
+| `file:/path` | one temperature in a plain file, in millidegrees (the sysfs convention: 1000 and up) or degrees. For telemetry some other program publishes as files, such as GDDR6 temperatures (below). Files under `/run/bc250` named `*_temp` are listed in the picker; any other path is typed | °C | daemon |
 | `chip:pwmN` | a hwmon pwm *output* — the board's own fan header, i.e. what its BIOS fan curve is asking for, read over the host instead of a wire. Outputs that read alike are one line in the phone's picker (`pwm 1–8`, following the first) until they differ | % (0..255 read as 0..100) | daemon |
 | `cpu_load` / `gpu_load` | the rule conditions' readings | % | daemon |
 
@@ -931,6 +937,55 @@ allows a fan to keep a minimum speed instead, so check yours). The old
 at once — wiring at flash time and "run the curve" at runtime — which let the
 phone switch on a header the receiver had no pin for.
 
+### VRM and GDDR6 temperatures
+
+The BC-250's two voltage regulators (the CPU rail and the GPU rail) sit on
+one PMBus controller at I2C address `0x60`, and each reports its own
+temperature — the part of the board that gets hottest under load and that no
+hwmon driver sees. The daemon reads them itself, no other service needed, as
+`pmbus:CPU VRM` and `pmbus:GPU VRM`: a fan `source`, a `sensors` candidate for
+the LED temp rules, and two rows in the phone's picker.
+
+The bus has to be brought out first. `I2C_HEADER1` (3 pins: SDA, SCL, GND)
+carries nothing on its own; the live SMBus is on the `TPMS1` debug header. Two
+jumper wires bridge them: `I2C_HEADER1` **SCL → TPMS1 pin 4** (`SMB_CLK_MAIN`)
+and **SDA → TPMS1 pin 6** (`SMB_DATA_MAIN`), no ground wire needed. The pinout
+photos in [BC250-Telemetry's hardware guide](https://github.com/onlinermm/BC250-Telemetry/blob/main/hardware.md)
+show exactly which pins; that project also worked out the controller's
+register formats, which the daemon's reads follow. With the wires in, the
+kernel needs `i2c-dev` for `/dev/i2c-*` to exist:
+
+```bash
+sudo modprobe i2c-dev
+echo i2c-dev | sudo tee /etc/modules-load.d/i2c-dev.conf   # every boot
+sudo i2cdetect -l                                            # the buses
+sudo i2cdetect -y 4                                          # 60 should answer (usually bus 4)
+```
+
+The daemon finds the bus on its own: it probes every `/dev/i2c-N` for a device
+at `0x60` whose output-voltage register reads sensibly (a read only — it writes
+nothing to a bus that hasn't answered), logs `pmbus: VRM controller at 0x60 on
+/dev/i2c-4`, and reads both rails every half second on a thread of its own
+while a fan, a rule or a watching phone wants them. The rails are read only
+while wanted, and a controller that stops answering (the wires came off) is
+dropped and searched for again, the header on its `fallback` meanwhile like
+any lost sensor. If nothing answers on any bus, `--fan-status` shows the
+source as `(not found)` and the daemon keeps looking every 30 s.
+
+GDDR6 temperatures are a different matter: reading them means patching the
+SMU's firmware at runtime, which this daemon will not do. If you run
+[BC250-Telemetry](https://github.com/onlinermm/BC250-Telemetry)'s memory service
+for them, it publishes the readings as millidegree files that the `file:`
+source reads, and the picker lists them:
+
+```jsonc
+"source": "file:/run/bc250/memory_hotspot_temp"   // hottest of the eight chips
+"source": "file:/run/bc250/memory_avg_temp"
+```
+
+The same files exist for its VRM readings (`cpu_vrm_temp`, `gpu_vrm_temp`),
+should you prefer that service's reads to the daemon's own.
+
 ### Getting the block onto the receiver
 
 Two consumers read the same block:
@@ -958,7 +1013,8 @@ sudo make flash-fan CONFIG=other.json  # ...from a different config
 led /etc/led-controller/config.json --fan-status   # what each header resolves to right now
 ```
 
-`--fan-status` prints every header's source, the sysfs file it resolved to,
+`--fan-status` prints every header's source, the sysfs file (or `pmbus:` rail,
+or `file:` path) it resolved to,
 its current reading and the duty it would run, plus the catalogue of sensors
 a header could follow as the phone's picker sees it (a `fallback` or `gpio` header
 is marked as the receiver's to run) — the first thing to run when a fan isn't

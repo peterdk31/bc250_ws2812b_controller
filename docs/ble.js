@@ -424,7 +424,7 @@ export const SRC_KINDS = {
   fallback: { label: 'Fixed speed', hint: 'runs at the fallback speed, always' },
   gpio:     { label: 'PWM input', hint: 'a fan wire on a receiver pin' },
   temp:     { label: 'CPU temperature' },
-  hwmon:    { label: 'Sensor', hint: 'chip:label, e.g. amdgpu:edge' },
+  hwmon:    { label: 'Sensor', hint: 'chip:label, e.g. amdgpu:edge or pmbus:GPU VRM; file:/path reads a file' },
   pwm:      { label: 'Board fan header', hint: 'chip:pwmN, e.g. nct6686:pwm1' },
   cpu_load: { label: 'CPU load' },
   gpu_load: { label: 'GPU load' },
@@ -559,7 +559,7 @@ export function parseSensors(text) {
     for (const k of Object.keys(g)) {
       const m = /^pwm(\d+)(?:-(\d+))?$/.exec(k);
       if (m) out.push({ spec: `${chip}:pwm${m[1]}`, chip, label: m[2] ? `pwm ${m[1]}–${m[2]}` : `pwm ${m[1]}`, pwm: true, value: +g[k] });
-      else out.push({ spec: `${chip}:${k}`, chip, label: k, pwm: false, value: +g[k] });
+      else out.push({ spec: `${chip}:${k}`, chip, label: chip === 'file' ? k.split('/').pop() : k, pwm: false, value: +g[k] }); // a file entry's key is its path
     }
   }
   return out;
@@ -750,7 +750,7 @@ export function checkEdit(h) {
   }
   if (h.route !== 'daemon' && h.kind !== 'fallback' && h.kind !== 'gpio') return 'with the machine off a header runs a fixed speed or a PWM input — pick one';
   if (h.kind === 'gpio' && !(Number.isInteger(h.gpio) && h.gpio >= 0 && h.gpio <= 48)) return 'the pin is a number 0–48';
-  if ((h.kind === 'hwmon' || h.kind === 'pwm') && !/^[^:\s]+:[^:\s]+$/.test(h.spec || ''))
+  if ((h.kind === 'hwmon' || h.kind === 'pwm') && !/^[^:\s]+:\S[^:]*$/.test(h.spec || '')) // a label may hold spaces ("AMD TSI Addr 98h", "CPU VRM")
     return h.kind === 'pwm' ? 'a board fan header is chip:pwmN, e.g. nct6686:pwm1' : 'a sensor is chip:label, e.g. amdgpu:edge';
   if (h.kind === 'pwm' && !/:pwm\d+$/.test(h.spec)) return 'a board fan header is chip:pwmN, e.g. nct6686:pwm1';
   if (!isFixed(h)) {

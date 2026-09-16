@@ -11,12 +11,35 @@
 #include <string>
 #include <vector>
 
+#include "pmbus.hpp"
+
 // /sys/class/hwmon sensor discovery and reading, shared by the
 // load effect and the temp rule conditions
 namespace hwmon
 {
 inline float readTemp(const std::string& path);
 inline bool readTempOk(const std::string& path, float& v);
+struct Reading;
+inline void listTempFiles(const char* dirPath, std::vector<Reading>& out);
+
+// Two temperature sources that live outside /sys/class/hwmon take the same
+// chip:label spec and ride the same resolved-path plumbing, told apart by a
+// prefix on the path every reader below dispatches on:
+//   file:/run/bc250/gpu_vrm_temp   a plain file holding one number —
+//                                  millidegrees (the sysfs convention) or
+//                                  degrees; 1000 and up is read as
+//                                  millidegrees
+//   pmbus:CPU VRM                  a rail of the BC-250's VRM controller,
+//                                  read over I2C by pmbus.hpp
+// The "chip" of a file spec is the word file and its label the path; a pmbus
+// spec's labels are pmbus::RAILS.
+inline const char* FILE_PREFIX = "file:";
+inline const char* PMBUS_PREFIX = "pmbus:";
+
+inline bool hasPrefix(const std::string& s, const char* prefix)
+{
+    return s.compare(0, strlen(prefix), prefix) == 0;
+}
 
 // Tctl first when k10temp is present; the BC-250's NCT6686D registers
 // as "nct6686" under both the nct6687d driver (label "CPU") and the
@@ -55,16 +78,35 @@ inline std::vector<std::string> split(const std::string& s, char sep)
     return parts;
 }
 
-inline bool fileExists(const std::string& path)
+inline bool statExists(const std::string& path)
 {
     struct stat st;
     return stat(path.c_str(), &st) == 0;
+}
+
+// a resolved sensor path is still there: the sysfs file, the file behind a
+// file: path, the controller behind a pmbus: one
+inline bool fileExists(const std::string& path)
+{
+    if (hasPrefix(path, FILE_PREFIX))
+        return statExists(path.substr(strlen(FILE_PREFIX)));
+    if (hasPrefix(path, PMBUS_PREFIX))
+        return pmbus::Reader::get().present();
+    return statExists(path);
 }
 
 // locate a chip's temp input by label; an empty label means the chip's
 // first input. No match → "" so the caller can try the next candidate
 inline std::string findSensor(const std::string& chip, const std::string& label)
 {
+    if (chip == "file")
+        return !label.empty() && statExists(label) ? FILE_PREFIX + label : "";
+
+    if (chip == "pmbus")
+        return pmbus::railOf(label) >= 0 && pmbus::Reader::get().present()
+                   ? PMBUS_PREFIX + label
+                   : "";
+
     DIR* dir = opendir("/sys/class/hwmon");
     if (!dir) return "";
 
@@ -387,13 +429,63 @@ inline std::vector<Reading> enumerate()
             out.push_back({chip, "pwm" + std::to_string(i), true, raw * 100.0f / 255.0f});
         }
     }
+
+    // the VRM controller's rails, once the bus has been found and a rail
+    // reads (asking starts the poller, so a watched catalogue lists them on
+    // its next refresh)
+    for (int i = 0; i < pmbus::RAIL_COUNT; i++)
+    {
+        float v;
+        if (readTempOk(std::string(PMBUS_PREFIX) + pmbus::RAILS[i].label, v))
+            out.push_back({"pmbus", pmbus::RAILS[i].label, false, v});
+    }
+
+    // temperatures other telemetry publishes as files: BC250-Telemetry
+    // (github.com/onlinermm/BC250-Telemetry) writes its PMBus and GDDR6
+    // readings as millidegree files under /run/bc250 — cpu_vrm_temp,
+    // gpu_vrm_temp, memory_hotspot_temp, memory_avg_temp. Each that reads is
+    // a "file" entry keyed by its path, so the phone can pick it rather than
+    // type it; the directory is simply absent without that service.
+    listTempFiles("/run/bc250", out);
+
     return out;
+}
+
+// every *_temp file in a directory that holds a usable temperature, as
+// "file" entries labelled by path
+inline void listTempFiles(const char* dirPath, std::vector<Reading>& out)
+{
+    DIR* dir = opendir(dirPath);
+    if (!dir)
+        return;
+    std::vector<std::string> names;
+    while (dirent* e = readdir(dir))
+    {
+        std::string n = e->d_name;
+        if (n.size() > 5 && n.compare(n.size() - 5, 5, "_temp") == 0)
+            names.push_back(n);
+    }
+    closedir(dir);
+    std::sort(names.begin(), names.end());
+    for (auto& n : names)
+    {
+        std::string path = std::string(dirPath) + "/" + n;
+        float v;
+        if (readTempOk(FILE_PREFIX + path, v))
+            out.push_back({"file", path, false, v});
+    }
 }
 
 inline float readTemp(const std::string& path)
 {
     if (path.empty())
         return 0;
+
+    if (hasPrefix(path, FILE_PREFIX) || hasPrefix(path, PMBUS_PREFIX))
+    {
+        float v;
+        return readTempOk(path, v) ? v : 0;
+    }
 
     std::ifstream f(path);
     long millideg = 0;
@@ -411,6 +503,29 @@ inline bool readTempOk(const std::string& path, float& v)
 {
     if (path.empty())
         return false;
+
+    if (hasPrefix(path, PMBUS_PREFIX))
+    {
+        int rail = pmbus::railOf(path.substr(strlen(PMBUS_PREFIX)));
+        if (!pmbus::Reader::get().temp(rail, v))
+            return false;
+        return v > 0 && v <= 120;
+    }
+
+    if (hasPrefix(path, FILE_PREFIX))
+    {
+        // one number, millidegrees or degrees: no thermistor reads 1000 °C
+        // and a millidegree value under 1000 is under 1 °C, rejected either way
+        std::ifstream f(path.substr(strlen(FILE_PREFIX)));
+        double d = 0;
+        if (!(f >> d))
+            return false;
+        if (d >= 1000 || d <= -1000)
+            d /= 1000;
+        v = (float)d;
+        return v > 0 && v <= 120;
+    }
+
     std::ifstream f(path);
     long millideg = 0;
     if (!(f >> millideg))

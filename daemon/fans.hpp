@@ -60,6 +60,9 @@
 //                and the machine off. x is 0..100 %
 //   temp         the top-level `sensors` pick, °C            (this daemon)
 //   chip:label   any hwmon temperature, °C                   (this daemon)
+//   pmbus:CPU VRM / pmbus:GPU VRM
+//                the BC-250's VRM controller over I2C, °C   (this daemon)
+//   file:/path   a file holding one temperature, °C         (this daemon)
 //   chip:pwmN    a hwmon pwm output, read as 0..100 %        (this daemon)
 //   cpu_load / gpu_load   0..100 %                           (this daemon)
 //
@@ -464,8 +467,8 @@ private:
 
     static const char* SOURCE_HELP()
     {
-        return "expected fallback, gpio:N, temp, cpu_load, gpu_load, or a hwmon "
-               "chip:label / chip:pwmN";
+        return "expected fallback, gpio:N, temp, cpu_load, gpu_load, a hwmon "
+               "chip:label / chip:pwmN, pmbus:CPU VRM / pmbus:GPU VRM, or file:/path";
     }
 
     // what a source string means: kind, and for gpio the pin, for hwmon
@@ -528,6 +531,24 @@ private:
             h.kind = Header::Gpio;
             h.gpio = (int)n;
             return "";
+        }
+
+        // the two sources outside hwmon (hwmon.hpp): a spec that could never
+        // resolve is a typo, not a sensor to keep looking for. A comma list
+        // of candidates is checked one by one.
+        for (auto& c : hwmon::split(src, ','))
+        {
+            size_t k = c.find(':');
+            std::string cchip = c.substr(0, k), clabel = k == std::string::npos ? "" : c.substr(k + 1);
+            if (cchip == "pmbus" && pmbus::railOf(clabel) < 0)
+            {
+                std::string rails;
+                for (int i = 0; i < pmbus::RAIL_COUNT; i++)
+                    rails += std::string(i ? " or pmbus:" : "pmbus:") + pmbus::RAILS[i].label;
+                return "the VRM controller's rails are " + rails;
+            }
+            if (cchip == "file" && (clabel.empty() || clabel[0] != '/'))
+                return "file:/path names a file holding one temperature (millidegrees or degrees)";
         }
 
         bool pwm = label.size() > 3 && label.compare(0, 3, "pwm") == 0 &&
@@ -956,6 +977,21 @@ private:
         for (auto& h : headers_)
             for (auto& c : hwmon::split(h.source, ','))
                 used.push_back(c);
+
+        // a file: spec in use that the scan of /run/bc250 did not list (its
+        // path is the spec's label, and a file spec is its own resolved path)
+        for (auto& spec : used)
+        {
+            if (!hwmon::hasPrefix(spec, hwmon::FILE_PREFIX))
+                continue;
+            std::string path = spec.substr(strlen(hwmon::FILE_PREFIX));
+            bool listed = false;
+            for (auto& r : all)
+                listed |= r.chip == "file" && r.label == path;
+            float v;
+            if (!listed && hwmon::readTempOk(spec, v))
+                all.push_back({"file", path, false, v});
+        }
 
         struct Entry { std::string chip, key, val; int prio; };
         std::vector<Entry> entries;
