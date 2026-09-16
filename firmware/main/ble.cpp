@@ -101,13 +101,20 @@
 //                           daemon's next CMD_STRIP_CONFIG.
 //   info (read):            build facts: firmware version string, free heap,
 //                           and the GPIOs a gpio:N fan source may read.
+//   sensors (read + notify):the daemon's sensor catalogue — the last
+//                           CMD_FAN_SENSORS verbatim (JSON text; empty until
+//                           one arrives): every hwmon temperature and pwm
+//                           output a header could follow, with readings, for
+//                           the page's source picker. The daemon sends it
+//                           while a phone watches telem; notified when a new
+//                           one lands.
 //
 // The 128-bit UUIDs are this project's own (random base, "bc250" spelled
 // into the tail); the web page must list the service UUID to find us.
 // NimBLE wants them little-endian:
 //   service a5f20001-8f11-4e0e-9b3a-0bc250e0c001, control ...0002,
 //   status ...0003, fans ...0004, fancfg ...0005, info ...0006, telem ...0007,
-//   stripcfg ...0008, fansa ...0009
+//   stripcfg ...0008, fansa ...0009, sensors ...000A
 namespace ble
 {
 static const uint32_t POLL_MS = 250; // policy task cadence
@@ -168,6 +175,9 @@ static const ble_uuid128_t STRIPCFG_UUID = BLE_UUID128_INIT(
 static const ble_uuid128_t FANSA_UUID = BLE_UUID128_INIT(
     0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
     0x0e, 0x4e, 0x11, 0x8f, 0x09, 0x00, 0xf2, 0xa5);
+static const ble_uuid128_t SENSORS_UUID = BLE_UUID128_INIT(
+    0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
+    0x0e, 0x4e, 0x11, 0x8f, 0x0a, 0x00, 0xf2, 0xa5);
 
 static const uint8_t OP_POWER_ON = 0x01;
 static const uint8_t OP_SHUTDOWN = 0x02;
@@ -256,11 +266,13 @@ static uint16_t g_infoHandle = 0;
 static uint16_t g_telemHandle = 0;
 static uint16_t g_stripcfgHandle = 0;
 static uint16_t g_fansaHandle = 0;
+static uint16_t g_sensorsHandle = 0;
 static volatile bool g_fansSub = false;   // a client has fans notifications on
 static volatile bool g_fancfgSub = false; // ...fancfg's
 static volatile bool g_telemSub = false;  // ...telem's (= the daemon should send)
 static volatile bool g_stripcfgSub = false; // ...stripcfg's
 static volatile bool g_fansaSub = false;    // ...fansa's
+static volatile bool g_sensorsSub = false;  // ...sensors'
 
 // policy task locals
 static int g_lastState = -2;   // last pwr::psuState() seen (-2 = never)
@@ -274,6 +286,7 @@ static uint32_t g_lastCfgSeq = 0;  // dash FAN_CONFIG seq last notified
 static uint32_t g_lastTelSeq = 0;  // dash FAN_TELEM seq last notified
 static uint32_t g_lastStripSeq = 0; // dash STRIP_CONFIG seq last notified
 static uint32_t g_lastSaSeq = 0;    // fan::standalone() seq last notified
+static uint32_t g_lastSensSeq = 0;  // dash FAN_SENSORS seq last notified
 
 // ---- the fans value ----
 
@@ -459,6 +472,13 @@ static int telemAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     return serve(ctxt, dash::FAN_TELEM);
 }
 
+static int sensorsAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR)
+        return BLE_ATT_ERR_UNLIKELY;
+    return serve(ctxt, dash::FAN_SENSORS);
+}
+
 // a phone's edit: token(16) + a partial edit (JSON text), relayed to the
 // daemon unopened as msg `kind` — validation is its job. Bounded by what one
 // msg frame carries (hostreq::MSG_MAX); the page keeps its edits to one
@@ -544,7 +564,7 @@ static int infoAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
 // built in start() with plain field assignment: NimBLE's struct layouts have
 // grown fields across IDF versions, and C++ designated initializers would
 // pin this file to one ordering
-static ble_gatt_chr_def g_chrs[9];
+static ble_gatt_chr_def g_chrs[10];
 static ble_gatt_svc_def g_svcs[2];
 
 // ---- GAP / advertising ----
@@ -569,6 +589,7 @@ static int gapEvent(ble_gap_event* ev, void*)
         g_fancfgSub = false;
         g_telemSub = false;
         g_stripcfgSub = false;
+        g_sensorsSub = false;
         g_fansaSub = false;
         BLOG("phone disconnected (reason=%d)", ev->disconnect.reason);
         break;
@@ -586,6 +607,8 @@ static int gapEvent(ble_gap_event* ev, void*)
             g_stripcfgSub = ev->subscribe.cur_notify != 0;
         else if (ev->subscribe.attr_handle == g_fansaHandle)
             g_fansaSub = ev->subscribe.cur_notify != 0;
+        else if (ev->subscribe.attr_handle == g_sensorsHandle)
+            g_sensorsSub = ev->subscribe.cur_notify != 0;
         break;
 
     default:
@@ -701,6 +724,14 @@ static void dashboard(uint32_t now)
         g_lastStripSeq = seq;
         if (g_stripcfgSub)
             ble_gatts_chr_updated(g_stripcfgHandle);
+    }
+
+    dash::get(dash::FAN_SENSORS, nullptr, 0, &seq);
+    if (seq != g_lastSensSeq)
+    {
+        g_lastSensSeq = seq;
+        if (g_sensorsSub)
+            ble_gatts_chr_updated(g_sensorsHandle);
     }
 
     fan::standalone(nullptr, 0, &seq);
@@ -828,7 +859,12 @@ void start()
     g_chrs[7].access_cb = fansaAccess;
     g_chrs[7].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY;
     g_chrs[7].val_handle = &g_fansaHandle;
-    g_chrs[8] = {}; // terminator
+    g_chrs[8] = {};
+    g_chrs[8].uuid = &SENSORS_UUID.u;
+    g_chrs[8].access_cb = sensorsAccess;
+    g_chrs[8].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY;
+    g_chrs[8].val_handle = &g_sensorsHandle;
+    g_chrs[9] = {}; // terminator
 
     g_svcs[0] = {};
     g_svcs[0].type = BLE_GATT_SVC_TYPE_PRIMARY;

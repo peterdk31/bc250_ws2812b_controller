@@ -309,6 +309,11 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
         // and its strip settings and scenes, same
         dash::set(dash::STRIP_CONFIG, payload, len);
     }
+    else if (cmd == proto::CMD_FAN_SENSORS)
+    {
+        // and the sensors a header could follow, for the phone's picker, same
+        dash::set(dash::FAN_SENSORS, payload, len);
+    }
 }
 
 // the host endpoint: a proto::FrameHandler that drives the real strip. The

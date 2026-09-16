@@ -227,6 +227,16 @@ static const uint8_t CMD_FAN_TELEM = 0x0B;
 // Unknown to older firmware, which ignores it.
 static const uint8_t CMD_STRIP_CONFIG = 0x0C;
 
+// CMD_FAN_SENSORS: the catalogue a header could follow — every hwmon
+// temperature with a label and every pwm output, grouped by chip, with its
+// reading right now: {"amdgpu":{"edge":61.0},"nct6686":{"CPU":52.0,"pwm1":48}}
+// (pwm outputs that have read alike since the phone started watching are one
+// entry, "pwm1-8"). JSON text, at most 512 bytes. Only while a phone is
+// watching, every 5 s (a stale reading is fine for choosing a source; the
+// per-header readings the rows need travel in CMD_FAN_TELEM). Unknown to
+// older firmware, which ignores it.
+static const uint8_t CMD_FAN_SENSORS = 0x0D;
+
 // MSG_FAN_CONFIG (msg frame): a phone's edit — a partial object of the same
 // shape holding only what changed (one header's source/curve/boost/fallback/
 // name, or the three globals). The daemon validates it exactly as it

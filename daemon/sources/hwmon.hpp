@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <algorithm>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -14,6 +15,7 @@
 // load effect and the temp rule conditions
 namespace hwmon
 {
+inline float readTemp(const std::string& path);
 
 // Tctl first when k10temp is present; the BC-250's NCT6686D registers
 // as "nct6686" under both the nct6687d driver (label "CPU") and the
@@ -84,7 +86,7 @@ inline std::string findSensor(const std::string& chip, const std::string& label)
             break;
         }
 
-        for (int i = 1; i <= 20; i++)
+        for (int i = 1; i <= 32; i++) // nct6683 exposes up to 32 temperature channels
         {
             std::string input = base + "/temp" + std::to_string(i);
 
@@ -315,6 +317,76 @@ inline void listChips()
     }
 
     closedir(dir);
+}
+
+// one thing under /sys/class/hwmon a fan header could follow: a labelled
+// temperature (spec "chip:label", °C) or a pwm output (spec "chip:pwmN",
+// read 0..255 and reported 0..100 %)
+struct Reading
+{
+    std::string chip;
+    std::string label; // the temp's label, or "pwmN"
+    bool pwm = false;
+    float value = 0;
+};
+
+// every such reading, chips and entries in a stable order. Unlabelled
+// temperatures are skipped (the config can't name them), as are readings no
+// thermistor produces: at or below 0 °C, or above 120 (the NCT6686D's
+// unconnected inputs read 0). Fan tachometers, voltages and currents are not
+// sources and are not listed.
+// LED_HWMON_ROOT points enumerate() at a stand-in tree (tests on a machine
+// with no sensors); the daemon's own lookups always read the real one
+inline std::vector<Reading> enumerate()
+{
+    std::vector<Reading> out;
+    const char* env = getenv("LED_HWMON_ROOT");
+    std::string root = env && *env ? env : "/sys/class/hwmon";
+    DIR* dir = opendir(root.c_str());
+    if (!dir)
+        return out;
+
+    std::vector<std::string> dirs;
+    while (dirent* e = readdir(dir))
+        if (e->d_name[0] != '.')
+            dirs.push_back(root + "/" + e->d_name);
+    closedir(dir);
+    std::sort(dirs.begin(), dirs.end());
+
+    for (const auto& base : dirs)
+    {
+        std::string chip = readFileLine(base + "/name");
+        if (chip.empty())
+            continue;
+
+        for (int i = 1; i <= 32; i++) // nct6683 exposes up to 32 temperature channels
+        {
+            std::string input = base + "/temp" + std::to_string(i);
+            if (!fileExists(input + "_input"))
+                continue;
+            std::string label = readFileLine(input + "_label");
+            if (label.empty())
+                continue;
+            float v = readTemp(input + "_input");
+            if (!(v > 0 && v <= 120))
+                continue;
+            out.push_back({chip, label, false, v});
+        }
+
+        for (int i = 1; i <= 8; i++)
+        {
+            std::string file = base + "/pwm" + std::to_string(i);
+            if (!fileExists(file))
+                continue;
+            std::ifstream f(file);
+            int raw = -1;
+            f >> raw;
+            if (raw < 0 || raw > 255)
+                continue;
+            out.push_back({chip, "pwm" + std::to_string(i), true, raw * 100.0f / 255.0f});
+        }
+    }
+    return out;
 }
 
 inline float readTemp(const std::string& path)

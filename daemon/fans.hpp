@@ -350,7 +350,10 @@ public:
         }
 
         if (watch)
+        {
             sendTelemetry(now, sinks);
+            sendSensors(now, sinks);
+        }
     }
 
     // ---- the BLE dashboard's side (see the header comment) ----
@@ -389,7 +392,10 @@ public:
             bool was = watching(now);
             watchUntil_ = on ? now + WATCH_S : 0;
             if (on && !was)
-                lastTelemSent_ = -1e9; // answer a fresh watcher on the next tick
+            {
+                lastTelemSent_ = lastSensorsSent_ = -1e9; // answer a fresh watcher on the next tick
+                pwmSplit_.clear(); // the pwm outputs start out as one entry again
+            }
         }
         else if (kind == proto::MSG_FAN_CONFIG)
         {
@@ -418,6 +424,7 @@ public:
                 hysteresis_, ramp_, boostSeconds_);
         fprintf(out, "  dashboard edits: %s\n",
                 writable() ? "written back to the config" : "off (config not writable)");
+        fprintf(out, "  sensors a header could follow (the phone's picker): %s\n", sensorsJson().c_str());
 
         for (auto& h : headers_)
         {
@@ -832,6 +839,7 @@ private:
 
     static const int WATCH_S = 30; // a MSG_FAN_WATCH 1 keeps telemetry flowing this long
     static const int TELEM_REFRESH_S = 5;
+    static const int SENSORS_REFRESH_S = 5; // the catalogue's pace while watched
     static const int WIRE_MAX = 512; // a GATT attribute's ceiling = the receiver's buffer
 
     bool watching(double now) const { return watchUntil_ > 0 && now <= watchUntil_; }
@@ -899,6 +907,133 @@ private:
             add((e + buf).c_str());
         }
         return j + "}";
+    }
+
+    // the catalogue: what a header could follow, with readings, for the
+    // phone's source picker — hwmon::enumerate() as JSON grouped by chip:
+    //   {"amdgpu":{"edge":61.0,"junction":64.5},
+    //    "nct6686":{"CPU":52.0,"System":38.5,"pwm1-8":48}}
+    // A chip's pwm outputs are one entry while they have all read alike since
+    // the watch began (a board whose firmware drives them from one curve
+    // shows one line, named for the range; the spec to follow is its first);
+    // the moment two differ they are listed apart for the rest of the watch.
+    // WIRE_MAX is a GATT attribute's ceiling, so a machine with more sensors
+    // than fit loses entries by priority: pwm outputs first, then labelled
+    // temperatures from the end — never a sensor a header follows or the
+    // `sensors` pick, which the picker must be able to show as chosen. What
+    // was left out is counted in "_more", so the page can say so (the typed
+    // field still reaches them). Said once in the journal as well.
+    std::string sensorsJson()
+    {
+        auto all = hwmon::enumerate();
+
+        // the specs in use: every candidate of every header's source and of
+        // the top-level sensors pick ("k10temp:Tctl,nct6686:CPU" names two)
+        std::vector<std::string> used = hwmon::split(sensors_, ',');
+        for (auto& h : headers_)
+            for (auto& c : hwmon::split(h.source, ','))
+                used.push_back(c);
+
+        struct Entry { std::string chip, key, val; int prio; };
+        std::vector<Entry> entries;
+        char buf[32];
+        auto push = [&](const std::string& chip, const std::string& key, const std::string& spec, float v, bool pwm) {
+            if (pwm)
+                snprintf(buf, sizeof buf, "%d", (int)(v + 0.5f));
+            else
+                snprintf(buf, sizeof buf, "%.1f", (double)v);
+            bool inUse = std::find(used.begin(), used.end(), spec) != used.end();
+            entries.push_back({chip, key, buf, inUse ? 0 : pwm ? 2 : 1});
+        };
+
+        std::vector<std::string> chips;
+        for (auto& r : all)
+            if (std::find(chips.begin(), chips.end(), r.chip) == chips.end())
+                chips.push_back(r.chip);
+        for (auto& chip : chips)
+        {
+            std::vector<hwmon::Reading*> pwms;
+            for (auto& r : all)
+                if (r.chip == chip)
+                {
+                    if (r.pwm) pwms.push_back(&r);
+                    else push(chip, r.label, chip + ":" + r.label, r.value, false);
+                }
+            if (pwms.empty())
+                continue;
+            bool& split = pwmSplit_[chip];
+            for (auto* p : pwms)
+                if ((int)(p->value + 0.5f) != (int)(pwms[0]->value + 0.5f))
+                    split = true;
+            if (split || pwms.size() == 1)
+                for (auto* p : pwms) push(chip, p->label, chip + ":" + p->label, p->value, true);
+            else
+                push(chip, pwms.front()->label + "-" + pwms.back()->label.substr(3),
+                     chip + ":" + pwms.front()->label, pwms[0]->value, true);
+        }
+
+        // fit: take entries by priority (order kept within a priority) while
+        // the grouped text stays under the ceiling; the size of an entry is
+        // its own text plus its chip's wrapper the first time the chip appears
+        const size_t RESERVE = sizeof ",\"_more\":999" - 1;
+        size_t size = 2; // the braces
+        std::vector<bool> take(entries.size(), false);
+        std::vector<std::string> open; // chips already counted
+        size_t dropped = 0;
+        for (int prio = 0; prio <= 2; prio++)
+            for (size_t i = 0; i < entries.size(); i++)
+            {
+                auto& e = entries[i];
+                if (e.prio != prio)
+                    continue;
+                size_t cost = 1 + 1 + cfgedit::escape(e.key).size() + 2 + e.val.size(); // ,"key":val
+                if (std::find(open.begin(), open.end(), e.chip) == open.end())
+                    cost += 1 + cfgedit::escape(e.chip).size() + 2 + 1 + 1;      // ,"chip":{ ... }
+                if (size + cost + RESERVE > (size_t)WIRE_MAX)
+                {
+                    dropped++;
+                    continue;
+                }
+                size += cost;
+                take[i] = true;
+                if (std::find(open.begin(), open.end(), e.chip) == open.end())
+                    open.push_back(e.chip);
+            }
+
+        std::string j = "{";
+        for (auto& chip : chips)
+        {
+            std::string g;
+            for (size_t i = 0; i < entries.size(); i++)
+                if (take[i] && entries[i].chip == chip)
+                    g += (g.empty() ? "" : ",") + std::string("\"") + cfgedit::escape(entries[i].key) + "\":" + entries[i].val;
+            if (g.empty())
+                continue;
+            j += (j.size() > 1 ? "," : "") + std::string("\"") + cfgedit::escape(chip) + "\":{" + g + "}";
+        }
+        if (dropped)
+        {
+            j += (j.size() > 1 ? "," : "") + std::string("\"_more\":") + std::to_string(dropped);
+            if (!warnedSensors_)
+                fprintf(stderr, "fans: the sensor catalogue is over the dashboard's %d bytes — %zu of %zu "
+                                "sensors are left out of the phone's picker (they can still be typed)\n",
+                        WIRE_MAX, dropped, entries.size());
+            warnedSensors_ = true;
+        }
+        return j + "}";
+    }
+
+    void sendSensors(double now, std::vector<std::unique_ptr<Sink>>& sinks)
+    {
+        if (now - lastSensorsSent_ < SENSORS_REFRESH_S)
+            return;
+        lastSensorsSent_ = now;
+        std::string j = sensorsJson();
+        if (j == lastSensors_)
+            return;
+        lastSensors_ = j;
+        for (auto& s : sinks)
+            s->sendCommand(proto::CMD_FAN_SENSORS, (const uint8_t*)j.data(), (uint16_t)j.size());
     }
 
     void sendTelemetry(double now, std::vector<std::unique_ptr<Sink>>& sinks)
@@ -1181,6 +1316,10 @@ private:
     std::string lastTelem_;
     double lastTelemSent_ = -1e9;
     bool warnedSize_ = false;
+    std::string lastSensors_;
+    double lastSensorsSent_ = -1e9;
+    bool warnedSensors_ = false;
+    std::map<std::string, bool> pwmSplit_; // chip -> its pwm outputs have differed this watch
 
     double lastTick_ = 0;
     double lastSent_ = -1e9;
