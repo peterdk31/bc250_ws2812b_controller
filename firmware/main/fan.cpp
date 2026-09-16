@@ -478,6 +478,17 @@ static void setupInputs()
              g_inPin[i], g_sa.npts[i]);
         g_curveHave[i] = false;
     }
+
+    // a header that stopped reading a pin stops running its curve now. With
+    // no input pin left anywhere inputCheck() never reaches runCurves(), so
+    // a stale g_curve would outrank the fallback for good — the header keeps
+    // its last curve duty and the fallback slider does nothing
+    for (int i = 0; i < MAX_FANS; i++)
+        if (g_inPin[i] < 0)
+        {
+            g_curve[i] = NONE;
+            g_curveHave[i] = false;
+        }
 }
 
 // one reading of every input pin: a busy window of IN_WINDOW_US reading the

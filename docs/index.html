@@ -1206,6 +1206,7 @@ function renderFans() {
   const have = new Map([...wrap.children].map(el => [+el.dataset.slot, el]));
   for (const el of have.values()) if (!slots.includes(+el.dataset.slot)) el.remove();
   let anyNote = false;
+  const cards = [];
   for (const slot of slots) {
     let el = have.get(slot);
     if (!el) {
@@ -1214,10 +1215,14 @@ function renderFans() {
       el.dataset.slot = slot;
       wrap.appendChild(el);
     }
+    cards.push(el);
     anyNote |= renderFanCard(el, slot);
   }
-  // order the cards by slot (a header appearing later lands in place)
-  [...wrap.children].sort((a, b) => a.dataset.slot - b.dataset.slot).forEach(el => wrap.appendChild(el));
+  // order the cards by slot (a header appearing later lands in place), moving
+  // only a card that is out of place: re-inserting a card detaches it for a
+  // moment, which drops focus inside it — the source picker the user has open
+  // closes, and the browser scrolls to wherever focus lands
+  cards.forEach((el, i) => { if (wrap.children[i] !== el) wrap.insertBefore(el, wrap.children[i] || null); });
   if (!slots.length) {
     wrap.replaceChildren(Object.assign(document.createElement('div'), {
       className: 'card note',
