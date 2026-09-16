@@ -150,11 +150,19 @@ install: led
 	install -Dm755 led $(PREFIX)/bin/led
 	install -Dm644 led-controller.service /etc/systemd/system/led-controller.service
 	test -f /etc/led-controller/config.json || install -Dm644 config.json /etc/led-controller/config.json
+	-@$(MAKE) --no-print-directory modules
 	systemctl daemon-reload
 	-systemctl enable led-controller
 	-systemctl restart led-controller
 	-@$(MAKE) --no-print-directory udev-rule
 	-@$(MAKE) --no-print-directory serial-perms
+
+# the kernel modules the daemon wants (led-controller.conf): listed for every
+# boot and loaded now, ahead of the restart above, so the pmbus: sources find
+# their bus on the daemon's first start. Best-effort, like the udev rule.
+modules:
+	install -Dm644 led-controller.conf /etc/modules-load.d/led-controller.conf
+	-modprobe i2c-dev
 
 # install the udev rule that pins /dev/led-controller to the receiver's serial
 # port (see led-controller.rules), so the daemon's configured port and `make
@@ -180,6 +188,7 @@ uninstall:
 	rm -f /etc/systemd/system/led-controller.service
 	rm -f $(PREFIX)/bin/led
 	rm -f /etc/udev/rules.d/99-led-controller.rules
+	rm -f /etc/modules-load.d/led-controller.conf
 	rm -rf /etc/led-controller
 	systemctl daemon-reload
 	-udevadm control --reload-rules

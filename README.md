@@ -952,12 +952,12 @@ jumper wires bridge them: `I2C_HEADER1` **SCL → TPMS1 pin 4** (`SMB_CLK_MAIN`)
 and **SDA → TPMS1 pin 6** (`SMB_DATA_MAIN`), no ground wire needed. The pinout
 photos in [BC250-Telemetry's hardware guide](https://github.com/onlinermm/BC250-Telemetry/blob/main/hardware.md)
 show exactly which pins; that project also worked out the controller's
-register formats, which the daemon's reads follow. With the wires in, the
-kernel needs `i2c-dev` for `/dev/i2c-*` to exist:
+register formats, which the daemon's reads follow. The kernel's `i2c-dev`
+module is what makes the buses appear as `/dev/i2c-*`; `make install` lists
+it for every boot (`/etc/modules-load.d/led-controller.conf`) and loads it
+right away, so the wires are the only step. To see the bus yourself:
 
 ```bash
-sudo modprobe i2c-dev
-echo i2c-dev | sudo tee /etc/modules-load.d/i2c-dev.conf   # every boot
 sudo i2cdetect -l                                            # the buses
 sudo i2cdetect -y 4                                          # 60 should answer (usually bus 4)
 ```
