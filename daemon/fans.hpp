@@ -12,6 +12,7 @@
 #include <string.h>
 #include <time.h>
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <utility>
@@ -143,6 +144,7 @@ struct Header
     std::string pwmFile;             // "pwm1" (Pwm)
     std::string path;                // resolved sysfs file, "" = not yet
     bool reported = false;           // "no sensor yet" said once
+    bool lost = false;               // the resolved sensor stopped reading (said once)
     bool haveIn = false;
     float effIn = 0;                 // hysteresis-filtered input
     bool haveOut = false;
@@ -719,8 +721,9 @@ private:
                 tempPath_ = hwmon::findSensorFromSpec(sensors_);
             if (!tempPath_.empty())
             {
-                temp_ = hwmon::readTemp(tempPath_);
-                tempOk_ = true;
+                tempOk_ = hwmon::readTempOk(tempPath_, temp_); // the tile shows "—" for a sensor that isn't reading
+                if (!tempOk_ && !hwmon::fileExists(tempPath_))
+                    tempPath_.clear();
             }
         }
 
@@ -778,9 +781,29 @@ private:
 
                 if (h.kind == Header::Temp)
                 {
+                    // per tick, one read per path; NaN = no usable reading
                     auto it = temps_.find(h.path);
                     if (it == temps_.end())
-                        it = temps_.emplace(h.path, hwmon::readTemp(h.path)).first;
+                    {
+                        float t;
+                        it = temps_.emplace(h.path, hwmon::readTempOk(h.path, t) ? t : NAN).first;
+                    }
+                    if (std::isnan(it->second))
+                    {
+                        // an unplugged thermistor reads 0, a gone chip reads
+                        // nothing: either way the header runs its fallback
+                        // rather than a curve fed a temperature nobody measured
+                        if (!h.lost)
+                            fprintf(stderr, "fans.%s (%s): %s gives no usable reading — running the "
+                                            "fallback until it does\n", h.key.c_str(), h.name.c_str(), h.path.c_str());
+                        h.lost = true;
+                        if (!hwmon::fileExists(h.path))
+                            h.path.clear(); // gone: look it up again — it may return under another hwmon number
+                        return false;
+                    }
+                    if (h.lost)
+                        fprintf(stderr, "fans.%s (%s): %s is reading again\n", h.key.c_str(), h.name.c_str(), h.path.c_str());
+                    h.lost = false;
                     v = it->second;
                     return true;
                 }

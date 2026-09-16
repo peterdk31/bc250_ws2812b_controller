@@ -16,6 +16,7 @@
 namespace hwmon
 {
 inline float readTemp(const std::string& path);
+inline bool readTempOk(const std::string& path, float& v);
 
 // Tctl first when k10temp is present; the BC-250's NCT6686D registers
 // as "nct6686" under both the nct6687d driver (label "CPU") and the
@@ -367,8 +368,8 @@ inline std::vector<Reading> enumerate()
             std::string label = readFileLine(input + "_label");
             if (label.empty())
                 continue;
-            float v = readTemp(input + "_input");
-            if (!(v > 0 && v <= 120))
+            float v;
+            if (!readTempOk(input + "_input", v))
                 continue;
             out.push_back({chip, label, false, v});
         }
@@ -399,6 +400,23 @@ inline float readTemp(const std::string& path)
     f >> millideg;
 
     return millideg / 1000.0f;
+}
+
+// a temperature a fan may act on: false when the file is missing or
+// unreadable, and for a value no thermistor produces — at or below 0 °C
+// (an unplugged input, which the NCT6686D reports as 0) or above 120. A
+// fan curve fed 0 would run to its floor with the part it cools unwatched,
+// so callers treat false as "no reading" and fall back.
+inline bool readTempOk(const std::string& path, float& v)
+{
+    if (path.empty())
+        return false;
+    std::ifstream f(path);
+    long millideg = 0;
+    if (!(f >> millideg))
+        return false;
+    v = millideg / 1000.0f;
+    return v > 0 && v <= 120;
 }
 
 } // namespace hwmon

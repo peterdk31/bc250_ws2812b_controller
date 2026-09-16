@@ -987,7 +987,11 @@ Names (up to 16 characters) are editable from the phone too, and so is the
 source: the picker lists every kind above, with a pin field for `gpio` and a
 `chip:label` field for the hwmon kinds; a sensor that isn't on the machine is
 refused there and then (a hand edit in the file may name one that turns up
-later). The set of headers is yours alone — the phone can't add or remove
+later). A sensor that stops reading while the daemon runs — a thermistor
+unplugged (the chip then reports 0 °C), a driver unloaded — puts its header
+on the fallback speed, not on a curve fed a temperature nobody measured; the
+journal says so once, the phone's row says "no reading", and the sensor is
+looked up again until it is back. The set of headers is yours alone — the phone can't add or remove
 one, that is wiring. The dashboard is read-only when the daemon
 can't write its config (the page hides the cogs); a write that fails
 mid-way is reported in the journal and the edit runs until the next restart.
