@@ -834,7 +834,7 @@ so does *where the curve runs* — on whichever side can read the input:
 | `temp` | the top-level `sensors` pick | °C | daemon |
 | `chip:label` | any hwmon temperature, same syntax as `sensors` (`amdgpu:edge`, `nct6686:CPU`; a comma list of candidates works too). The phone's picker lists every labelled one the machine has, with its reading; so does `--fan-status` | °C | daemon |
 | `pmbus:CPU VRM` / `pmbus:GPU VRM` | the BC-250's two VRM rails, read from the board's PMBus controller over I2C by the daemon itself — see [VRM and GDDR6 temperatures](#vrm-and-gddr6-temperatures) for the two-wire mod that exposes the bus. Listed in the picker once the controller answers | °C | daemon |
-| `file:/path` | one temperature in a plain file, in millidegrees (the sysfs convention: 1000 and up) or degrees. For telemetry some other program publishes as files, such as GDDR6 temperatures (below). Files under `/run/bc250` named `*_temp` are listed in the picker; any other path is typed | °C | daemon |
+| `file:/path` | one temperature in a plain file, in millidegrees (the sysfs convention: 1000 and up) or degrees. For telemetry some other program publishes as files, such as GDDR6 temperatures (below). Files under `/run/bc250` named `*_temp` are listed in the picker; any other path goes in through its *Temperature file…* row | °C | daemon |
 | `chip:pwmN` | a hwmon pwm *output* — the board's own fan header, i.e. what its BIOS fan curve is asking for, read over the host instead of a wire. Outputs that read alike are one line in the phone's picker (`pwm 1–8`, following the first) until they differ | % (0..255 read as 0..100) | daemon |
 | `cpu_load` / `gpu_load` | the rule conditions' readings | % | daemon |
 

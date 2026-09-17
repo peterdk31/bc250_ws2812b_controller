@@ -29,6 +29,15 @@ function useStore() {
   useEffect(() => { const off = B.subscribe(() => tick(n => n + 1)); tick(n => n + 1); return off; }, []);
 }
 
+// a <select> built once per distinct `key` (a string naming its options and
+// value): the page redraws on every telemetry frame, and Preact's diff blanks
+// and rewrites each option's value on every pass (its guard against text
+// children clobbering the value) — Android Chrome dismisses an open dropdown
+// the moment an option changes under it, so a select under the finger closed
+// a second after it opened. Handing the diff the same vnode back skips the
+// subtree wholesale; the vnode is rebuilt only when the key changes.
+const useSteadySelect = (key, make) => useMemo(make, [key]);
+
 // ---- icons: stroke SVGs on a 24 px grid, colored by currentColor ----
 const Icon = ({ d, size = 20, sw = 2 }) => html`<svg class="ic" width=${size} height=${size} viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width=${sw} stroke-linecap="round" stroke-linejoin="round" dangerouslySetInnerHTML=${{ __html: d }}></svg>`;
@@ -101,16 +110,18 @@ function Header({ back: backLabel, title }) {
   const { ids, labels } = B.labels();
   const cur = B.currentId();
   const live = S.fans && S.fans.telem && S.telem;
+  const sel = ids.includes(cur) ? cur : '';
+  const pickReceiver = useSteadySelect(JSON.stringify([ids, ids.map(id => labels[id]), sel, !!S.busy]), () => html`
+            <select aria-label="Receiver" value=${sel} disabled=${S.busy}
+              onChange=${e => { const v = e.target.value; e.target.value = sel; if (v === '+') B.connect(); else if (v) B.select(v); }}>
+              ${!sel && html`<option value="" disabled>Receiver…</option>`}
+              ${ids.map(id => html`<option key=${id} value=${id}>${labels[id]}</option>`)}
+              <option value="+">Add a receiver…</option>
+            </select>`);
   return html`<header>
     <div class="top">
       ${backLabel ? html`<button class="back" onClick=${back}><${Icon} d=${I.left} /><span>${backLabel}</span></button>`
-        : B.anyKnown() && hasBt() ? html`<div class="pill">
-            <select aria-label="Receiver" value=${ids.includes(cur) ? cur : ''} disabled=${S.busy}
-              onChange=${e => { const v = e.target.value; e.target.value = ids.includes(cur) ? cur : ''; if (v === '+') B.connect(); else if (v) B.select(v); }}>
-              ${!ids.includes(cur) && html`<option value="" disabled>Receiver…</option>`}
-              ${ids.map(id => html`<option key=${id} value=${id}>${labels[id]}</option>`)}
-              <option value="+">Add a receiver…</option>
-            </select><${Icon} d=${I.down} size=${16} /></div>`
+        : B.anyKnown() && hasBt() ? html`<div class="pill">${pickReceiver}<${Icon} d=${I.down} size=${16} /></div>`
         : html`<h1>BC-250</h1>`}
       ${title && html`<span class="ttl">${title}</span>`}
       <div class="st"><i style=${`background: ${color}; box-shadow: 0 0 10px ${color}`}></i><span>${state}</span></div>
@@ -317,12 +328,23 @@ const fmtReading = (kind, v) => v === null ? '—' : kind === 'temp' || kind ===
 // for the hwmon kinds, the telemetry's otherwise
 const readingFor = (h, slot) => (h.kind === 'hwmon' || h.kind === 'pwm') ? B.sensorReading(h.spec) : B.readingOf(h.kind, slot);
 // the picker's rows: the fixed kinds, then the catalogue (a row per sensor
-// and per board pwm output, picking fills the spec), then "other" rows for
-// a sensor the catalogue doesn't list (the typed spec)
+// and per board pwm output, picking fills the spec), then a row for a
+// temperature file (a typed path — the daemon lists /run/bc250's *_temp files
+// itself, anything else is named here), then an "other" row (the typed spec)
+// only when the catalogue can't stand in for typing: it was cut for size, the
+// header follows a spec it doesn't list, or a chip's pwm outputs are still
+// one grouped entry (following one of them by name)
 const inCatalogue = spec => !!(spec && S.sens && S.sens.some(e => e.spec === spec));
+const isFileSpec = spec => typeof spec === 'string' && spec.startsWith(B.FILE_PREFIX);
+const FILE_ROW = { label: 'Temperature file…', hint: 'a file another program keeps a temperature in',
+                   placeholder: '/tmp/some_custom_temp_reading',
+                   help: 'A plain text file holding one number: a temperature in degrees, or in millidegrees the way sysfs writes them (1000 and up). Give the full path. This is for a reading some other program of yours publishes as a file; files under /run/bc250 named *_temp are already listed above. The reading shows once the header is saved and the daemon has read the file.' };
 function pickerRows(h, kinds, slot) {
   const rows = [];
-  const inCat = (h.spec && S.sens && S.sens.some(e => e.spec === h.spec));
+  const inCat = inCatalogue(h.spec);
+  const typedFile = h.kind === 'hwmon' && isFileSpec(h.spec) && !inCat;
+  const grouped = !!(S.sens && S.sens.some(e => e.pwm && e.label.includes('–')));
+  const needOther = k => S.sensMore > 0 || (h.kind === k && !inCat && !typedFile) || (k === 'pwm' && grouped);
   for (const k of kinds) {
     if (k === 'hwmon' || k === 'pwm') continue;
     rows.push({ id: k, kind: k, label: B.SRC_KINDS[k].label, hint: B.SRC_KINDS[k].hint, disabled: k === 'host',
@@ -335,7 +357,10 @@ function pickerRows(h, kinds, slot) {
                   on: h.kind === kind && h.spec === e.spec, value: fmtReading(kind, e.value) });
     }
   }
-  for (const k of ['hwmon', 'pwm']) if (kinds.includes(k))
+  if (kinds.includes('hwmon'))
+    rows.push({ id: 'file', kind: 'hwmon', file: true, label: FILE_ROW.label, hint: FILE_ROW.hint,
+                on: typedFile, value: typedFile ? fmtReading('hwmon', B.sensorReading(h.spec)) : '' });
+  for (const k of ['hwmon', 'pwm']) if (kinds.includes(k) && needOther(k))
     rows.push({ id: 'other-' + k, kind: k, other: true, label: `Other ${k === 'pwm' ? 'board fan header' : 'sensor'}…`,
                 hint: (k === 'hwmon' && S.sensMore ? `${S.sensMore} more on the machine than fit here — ` : '') + B.SRC_KINDS[k].hint,
                 on: h.kind === k && !inCat, value: h.kind === k && !inCat ? fmtReading(k, B.sensorReading(h.spec)) : '' });
@@ -351,15 +376,18 @@ function FanEditor({ slot }) {
   const [h, setH] = useState(() => orig && { ...orig, pts: orig.pts.map(p => ({ ...p })) });
   useEffect(() => { if (!h && orig) setH({ ...orig, pts: orig.pts.map(p => ({ ...p })) }); }, [!!orig]);
   const [open, setOpen] = useState(false);
-  const [other, setOther] = useState(false); // "Other sensor…" picked: the spec is typed, whatever the catalogue lists
+  const [other, setOther] = useState(false); // "Other sensor…" or "Temperature file…" picked: the spec is typed, whatever the catalogue lists
   const dirty = () => JSON.stringify(h) !== JSON.stringify(orig);
   useEffect(() => { leaveGuard = () => !dirty() || confirm('Leave without saving?'); return () => { leaveGuard = null; }; });
+  const set = patch => setH(x => ({ ...x, ...patch }));
+  // the receiver's free pins (plus the configured one, should it not be free), or null for a typed pin
+  const pins = S.info && S.info.pins;
+  const pinOpts = h && pins && (pins.includes(h.gpio) ? pins : [...pins, h.gpio].sort((a, b) => a - b));
+  const pinSelect = useSteadySelect(pinOpts ? `${pinOpts.join()}=${h.gpio}` : '', () => pinOpts && html`
+          <select value=${h.gpio} onChange=${e => set({ gpio: +e.target.value })}>${pinOpts.map(g => html`<option key=${g} value=${g}>GPIO${g}</option>`)}</select>`);
   if (!h) return html`<${Header} back="Fans" /><div class="empty">This header is gone.</div>`;
   const daemon = h.route === 'daemon';
   const kinds = daemon ? ['fallback', 'gpio', ...B.HOST_KINDS] : h.kind === 'host' ? ['host', 'fallback', 'gpio'] : ['fallback', 'gpio'];
-  const pins = S.info && S.info.pins;
-  const pinOpts = pins && (pins.includes(h.gpio) ? pins : [...pins, h.gpio].sort((a, b) => a - b));
-  const set = patch => setH(x => ({ ...x, ...patch }));
   const setPt = (i, p) => setH(x => { const pts = x.pts.map(q => ({ ...q })); pts[i] = { ...pts[i], ...p }; return { ...x, pts }; });
   const addPt = () => setH(x => {
     const p = x.pts.map(q => ({ ...q })), d = xDomain(x);
@@ -376,8 +404,11 @@ function FanEditor({ slot }) {
   const saving = S.saving !== null;
   const cur = B.SRC_KINDS[h.kind];
   const curEntry = (h.kind === 'hwmon' || h.kind === 'pwm') && S.sens && S.sens.find(e => e.spec === h.spec);
-  const curLabel = curEntry ? (curEntry.pwm ? `${curEntry.chip} ${curEntry.label}` : curEntry.label) : (h.kind === 'hwmon' || h.kind === 'pwm') && h.spec ? h.spec : cur.label;
+  const curLabel = curEntry ? (curEntry.pwm ? `${curEntry.chip} ${curEntry.label}` : curEntry.label)
+                 : h.kind === 'hwmon' && h.spec === B.FILE_PREFIX ? FILE_ROW.label.replace('…', '') // a file row picked, no path yet
+                 : (h.kind === 'hwmon' || h.kind === 'pwm') && h.spec ? h.spec : cur.label;
   const typed = (h.kind === 'hwmon' || h.kind === 'pwm') && (other || !curEntry); // a spec the catalogue doesn't list, or chosen to type
+  const typedFile = typed && h.kind === 'hwmon' && isFileSpec(h.spec); // ... and it is a file path
   return html`<${Header} back="Fans" title=${(orig && orig.name) || `header${slot + 1}`} />
     <div class="list">
       ${daemon && html`<div class="card"><input class="text" type="text" maxlength="16" autocomplete="off" aria-label="Name" value=${h.name} onInput=${e => set({ name: e.target.value })} /></div>`}
@@ -388,23 +419,31 @@ function FanEditor({ slot }) {
           <${Icon} d=${open ? I.up : I.down} size=${18} />
         </button>
         ${open && html`<div class="srcs">${pickerRows(h, kinds, slot).map(r => html`<button key=${r.id} class="src ${r.on ? 'on' : ''}" disabled=${r.disabled}
-            onClick=${() => { setH(x => { const n = withKind(x, r.kind); if (r.spec) n.spec = r.spec; else if (r.other) n.spec = inCatalogue(x.spec) ? '' : (x.spec || ''); return n; }); setOther(!!r.other); setOpen(false); }}>
+            onClick=${() => { setH(x => { const n = withKind(x, r.kind);
+                              if (r.spec) n.spec = r.spec;                                                                       // a listed sensor
+                              else if (r.file) n.spec = isFileSpec(x.spec) && !inCatalogue(x.spec) ? x.spec : B.FILE_PREFIX;     // keep a path being typed, start an empty one otherwise
+                              else if (r.other) n.spec = inCatalogue(x.spec) || isFileSpec(x.spec) ? '' : (x.spec || '');       // keep a spec being typed
+                              return n; }); setOther(!!r.other || !!r.file); setOpen(false); }}>
             <span class="mark">${r.on ? html`<${Icon} d=${I.check} size=${18} />` : html`<i></i>`}</span>
             <span class="lbl"><span>${r.label}</span>${r.hint && html`<small>${r.hint}</small>`}</span>
             <span class="rd">${r.value}</span></button>`)}</div>`}
         ${h.kind === 'gpio' && (pinOpts
-          ? html`<label class="frow"><span>Pin</span><select value=${h.gpio} onChange=${e => set({ gpio: +e.target.value })}>${pinOpts.map(g => html`<option key=${g} value=${g}>GPIO${g}</option>`)}</select></label>`
+          ? html`<label class="frow"><span>Pin</span>${pinSelect}</label>`
           : html`<label class="frow"><span>Pin</span><input type="number" min="0" max="48" step="1" value=${h.gpio} onInput=${e => { const v = parseInt(e.target.value, 10); if (!isNaN(v)) set({ gpio: v }); }} /><small>a free receiver pin</small></label>`)}
-        ${typed && html`<label class="frow"><span>${h.kind === 'pwm' ? 'Header' : 'Sensor'}</span>
+        ${typedFile ? html`<label class="frow"><span>file:</span>
+          <input class="text" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder=${FILE_ROW.placeholder}
+            value=${h.spec.slice(B.FILE_PREFIX.length)} onInput=${e => set({ spec: B.FILE_PREFIX + e.target.value.trim() })} /></label>
+          <div class="note">${FILE_ROW.help}</div>`
+        : typed && html`<label class="frow"><span>${h.kind === 'pwm' ? 'Header' : 'Sensor'}</span>
           <input class="text" type="text" autocomplete="off" placeholder=${cur.hint} value=${h.spec || ''} onInput=${e => set({ spec: e.target.value.trim() })} /></label>`}
       </div>
       ${!B.isFixed(h) && html`<div class="card">
         <h2>Curve</h2>
         <${Curve} h=${h} editing=${true} onChange=${setPt} />
         <div class="pts">${h.pts.map((p, i) => html`<div key=${i} class="prow">
-          <label>point ${i + 1}</label>
-          <input type="number" step=${B.isTempX(h) ? 0.5 : 1} value=${p.x} onInput=${e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setPt(i, { x: v }); }} /><span class="unit">${unit}</span>
-          <input type="number" min="0" max="100" step="1" value=${p.y} onInput=${e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setPt(i, { y: v }); }} /><span class="unit">%</span>
+          <label>${i + 1}</label>
+          <input type="number" aria-label=${`point ${i + 1} ${B.isTempX(h) ? 'temperature' : 'input'}`} step=${B.isTempX(h) ? 0.5 : 1} value=${p.x} onInput=${e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setPt(i, { x: v }); }} /><span class="unit">${unit}</span>
+          <input type="number" aria-label=${`point ${i + 1} speed`} min="0" max="100" step="1" value=${p.y} onInput=${e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setPt(i, { y: v }); }} /><span class="unit">%</span>
           ${h.pts.length > 1 ? html`<button class="x" aria-label="remove point" onClick=${() => rmPt(i)}>×</button>` : html`<span></span>`}
         </div>`)}</div>
         ${h.pts.length < B.MAX_POINTS && html`<button class="rowlink add" onClick=${addPt}><${Icon} d=${I.plus} size=${16} /><span>add a point</span></button>`}
@@ -444,17 +483,12 @@ function GlobalsEditor() {
 }
 
 // ---- LEDs ----
-// the preview: a scene's color at its level through the daemon's correction
-// (color_lut.hpp: gamma, then the white-balance gain, then brightness),
-// encoded back to sRGB so the screen shows roughly what the eye sees
-function preview(sc, color, level) {
-  const out = [0, 1, 2].map(i => {
-    const c = parseInt(color.substr(2 * i, 2), 16) / 255;
-    const lin = Math.pow(c * level, sc.gamma[i]) * (sc.wb[i] / 255) * sc.brightness;
-    return Math.round(255 * Math.pow(lin, 1 / 2.2));
-  });
-  return '#' + out.map(B.hex2).join('');
-}
+// the white swatch: a full-white pixel through the balance alone — the
+// daemon's correction (color_lut.hpp) multiplies each channel by its gain in
+// linear light, so the gains are encoded back to sRGB to show roughly the
+// tint the eye sees. Gamma is unity at full white and brightness only dims,
+// so neither is in the swatch: it shows tint, nothing else.
+const whiteSwatch = wb => '#' + wb.map(v => B.hex2(Math.round(255 * Math.pow(v / 255, 1 / 2.2)))).join('');
 
 function LedsScreen() {
   const sc = S.scfg;
@@ -467,16 +501,14 @@ function LedsScreen() {
   const bri = 'brightness' in pend ? pend.brightness : sc.brightness;
   const rev = 'reverse' in pend ? pend.reverse : sc.reverse;
   const sceneOf = s => ({ ...s, ...((pend.scenes || []).find(x => x.p === s.p) || {}) });
-  // the swatch follows the first scene that carries a color (the solid rule
-  // for tuning white), at its level; plain white otherwise
-  const tune = sc.scenes.map(sceneOf).find(s => s.color !== null);
-  const sw = preview({ gamma, wb, brightness: bri }, tune ? tune.color : 'ffffff', tune && tune.l !== null ? tune.l : 1);
+  const wbHex = wb.map(B.hex2).join('');
   const writeWb = (i, v) => { const n = [...wb]; n[i] = v; B.writeStrip({ white_balance: n.map(B.hex2).join('') }); };
   const writeGamma = (i, v) => {
-    const n = [...gamma]; n[i] = v;
+    const n = [...gamma]; n[i] = Math.round(v * 100) / 100; // the slider's 0.05 steps, free of float dust
     if (n.some(x => !(x >= 0.5 && x <= 5))) { B.note('strip', 'gamma is 0.5–5 per channel', 'err'); return; }
     B.writeStrip({ gamma: n.every(x => x === n[0]) ? String(n[0]) : n.join(' ') });
   };
+  const fmtGamma = v => String(Math.round(v * 100) / 100);
   const CH = [['R', 'r'], ['G', 'g'], ['B', 'b']];
   return html`<div class="list">
     ${sc.scenes.length > 0 && html`<${Card} title="Scenes">
@@ -493,14 +525,14 @@ function LedsScreen() {
       <${Slider} value=${Math.round(bri * 100)} disabled=${ro} label=${v => `${v} %`} done=${v => B.writeStrip({ brightness: v / 100 })} />
     <//>
     <${Card} title="White">
-      <div class="prev"><div class="swatch" style=${`background: ${sw}`}></div>
-        <div class="note">${tune ? `${tune.e || 'The scene'} at ${Math.round((tune.l ?? 1) * 100)} %, as the strip will show it. ` : ''}Adjust until the light through the front plate looks white.</div></div>
+      <div class="prev"><div class="swatch" style=${`background: ${whiteSwatch(wb)}`}></div>
+        <div class="note">White through the balance below, roughly as the strip tints it (<span class="hex">${wbHex}</span> in the config). With a solid scene switched on in white, adjust until the light through the front plate looks white.</div></div>
       <div class="sub">Balance</div>
       ${CH.map(([L, c], i) => html`<div key=${c} class="chrow"><i class="ch ${c}">${L}</i>
         <${Slider} value=${wb[i]} max=${255} disabled=${ro} label=${v => String(v)} done=${v => writeWb(i, v)} /></div>`)}
       <div class="sub">Gamma</div>
-      <div class="gam">${CH.map(([L, c], i) => html`<label key=${c}><i class="ch ${c}">${L}</i>
-        <input type="number" min="0.5" max="5" step="0.05" disabled=${ro} value=${gamma[i]} onChange=${e => writeGamma(i, parseFloat(e.target.value))} /></label>`)}</div>
+      ${CH.map(([L, c], i) => html`<div key=${c} class="chrow"><i class="ch ${c}">${L}</i>
+        <${Slider} value=${gamma[i]} min=${0.5} max=${5} step=${0.05} disabled=${ro} label=${fmtGamma} done=${v => writeGamma(i, v)} /></div>`)}
     <//>
     <${Card} title="Direction">
       <div class="swrow"><span>Reversed</span><${Switch} on=${rev} disabled=${ro} change=${v => B.writeStrip({ reverse: v })} /></div>

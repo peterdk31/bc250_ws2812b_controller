@@ -424,13 +424,14 @@ export const SRC_KINDS = {
   fallback: { label: 'Fixed speed', hint: 'runs at the fallback speed, always' },
   gpio:     { label: 'PWM input', hint: 'a fan wire on a receiver pin' },
   temp:     { label: 'CPU temperature' },
-  hwmon:    { label: 'Sensor', hint: 'chip:label, e.g. amdgpu:edge or pmbus:GPU VRM; file:/path reads a file' },
+  hwmon:    { label: 'Sensor', hint: 'chip:label, e.g. amdgpu:edge or pmbus:GPU VRM' },
   pwm:      { label: 'Board fan header', hint: 'chip:pwmN, e.g. nct6686:pwm1' },
   cpu_load: { label: 'CPU load' },
   gpu_load: { label: 'GPU load' },
   host:     { label: 'Machine’s curve', hint: 'a source only the machine reads' },
 };
 export const HOST_KINDS = ['temp', 'hwmon', 'pwm', 'cpu_load', 'gpu_load']; // the daemon runs these
+export const FILE_PREFIX = 'file:'; // hwmon.hpp: a spec naming a file holding one temperature
 export function srcInfo(s) {
   s = String(s || '');
   if (s === 'fallback' || s === 'constant') return { kind: 'fallback', src: 'fallback' };
@@ -750,6 +751,8 @@ export function checkEdit(h) {
   }
   if (h.route !== 'daemon' && h.kind !== 'fallback' && h.kind !== 'gpio') return 'with the machine off a header runs a fixed speed or a PWM input — pick one';
   if (h.kind === 'gpio' && !(Number.isInteger(h.gpio) && h.gpio >= 0 && h.gpio <= 48)) return 'the pin is a number 0–48';
+  if (h.kind === 'hwmon' && (h.spec || '').startsWith(FILE_PREFIX) && !/^\/\S/.test(h.spec.slice(FILE_PREFIX.length))) // the daemon insists on an absolute path
+    return 'a temperature file is its full path, e.g. /tmp/some_custom_temp_reading';
   if ((h.kind === 'hwmon' || h.kind === 'pwm') && !/^[^:\s]+:\S[^:]*$/.test(h.spec || '')) // a label may hold spaces ("AMD TSI Addr 98h", "CPU VRM")
     return h.kind === 'pwm' ? 'a board fan header is chip:pwmN, e.g. nct6686:pwm1' : 'a sensor is chip:label, e.g. amdgpu:edge';
   if (h.kind === 'pwm' && !/:pwm\d+$/.test(h.spec)) return 'a board fan header is chip:pwmN, e.g. nct6686:pwm1';

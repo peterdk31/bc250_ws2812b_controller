@@ -220,11 +220,12 @@
   .src .rd { font-size: .95rem; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .src.on .rd { color: var(--on); }
   .pts { display: flex; flex-direction: column; gap: .35rem; }
-  .prow { display: grid; grid-template-columns: 3.4rem 4.5rem auto 4.5rem auto 2.2rem; gap: .35rem; align-items: center; }
+  .prow { display: grid; grid-template-columns: 1.1rem 4.5rem auto 4.5rem auto 2.2rem; gap: .35rem; align-items: center; }
   .prow label, .prow .unit { font-size: .8rem; color: var(--muted); white-space: nowrap; }
+  .prow label { text-align: right; font-variant-numeric: tabular-nums; }
   .prow input { width: 100%; }
   .prow .x { width: 2.2rem; height: 2.5rem; color: var(--muted); font-size: 1.1rem; }
-  @media (max-width: 340px) { .prow { grid-template-columns: 3rem 3.8rem auto 3.8rem auto 2rem; } .prow input { padding-inline: .3rem; } }
+  @media (max-width: 340px) { .prow { grid-template-columns: 1rem 3.8rem auto 3.8rem auto 2rem; } .prow input { padding-inline: .3rem; } }
 
   /* ---- LEDs ---- */
   .scene { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: .3rem .7rem; align-items: center;
@@ -234,13 +235,10 @@
   .scene .extra .unit { font-size: .8rem; color: var(--muted); }
   .prev { display: flex; align-items: center; gap: .75rem; }
   .swatch { width: 3.6rem; height: 3.6rem; border-radius: .75rem; border: 1px solid var(--border); flex: none; }
+  .hex { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; }
   .chrow { display: flex; align-items: center; gap: .6rem; }
   .ch { font-style: normal; font-size: .72rem; font-weight: 600; width: 1rem; text-align: center; flex: none; }
   .ch.r { color: #ff6b6b; } .ch.g { color: #5fd38a; } .ch.b { color: #6fa8ff; }
-  .gam { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .5rem; }
-  .gam label { display: flex; align-items: center; gap: .3rem; min-width: 0; }
-  .gam input { width: 100%; min-width: 0; text-align: center; -moz-appearance: textfield; appearance: textfield; }
-  .gam input::-webkit-inner-spin-button, .gam input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 
   /* ---- Receiver ---- */
   .recv { display: flex; align-items: center; gap: .75rem; min-height: 3.25rem; padding: .4rem .7rem; text-align: left;
