@@ -165,10 +165,9 @@ public:
         return j + "}";
     }
 
-private:
-    static const int WIRE_MAX = 256; // the receiver's slot for CMD_PWR_CONFIG (protocol.hpp)
-
-    // tools/pwrcfg.py's ranges, in one place on this side
+    // tools/pwrcfg.py's ranges, in one place on this side; public for the
+    // config check (daemon/config_check.hpp), which asks the same question
+    // of a file before the daemon runs on it
     static bool checkTuning(double hold, double boot, int low, int high, std::string& why)
     {
         char buf[160];
@@ -187,6 +186,9 @@ private:
         why = buf;
         return false;
     }
+
+private:
+    static const int WIRE_MAX = 256; // the receiver's slot for CMD_PWR_CONFIG (protocol.hpp)
 
     bool bad(const std::string& where, const std::string& what)
     {

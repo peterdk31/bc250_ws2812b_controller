@@ -76,6 +76,10 @@ public:
             new SerialSink(port.c_str(), baud, debug, buttonCmd));
     }
 
+    // can the link be opened at this rate? (the config check asks before a
+    // start would exit on it)
+    static bool baudSupported(int baud) { return baudToSpeed(baud) != B0; }
+
     // the config's short-press command, "" for null/absent/not a string
     static std::string shortPressOf(const Config& cfg)
     {

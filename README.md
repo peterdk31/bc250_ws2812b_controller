@@ -257,6 +257,34 @@ Configs from before September 2026 had an `esp32` block and a `sinks.serial`
 one; the daemon names the old key and what it became, and exits, rather than
 run on a half-read file.
 
+### Checking a config
+
+```sh
+led --check /etc/led-controller/config.json   # or: make check
+```
+
+Would the daemon start on this file, and is it the file you meant to write?
+The check parses it and runs every block through the same validation the
+daemon does at startup — retired keys, the fans block, the rules and their
+conditions and effect names, the boot and shutdown recordings (rendered, so a
+segment that can't record is caught here) — and then the things the daemon
+would run on but nobody could have intended: a key that isn't one inside
+`serial`, `strip`, `power_switch`, `ble_remote`, a rule or a recording
+segment (with a "did you mean" for a near miss), a value of the wrong type, a
+color that isn't `RRGGBB`, a LED count over the receiver's 100, an inverted
+sense hysteresis, an enabled `ble_remote` without a token. Each is a line
+naming the key; any of them fails the check (exit 1). A `note:` line is
+something to look at that may be intended — a top-level key the daemon
+doesn't read by name (effects see every top-level key as a shared default
+setting), or a rule below a catch-all that can never be reached — and
+doesn't fail it. It opens no port and sends nothing; the sensor lookups only
+say "not found yet" on a box without them.
+
+`make install` runs the check on the deployed file with the freshly built
+daemon before it swaps the binary and restarts the service, so a key the new
+version retired is reported while the old daemon still runs, not as a crash
+loop after; `make install CHECK=0` skips that.
+
 ### Live reload
 
 The running daemon watches its config file and picks up a save within a
@@ -1296,7 +1324,9 @@ sudo make install        # /usr/local/bin/led + systemd unit + default config
 sudo make uninstall      # remove everything, including the config
 ```
 
-`make install` never overwrites an existing config, restarts the service if
+`make install` never overwrites an existing config, checks the deployed one
+against the new build first (see [Checking a config](#checking-a-config)),
+restarts the service if
 it's running (so a rebuilt daemon goes live immediately), and adds your user
 to the serial port's group (effective next login) so `led` can run
 unprivileged for testing. The unit restarts on serial failure every 2 s, so unplugging the
@@ -1306,6 +1336,7 @@ adapter heals itself.
 led <config>            run the rules
 led <config> <effect>   run a single effect forever (testing)
 led --list              list available effects
+led --check <config>    validate a config without running it
 ```
 
 ### Adding an effect

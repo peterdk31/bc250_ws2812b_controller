@@ -8,6 +8,7 @@
 #include <vector>
 #include <initializer_list>
 #include <memory>
+#include "config_check.hpp"
 #include "config_edit.hpp"
 #include "effect.hpp"
 #include "fans.hpp"
@@ -211,33 +212,6 @@ static int runPreview(const Config& cfg, Strip& strip,
     return 0;
 }
 
-// The config's shape changed in Sep 2026 and there is no compatibility path
-// (one file on one box): the "esp32" block dissolved into top-level keys and
-// "sinks.serial" became "serial", with the power button moving into the
-// "power_switch" block. Say exactly what to rename rather than running on a
-// half-read file — a silently ignored "serial" block would mean a daemon that
-// opens the wrong port with the wrong baud.
-static bool checkRetiredKeys(const Config& cfg)
-{
-    const struct { const char* key; const char* now; } retired[] = {
-        {"esp32", "its keys moved to the top level: \"target\", "
-                  "\"host_timeout_ms\", \"power_on\", \"shutdown\""},
-        {"sinks", "\"sinks\": { \"serial\": { ... } } is now just \"serial\": "
-                  "{ ... }; power_button/power_button_command became "
-                  "\"power_switch\": { \"short_press\": \"systemctl poweroff\" }"},
-    };
-
-    bool ok = true;
-    for (auto& r : retired)
-        if (cfg.root().find(r.key))
-        {
-            fprintf(stderr, "config: \"%s\" is no longer a key — %s\n", r.key, r.now);
-            ok = false;
-        }
-
-    return ok;
-}
-
 static void usage(const char* prog)
 {
     fprintf(stderr,
@@ -248,8 +222,9 @@ static void usage(const char* prog)
             "       %s --list                         list available effects\n"
             "       %s --steam-status                 dump Steam download detection\n"
             "       %s <config> --fan-status          dump the fan headers' sources and duties\n"
-            "       %s --config-get <config> <path>   print a config value\n",
-            prog, prog, prog, prog, prog, prog, prog);
+            "       %s --config-get <config> <path>   print a config value\n"
+            "       %s --check <config>               validate a config without running it\n",
+            prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char** argv)
@@ -293,6 +268,13 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    // ./led --check <config>: would the daemon start on this file, and is it
+    // the file its author meant? (daemon/config_check.hpp). Exit 0 when so;
+    // `make install` runs it on the deployed config before restarting the
+    // service on a freshly built daemon.
+    if (argc == 3 && strcmp(argv[1], "--check") == 0)
+        return cfgcheck::run(argv[2]);
+
     // ./led <config> --preview <slot>: record a receiver slot and play it back
     // to the sinks, exactly as the receiver will — so the viewer previews the
     // real recording (sequence, loop and hold included), not just the live
@@ -314,7 +296,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    if (!checkRetiredKeys(cfg))
+    if (!cfgcheck::retiredKeys(cfg))
         return 1;
 
     // the dashboards' way back into the config file (daemon/config_edit.hpp):
@@ -596,7 +578,7 @@ int main(int argc, char** argv)
         Config fresh;
         fans::Controller freshFans;
         std::vector<Rule> freshRules;
-        if (!fresh.load(cfgPath) || !checkRetiredKeys(fresh) ||
+        if (!fresh.load(cfgPath) || !cfgcheck::retiredKeys(fresh) ||
             !freshFans.load(fresh, &cfgWriter) || !loadRules(fresh, freshRules))
         {
             fprintf(stderr, "config: reload failed — keeping the running config; "

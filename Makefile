@@ -114,7 +114,7 @@ DOCKER_USER = $(if $(filter docker,$(CONTAINER)),--user $${SUDO_UID:-$$(id -u)}:
 # (sdkconfig is relocated into the per-target build dir, below).
 IDF_GENERATED = firmware/managed_components firmware/dependencies.lock
 
-HEADERS = daemon/output/strip.hpp daemon/config_loader.hpp daemon/fans.hpp vendor/json.hpp \
+HEADERS = daemon/output/strip.hpp daemon/config_loader.hpp daemon/config_check.hpp daemon/fans.hpp vendor/json.hpp \
           daemon/config_edit.hpp daemon/strip_remote.hpp daemon/power_remote.hpp \
           daemon/effects/effect.hpp daemon/rules/condition.hpp daemon/color/color.hpp \
           daemon/sources/hwmon.hpp daemon/sources/pmbus.hpp daemon/sources/steam.hpp \
@@ -146,7 +146,24 @@ led: $(SRCS) $(HEADERS)
 virtual-strip: tools/virtual_strip.cpp daemon/output/virtual_strip_socket.hpp common/receiver.hpp common/protocol.hpp common/fade.hpp common/motion.hpp
 	$(CXX) $(CXXFLAGS) tools/virtual_strip.cpp -o $@
 
+# would the config the daemon runs on start THIS build? (daemon/config_check.hpp)
+# `make check` asks about $(CONFIG) — the deployed file when there is one, else
+# the repo's. `install` asks the same about the deployed file before it swaps
+# the binary and restarts the service, since a key the new daemon retired (or
+# a typo saved since) would otherwise surface as a crash loop in the journal
+# with the old daemon already gone. CHECK=0 installs regardless.
+CHECK ?= 1
+DEPLOYED_CONFIG = /etc/led-controller/config.json
+
+check: led
+	./led --check $(CONFIG)
+
 install: led
+	@if [ "$(CHECK)" != 0 ] && [ -f $(DEPLOYED_CONFIG) ]; then \
+		./led --check $(DEPLOYED_CONFIG) || { \
+			echo "install: $(DEPLOYED_CONFIG) would not start the new daemon — fix it first," \
+			     "or run 'make install CHECK=0' to install anyway"; exit 1; }; \
+	fi
 	install -Dm755 led $(PREFIX)/bin/led
 	install -Dm644 led-controller.service /etc/systemd/system/led-controller.service
 	test -f /etc/led-controller/config.json || install -Dm644 config.json /etc/led-controller/config.json
@@ -532,4 +549,4 @@ receiver-clean:
 	rm -rf firmware/build firmware/build-* firmware/dist $(IDF_GENERATED)
 	-@[ -n "$(CONTAINER)" ] && $(CONTAINER) rmi $(IDF_IMAGE) 2>/dev/null || true
 
-.PHONY: all install install-config uninstall clean udev-rule serial-perms receiver-toolchain receiver receiver-clean flash flash-source flash-pwr flash-fan flash-ble clear-nvs clear-recordings
+.PHONY: all check install install-config uninstall clean udev-rule serial-perms receiver-toolchain receiver receiver-clean flash flash-source flash-pwr flash-fan flash-ble clear-nvs clear-recordings
