@@ -599,6 +599,11 @@ int main(int argc, char** argv)
         bool effectKept = sameExcept(cfg, fresh, {fans::Controller::BLOCK, pwrcfg::Remote::BLOCK});
         int wantIdx = want ? (int)(want - rules.data()) : -1;
 
+        // identical rules: their "for" clocks carry over, or a settled load
+        // rule would drop out for its wait after a fans-only edit
+        if (effectKept)
+            carryTimers(rules, freshRules);
+
         // the rules' settings pointers target values inside the tree's
         // vectors, whose storage a move carries over intact — so moving the
         // fresh tree into cfg keeps them valid
@@ -705,14 +710,21 @@ int main(int argc, char** argv)
                 cfgStable = 0;
             }
 
+            // top to bottom, first match wins. Rules below the winner are
+            // left alone (a proc: scan per rule adds up) except the "for"
+            // ones, whose clocks have to keep running
+            const Rule* pick = nullptr;
             for (auto& r : rules)
             {
-                if (r.condition->eval())
-                {
-                    want = &r;
-                    break;
-                }
+                if (pick && !r.watched())
+                    continue;
+
+                if (r.matches(now) && !pick)
+                    pick = &r;
             }
+
+            if (pick)
+                want = pick;
         }
 
         bool changed = want &&
@@ -728,6 +740,7 @@ int main(int argc, char** argv)
 
             activeRule = (int)(want - rules.data());
             lastSwitch = now;
+            fprintf(stderr, "rules: rules[%d] %s\n", activeRule, active.c_str());
         }
 
         if (effect)

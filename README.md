@@ -422,12 +422,17 @@ without `if` always matches (put a catch-all last). No match → strip dark.
     "if": "proc:gamescope & temp>75",
     "effect": "ember",
     "hold": 5,                       // min seconds since last switch (default 0)
+    "for": 3,                        // condition must hold this long to count (default 0)
     "settings": { "speed": 1.4 }     // effect-specific
 }
 ```
 
 Switches crossfade over the top-level `crossfade_ms` (default 600; 0 =
-instant). `hold` debounces a flapping rule.
+instant). `for` is an on-delay on the condition: it has to have held for that
+many seconds before the rule matches, so a brief load spike never starts a
+load rule. Dropping out is immediate. `hold` is the blunter guard: no switch
+*into* this rule until that long after the last switch, whatever the
+conditions did meanwhile.
 
 ### Conditions
 

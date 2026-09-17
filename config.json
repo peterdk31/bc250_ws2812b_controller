@@ -164,6 +164,7 @@
             "if": "gpu_load>20 | cpu_load>20",
             "effect": "cycle",
             "hold": 0,
+            "for": 1,
             "settings": {
                 "period_seconds": 120,
                 "effects": [

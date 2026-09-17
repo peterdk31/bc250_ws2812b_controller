@@ -141,6 +141,7 @@ static const Field RULE[] = {
     {"if", Kind::Str, "a condition, see README \"Conditions\""},
     {"effect", Kind::Str, "an effect name (led --list)"},
     {"hold", Kind::Num, "seconds since the last switch before this rule may take over"},
+    {"for", Kind::Num, "seconds the condition must have held before this rule matches"},
     {"settings", Kind::Obj, "the effect's settings"},
 };
 
@@ -564,9 +565,12 @@ private:
                 }
                 checkKeys(where, r, RULE, sizeof RULE / sizeof *RULE);
 
-                const json::Value* hold = r.find("hold");
-                if (hold && hold->isNumber() && hold->number < 0)
-                    problem(where + ".hold", "expected seconds, 0 or more");
+                for (const char* k : {"hold", "for"})
+                {
+                    const json::Value* v = r.find(k);
+                    if (v && v->isNumber() && v->number < 0)
+                        problem(where + "." + k, "expected seconds, 0 or more");
+                }
 
                 if (const json::Value* s = r.find("settings"))
                     checkColors(where + ".settings", *s);

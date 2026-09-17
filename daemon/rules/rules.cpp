@@ -49,9 +49,15 @@ bool loadRules(const Config& cfg, std::vector<Rule>& rules)
         }
 
         const json::Value* hold = entry.find("hold");
+        const json::Value* settle = entry.find("for");
 
-        rules.push_back({std::move(condition), effect->text, settings,
-                         hold ? json::toFloat(*hold, 0.0f) : 0.0f});
+        Rule rule;
+        rule.condition = std::move(condition);
+        rule.effect = effect->text;
+        rule.settings = settings;
+        rule.hold = hold ? json::toFloat(*hold, 0.0f) : 0.0f;
+        rule.settle = settle ? json::toFloat(*settle, 0.0f) : 0.0f;
+        rules.push_back(std::move(rule));
     }
 
     // no implicit default: with no rules configured nothing matches, so
@@ -69,6 +75,39 @@ bool loadRules(const Config& cfg, std::vector<Rule>& rules)
     }
 
     return true;
+}
+
+bool Rule::matches(double now)
+{
+    bool raw = condition->eval();
+
+    if (settle <= 0)
+        return raw;
+
+    // on-delay only: a false reading drops the rule at once, a true one
+    // has to hold for "for" seconds first (a fresh rule starts false, so a
+    // condition true at startup waits like any other rise)
+    if (raw != reading)
+    {
+        reading = raw;
+        since = now;
+    }
+
+    settled = reading && now - since >= settle;
+    return settled;
+}
+
+void carryTimers(const std::vector<Rule>& from, std::vector<Rule>& to)
+{
+    if (from.size() != to.size())
+        return;
+
+    for (size_t i = 0; i < to.size(); i++)
+    {
+        to[i].reading = from[i].reading;
+        to[i].since = from[i].since;
+        to[i].settled = from[i].settled;
+    }
 }
 
 bool sameSettings(const json::Value* a, const json::Value* b)
