@@ -21,11 +21,68 @@
 // would otherwise cut the power every 10 s and leave no window to reflash.
 //
 // Runs as its own task and owns its own NVS namespace; it knows nothing of
-// the LED service. The wiring and tuning live in the small `pwrcfg` flash
-// partition, written at flash time (`make flash PWR=on ...` / `make
-// flash-pwr`); with the partition erased the feature is off.
+// the LED service. The wiring lives in the small `pwrcfg` flash partition,
+// written at flash time (`make flash` / `make flash-pwr`); with the partition
+// erased the feature is off. The four TUNINGS (hold, boot timeout, the two
+// sense thresholds) start from the same partition but move at runtime: the
+// daemon pushes the config's values (CMD_PWR_TUNING), the phone dials them
+// (BLE control op 0x20), and they persist here in NVS layered over the
+// partition's (cfgstore.hpp) — the pins never do, since re-pinning a line the
+// machine's power hangs on is not a thing to do from a phone.
 namespace pwr
 {
+// the tunings: everything about the switch that isn't a wire. Read by the
+// task on every poll, so a change applies on the next one. The wire form
+// (CMD_PWR_TUNING's payload, the control op's arguments, the NVS blob) is
+// hold_ms(2) boot_timeout_ms(2) sense_low_mv(2) sense_high_mv(2),
+// little-endian — proto::PWR_TUNING_LEN bytes.
+struct Tuning
+{
+    uint16_t holdMs = 2000;         // hold the button this long to force off
+    uint16_t bootTimeoutMs = 10000; // sense never came up after power-on -> release
+    uint16_t senseLowMv = 800;      // hysteresis: below = board down...
+    uint16_t senseHighMv = 2000;    // ...above = board up, between = hold state
+
+    void encode(uint8_t* p) const;
+    void decode(const uint8_t* p);
+    // the ranges tools/pwrcfg.py enforces at flash time, so nothing on this
+    // side can be talked into a switch that cuts the power at once (a hold
+    // of 0) or never confirms a boot (inverted thresholds). *why names the
+    // field when false.
+    bool valid(const char** why = nullptr) const;
+    bool operator==(const Tuning& o) const;
+};
+
+// a CMD_PWR_TUNING payload from the host, or the phone's op (ble.cpp): the
+// eight wire bytes. Validated here and applied by the pwr task within one
+// poll, then persisted. False — nothing applied — with the reason in *why
+// when the feature is off, the payload is short, or a value is out of range.
+// Callable from any task.
+bool setTuning(const uint8_t* payload, uint16_t len, const char** why = nullptr);
+
+// counts applied tuning changes (a poller notifies the phone on them)
+uint32_t tuningSeq();
+
+// ---- the BLE dashboard's view (ble.cpp) ----
+// this board's side of the power switch — what it is wired to, what it is
+// tuned to, what the sense wire reads right now; there even with the daemon
+// down, which is when a phone most wants it
+struct Snapshot
+{
+    bool active = false;     // the feature is on (psuState() >= 0)
+    int8_t psOnPin = -1;     // the wiring, GPIO numbers, -1 = not wired
+    int8_t buttonPin = -1;
+    int8_t buttonGndPin = -1;
+    int8_t sensePin = -1;    // -1 also when the pin isn't ADC-capable (no sense)
+    int8_t ledPin = -1;
+    int8_t wakePin = -1;
+    uint8_t psu = 0;         // 0 off, 1 booting, 2 on
+    uint16_t senseMv = 0xFFFF; // the last sense reading, 0xFFFF = none (no
+                               // sense, or nothing sampled yet)
+    Tuning tuning;           // in force
+};
+void snapshot(Snapshot& s);
+
 // bring the feature up and start its task. Called from app_main right after
 // nvs_flash_init and BEFORE the slower bring-up: if the chip rebooted (crash,
 // watchdog, reflash) while it was holding PS_ON# low, that line is the

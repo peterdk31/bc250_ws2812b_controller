@@ -12,7 +12,9 @@
 
      Four tabs: Power (the ring — its color is the PSU state, its label the
      one action a tap performs; tapping it while the machine is on opens the
-     shutdown sheet), Fans (one row per header: source and its reading, the
+     shutdown sheet; a cog opens the switch's settings: the sense wire's
+     thresholds against its live reading, the boot timeout, the hold time,
+     the short-press switch), Fans (one row per header: source and its reading, the
      duty, a chip only when the header is not doing what it is set up to do;
      a cog opens that header's editor), LEDs (scenes, brightness, white
      balance and gamma with a preview of the resulting light, direction —
@@ -142,7 +144,13 @@
   .rowlink:disabled { opacity: .45; }
 
   /* ---- Power: the ring carries the state color ---- */
-  .center { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .9rem; padding: 1rem; }
+  .center { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .9rem; padding: 1rem; }
+  .pcog { position: absolute; top: .35rem; right: .6rem; display: flex; align-items: center; justify-content: center;
+          width: 2.75rem; height: 2.75rem; color: var(--muted); }
+  /* the power switch editor: the sense reading */
+  .mvrow { display: flex; align-items: flex-start; gap: .75rem; }
+  .mv { font-size: 1.6rem; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; flex: none; min-width: 4.6rem; }
+  .mv small { font-size: .75rem; font-weight: 400; color: var(--muted); margin-left: 2px; }
   #power {
     width: 10.5rem; height: 10.5rem; border-radius: 50%;
     border: 5px solid var(--off); background: var(--panel); color: var(--text);

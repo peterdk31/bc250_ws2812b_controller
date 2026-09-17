@@ -7,8 +7,8 @@
 // The phone's dashboard shows what the daemon knows — its fan config and
 // readings, its strip settings — as JSON text the daemon writes for the phone
 // (protocol.hpp CMD_FAN_CONFIG / CMD_FAN_TELEM / CMD_STRIP_CONFIG /
-// CMD_FAN_SENSORS; the shapes
-// are documented in daemon/fans.hpp and daemon/strip_remote.hpp). This board
+// CMD_FAN_SENSORS / CMD_PWR_CONFIG; the shapes are documented in
+// daemon/fans.hpp, daemon/strip_remote.hpp and daemon/power_remote.hpp). This board
 // never reads them: it keeps the last one of each kind here, for ble.cpp to
 // serve as a GATT value and to notify when a new one lands. The setters run
 // on the led_rx task as the frames arrive; the getters copy out under the
@@ -23,7 +23,8 @@ enum Slot
     FAN_TELEM = 1,    // CMD_FAN_TELEM, up to 384
     STRIP_CONFIG = 2, // CMD_STRIP_CONFIG, up to 512
     FAN_SENSORS = 3,  // CMD_FAN_SENSORS, up to 512: the sensor catalogue for the source picker
-    SLOTS = 4
+    PWR_CONFIG = 4,   // CMD_PWR_CONFIG, up to 256: the power switch's tunings as the daemon runs them
+    SLOTS = 5
 };
 
 static const uint16_t MAX_LEN = 512; // the largest slot; a read buffer this big fits any

@@ -22,12 +22,14 @@ static uint8_t g_fanCfg[512];
 static uint8_t g_fanTel[384];
 static uint8_t g_stripCfg[512];
 static uint8_t g_fanSens[512];
+static uint8_t g_pwrCfg[256];
 
 static Entry g_slots[SLOTS] = {
     {g_fanCfg, sizeof g_fanCfg},
     {g_fanTel, sizeof g_fanTel},
     {g_stripCfg, sizeof g_stripCfg},
     {g_fanSens, sizeof g_fanSens},
+    {g_pwrCfg, sizeof g_pwrCfg},
 };
 
 // one lock for all of them: the writers are a single task, the readers a

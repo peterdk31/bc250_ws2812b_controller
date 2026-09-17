@@ -14,12 +14,12 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
-#include "esp_partition.h"
 #include "esp_system.h"
 #include "nvs.h"
 
 #include "protocol.hpp"
 
+#include "cfgstore.hpp"
 #include "dbglog.hpp"
 #include "hostreq.hpp"
 #include "util.hpp"
@@ -129,8 +129,8 @@ static const int SENSE_OVERSAMPLE = 16; // ADC reads averaged per sample: TPMS1 
 
 // The wiring lives in its own 4 KB partition, not in the app image, so it's
 // chosen at flash time — no toolchain, works with the prebuilt image — and
-// survives app reflashes. Written by `make flash PWR=on ...` or `make
-// flash-pwr` (tools/pwrcfg.py encodes it, and must match decode() below):
+// survives app reflashes. Written by `make flash` or `make flash-pwr`
+// (tools/pwrcfg.py encodes it, and must match decode() below):
 //
 //     "PWR1" magic, then
 //     enabled(1) button_pin(1) ps_on_pin(1) button_gnd_pin(1) sense_pin(1)
@@ -139,9 +139,11 @@ static const int SENSE_OVERSAMPLE = 16; // ADC reads averaged per sample: TPMS1 
 //
 // u16s little-endian; pins are GPIO numbers, 0xFF = not wired. An erased
 // partition (no magic) leaves the feature off, so a fresh board or a plain
-// `make flash` is inert until someone opts in with PWR=on. Fields only ever
-// get APPENDED: a blob written before led_pin existed reads 0xFF (erased
-// flash) there, i.e. not wired — both directions stay compatible.
+// `make flash` is inert until someone opts in. Fields only ever get
+// APPENDED: a blob written before led_pin existed reads 0xFF (erased flash)
+// there, i.e. not wired — both directions stay compatible. The four u16s in
+// the middle are Tuning's wire form, byte for byte: they are this feature's
+// flash-time DEFAULTS, and the values in force are g_tune below.
 
 static const uint16_t WIRE_LEN = 15;
 
@@ -154,10 +156,7 @@ struct Config
     int8_t sensePin = -1;
     int8_t ledPin = -1;             // feedback LED: blinks while the button reads pressed
     int8_t wakePin = -1;            // wake input: active-HIGH pulse = power on (only)
-    uint16_t holdMs = 2000;         // hold the button this long to force off
-    uint16_t bootTimeoutMs = 10000; // sense never came up after power-on -> release
-    uint16_t senseLowMv = 800;      // hysteresis: below = board down...
-    uint16_t senseHighMv = 2000;    // ...above = board up, between = hold state
+    Tuning tune;                    // the flash-time defaults for the tunings
 
     bool decode(const uint8_t* p, uint16_t len)
     {
@@ -166,18 +165,13 @@ struct Config
 
         auto pin = [](uint8_t b) -> int8_t
         { return (b == 0xFF || b >= GPIO_NUM_MAX) ? -1 : (int8_t)b; };
-        auto u16 = [](const uint8_t* q) -> uint16_t
-        { return (uint16_t)(q[0] | (q[1] << 8)); };
 
         enabled = p[0] != 0;
         buttonPin = pin(p[1]);
         psOnPin = pin(p[2]);
         buttonGndPin = pin(p[3]);
         sensePin = pin(p[4]);
-        holdMs = u16(p + 5);
-        bootTimeoutMs = u16(p + 7);
-        senseLowMv = u16(p + 9);
-        senseHighMv = u16(p + 11);
+        tune.decode(p + 5);
         ledPin = pin(p[13]);
         wakePin = pin(p[14]);
         return true;
@@ -188,13 +182,8 @@ static Config g_cfg; // loaded once in start(), read-only after
 
 static bool loadConfig(Config& c)
 {
-    const esp_partition_t* part = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "pwrcfg");
-    if (!part)
-        return false;
-
     uint8_t b[4 + WIRE_LEN];
-    if (esp_partition_read(part, 0, b, sizeof b) != ESP_OK)
+    if (!cfgstore::partition("pwrcfg", b, sizeof b))
         return false;
 
     if (memcmp(b, "PWR1", 4) != 0)
@@ -202,6 +191,62 @@ static bool loadConfig(Config& c)
 
     return c.decode(b + 4, WIRE_LEN);
 }
+
+// ---- the tunings (Tuning, NVS, CMD_PWR_TUNING, the phone) ----
+
+void Tuning::encode(uint8_t* p) const
+{
+    const uint16_t v[4] = {holdMs, bootTimeoutMs, senseLowMv, senseHighMv};
+    for (int i = 0; i < 4; i++)
+    {
+        p[2 * i] = (uint8_t)v[i];
+        p[2 * i + 1] = (uint8_t)(v[i] >> 8);
+    }
+}
+
+void Tuning::decode(const uint8_t* p)
+{
+    auto u16 = [](const uint8_t* q) -> uint16_t
+    { return (uint16_t)(q[0] | (q[1] << 8)); };
+    holdMs = u16(p);
+    bootTimeoutMs = u16(p + 2);
+    senseLowMv = u16(p + 4);
+    senseHighMv = u16(p + 6);
+}
+
+bool Tuning::valid(const char** why) const
+{
+    const char* r = nullptr;
+    if (holdMs < 100)
+        r = "hold under 0.1 s";
+    else if (bootTimeoutMs < 1000)
+        r = "boot timeout under 1 s";
+    else if (senseLowMv >= senseHighMv)
+        r = "sense_low_mv not below sense_high_mv";
+    if (why)
+        *why = r;
+    return r == nullptr;
+}
+
+bool Tuning::operator==(const Tuning& o) const
+{
+    return holdMs == o.holdMs && bootTimeoutMs == o.bootTimeoutMs &&
+           senseLowMv == o.senseLowMv && senseHighMv == o.senseHighMv;
+}
+
+// the tunings in force: the partition's until a saved override or a push
+// says otherwise. Written only by the pwr task (in loop(), from the pending
+// slot below, and in start()); read there on every poll and, as single
+// aligned u16s, by snapshot() from the BLE task.
+static Tuning g_tune;
+static volatile uint32_t g_tuneSeq = 1; // bumps when g_tune changes
+
+// a tuning staged by setTuning() (any task), consumed at the top of loop():
+// the same one-consumer hand-off as the remote request, but eight bytes, so
+// a critical section keeps a half-written one from being read
+static portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t g_pendTune[proto::PWR_TUNING_LEN];
+static volatile bool g_pendTuneSet = false;
 
 // ---- state ----
 
@@ -271,7 +316,10 @@ static bool senseLevel = false; // hysteresis state
 static bool senseStable = false;
 static bool senseLastRaw = false;
 static uint32_t senseChange = 0;
-static uint32_t g_lastSampleMs = 0; // throttles the periodic mv log
+static uint32_t g_lastSampleMs = 0; // throttles the periodic mv log, and the
+                                    // idle (state OFF) sample for the dashboard
+static volatile uint16_t g_lastMv = 0xFFFF; // the last sense reading, for the
+                                            // dashboard; 0xFFFF = none yet
 
 // ---- PS_ON# line ----
 
@@ -418,7 +466,7 @@ static void senseSetup()
 
     PLOG("sense: gpio%d -> ADC%d ch%d init=OK cali=%s (low=%u high=%u mv)",
          g_cfg.sensePin, (int)unit + 1, (int)g_chan, g_cali ? "yes" : "raw",
-         g_cfg.senseLowMv, g_cfg.senseHighMv);
+         g_tune.senseLowMv, g_tune.senseHighMv);
 }
 
 static uint32_t readSenseMv()
@@ -478,9 +526,38 @@ static void requestShutdown(uint32_t now, const char* why)
 
 // ---- the task ----
 
+// the tunings pushed or dialled since the last poll: validated already
+// (setTuning), so applying is a copy — and a persist when it is a change
+static void drainTuning()
+{
+    if (!g_pendTuneSet)
+        return;
+
+    uint8_t b[proto::PWR_TUNING_LEN];
+    taskENTER_CRITICAL(&g_mux);
+    memcpy(b, g_pendTune, sizeof b);
+    g_pendTuneSet = false;
+    taskEXIT_CRITICAL(&g_mux);
+
+    Tuning t;
+    t.decode(b);
+    if (t == g_tune)
+        return;
+
+    g_tune = t;
+    g_tuneSeq = g_tuneSeq + 1;
+    uint8_t base[proto::PWR_TUNING_LEN];
+    g_cfg.tune.encode(base);
+    cfgstore::save(g_nvs, "tune", "tunebase", b, base, sizeof b);
+    PLOG("tuning set: hold=%u boottmo=%u sense low=%u high=%u mv", g_tune.holdMs,
+         g_tune.bootTimeoutMs, g_tune.senseLowMv, g_tune.senseHighMv);
+}
+
 static void loop()
 {
     uint32_t now = millis();
+
+    drainTuning();
 
     // a staged remote request first: the same two gestures as the button,
     // minus the hold/failsafe semantics (those belong to a finger on the real
@@ -597,7 +674,7 @@ static void loop()
         // hold-to-force-off fires while still held (no release needed — the
         // user is telling us the machine is wedged), once per press
         if (btnStable && !btnLongFired && g_state != OFF &&
-            now - btnPressStart >= g_cfg.holdMs)
+            now - btnPressStart >= g_tune.holdMs)
         {
             btnLongFired = true;
             PLOG("power OFF: button held %ums, releasing PS_ON#",
@@ -660,9 +737,19 @@ static void loop()
         }
     }
 
+    if (g_adc && g_state == OFF && now - g_lastSampleMs >= SAMPLE_LOG_MS)
+    {
+        // OFF isn't sensed (PS_ON# released means the rail is down by
+        // construction), but the dashboard's calibration view wants to show
+        // what the wire reads with the machine off too: one sample a second
+        g_lastSampleMs = now;
+        g_lastMv = (uint16_t)readSenseMv();
+    }
+
     if (g_adc && g_state != OFF)
     {
         uint32_t mv = readSenseMv();
+        g_lastMv = (uint16_t)mv;
 
         // throttled raw reading: the single most useful diagnostic — what the
         // sense line actually sits at. Gated on active() so it costs nothing
@@ -677,9 +764,9 @@ static void loop()
 
         // hysteresis on the averaged voltage...
         if (senseLevel)
-            senseLevel = !(mv < g_cfg.senseLowMv);
+            senseLevel = !(mv < g_tune.senseLowMv);
         else
-            senseLevel = mv > g_cfg.senseHighMv;
+            senseLevel = mv > g_tune.senseHighMv;
 
         // ...then a time debounce on top: quick to believe "up", slow to
         // believe "down" (brief dips happen during boot/reset)
@@ -688,8 +775,8 @@ static void loop()
             senseLastRaw = senseLevel;
             senseChange = now;
             PLOG("sense level %s mv=%u (low=%u high=%u)",
-                 senseLevel ? "up" : "down", (unsigned)mv, g_cfg.senseLowMv,
-                 g_cfg.senseHighMv);
+                 senseLevel ? "up" : "down", (unsigned)mv, g_tune.senseLowMv,
+                 g_tune.senseHighMv);
         }
 
         // FAILSAFE: while the button is physically held, nothing the sense line
@@ -728,10 +815,10 @@ static void loop()
                 }
             }
 
-            if (g_state == BOOTING && now - g_bootStart >= g_cfg.bootTimeoutMs)
+            if (g_state == BOOTING && now - g_bootStart >= g_tune.bootTimeoutMs)
             {
                 PLOG("power OFF: boot-timeout, sense never came up in %ums",
-                     g_cfg.bootTimeoutMs);
+                     g_tune.bootTimeoutMs);
                 powerOff(); // never came up; don't leave the PSU energized
             }
         }
@@ -781,12 +868,73 @@ bool usesPin(int gpio)
            gpio == g_cfg.sensePin || gpio == g_cfg.ledPin || gpio == g_cfg.wakePin;
 }
 
+bool setTuning(const uint8_t* payload, uint16_t len, const char** why)
+{
+    const char* r = nullptr;
+    Tuning t;
+    if (!g_active)
+        r = "power switch is off";
+    else if (len < proto::PWR_TUNING_LEN)
+        r = "short payload";
+    else
+    {
+        t.decode(payload);
+        t.valid(&r);
+    }
+    if (why)
+        *why = r;
+    if (r)
+        return false;
+
+    taskENTER_CRITICAL(&g_mux);
+    memcpy(g_pendTune, payload, proto::PWR_TUNING_LEN);
+    g_pendTuneSet = true;
+    taskEXIT_CRITICAL(&g_mux);
+    return true;
+}
+
+uint32_t tuningSeq() { return g_tuneSeq; }
+
+void snapshot(Snapshot& s)
+{
+    // single aligned reads of values the pwr task writes, as psuState(); a
+    // tuning straddling a change pairs one old value with a new one for one
+    // dashboard poll, which is all the view is for
+    s.active = g_active;
+    if (!g_active)
+        return;
+    s.psOnPin = g_cfg.psOnPin;
+    s.buttonPin = g_cfg.buttonPin;
+    s.buttonGndPin = g_cfg.buttonGndPin;
+    s.sensePin = g_adc ? g_cfg.sensePin : -1;
+    s.ledPin = g_cfg.ledPin;
+    s.wakePin = g_cfg.wakePin;
+    s.psu = g_state == OFF ? 0 : g_state == BOOTING ? 1 : 2;
+    s.senseMv = g_adc ? g_lastMv : 0xFFFF;
+    s.tuning = g_tune;
+}
+
 void start()
 {
     bool loaded = loadConfig(g_cfg);
 
     nvs_open("pwrsw", NVS_READWRITE, &g_nvs);
     nvs_get_u8(g_nvs, "on", &g_savedOn);
+
+    // the tunings: the partition's, unless a push or a dial was saved over
+    // exactly these partition values (cfgstore.hpp — a re-flash wins)
+    g_tune = g_cfg.tune;
+    {
+        uint8_t base[proto::PWR_TUNING_LEN], saved[proto::PWR_TUNING_LEN];
+        g_cfg.tune.encode(base);
+        if (cfgstore::load(g_nvs, "tune", "tunebase", base, sizeof base, saved))
+        {
+            Tuning t;
+            t.decode(saved);
+            if (t.valid())
+                g_tune = t;
+        }
+    }
 
     if (!loaded || !g_cfg.enabled || g_cfg.psOnPin < 0)
     {
@@ -806,9 +954,10 @@ void start()
         return;
     }
 
-    PLOG("cfg button=%d gnd=%d ps_on=%d sense=%d led=%d wake=%d hold=%u boottmo=%u",
+    PLOG("cfg button=%d gnd=%d ps_on=%d sense=%d led=%d wake=%d hold=%u boottmo=%u%s",
          g_cfg.buttonPin, g_cfg.buttonGndPin, g_cfg.psOnPin, g_cfg.sensePin,
-         g_cfg.ledPin, g_cfg.wakePin, g_cfg.holdMs, g_cfg.bootTimeoutMs);
+         g_cfg.ledPin, g_cfg.wakePin, g_tune.holdMs, g_tune.bootTimeoutMs,
+         g_tune == g_cfg.tune ? "" : " (tuning from NVS, over the partition's)");
     bool held = psOnHeld();
     PLOG("start: reset=%d savedOn=%d held=%d", (int)esp_reset_reason(),
          (int)g_savedOn, (int)held);

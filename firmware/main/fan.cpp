@@ -8,13 +8,13 @@
 
 #include "driver/gpio.h"
 #include "driver/ledc.h"
-#include "esp_partition.h"
 #include "esp_timer.h"
 #include "nvs.h"
 #include "soc/gpio_reg.h"
 #include "soc/soc.h"
 #include "soc/soc_caps.h"
 
+#include "cfgstore.hpp"
 #include "dbglog.hpp"
 #include "fancurve.hpp"
 #include "link.hpp"
@@ -274,14 +274,8 @@ static Config g_cfg; // loaded once in start(), read-only after
 // An erased or disabled config is the normal opted-out state and stays quiet.
 static bool loadConfig(Config& c, bool& partitionFound)
 {
-    const esp_partition_t* part = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "fancfg");
-    partitionFound = part != nullptr;
-    if (!part)
-        return false;
-
     uint8_t b[4 + BODY_LEN_V3];
-    if (esp_partition_read(part, 0, b, sizeof b) != ESP_OK)
+    if (!cfgstore::partition("fancfg", b, sizeof b, &partitionFound))
         return false;
 
     return c.decode(b, sizeof b);
@@ -567,24 +561,14 @@ static void runCurves(float dt)
 // ---- NVS ----
 
 // The host-pushed standalone settings persist so a daemon-less boot still
-// runs the configured fallback and boost. Alongside them, the flash defaults
-// they were saved under: a re-flashed fancfg with different values is the
-// user re-deciding, and outranks a stale push — the same newer-default-wins
-// rule the LED service applies to its saved baud.
+// runs the configured fallback and boost — layered over the fancfg defaults,
+// which win again when re-flashed with different values (cfgstore.hpp)
 static void loadSaved()
 {
     uint8_t saved[Standalone::WIRE_LEN], base[Standalone::WIRE_LEN];
-    size_t n = sizeof saved;
-    if (nvs_get_blob(g_nvs, "sa", saved, &n) != ESP_OK || n != sizeof saved)
+    g_cfg.sa.encode(base);
+    if (!cfgstore::load(g_nvs, "sa", "sabase", base, sizeof base, saved))
         return;
-    n = sizeof base;
-    if (nvs_get_blob(g_nvs, "sabase", base, &n) != ESP_OK || n != sizeof base)
-        return;
-
-    uint8_t cur[Standalone::WIRE_LEN];
-    g_cfg.sa.encode(cur);
-    if (memcmp(base, cur, sizeof cur) != 0)
-        return; // fancfg was re-flashed with new values since this was saved
 
     Standalone s = g_cfg.sa;
     s.merge(saved, sizeof saved);
@@ -596,9 +580,7 @@ static void persist()
     uint8_t sa[Standalone::WIRE_LEN], base[Standalone::WIRE_LEN];
     g_sa.encode(sa);
     g_cfg.sa.encode(base);
-    nvs_set_blob(g_nvs, "sa", sa, sizeof sa);
-    nvs_set_blob(g_nvs, "sabase", base, sizeof base);
-    nvs_commit(g_nvs);
+    cfgstore::save(g_nvs, "sa", "sabase", sa, base, sizeof sa);
     g_saSeq = g_saSeq + 1;
 }
 

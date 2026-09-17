@@ -6,10 +6,12 @@
 #include <thread>
 #include <chrono>
 #include <vector>
+#include <initializer_list>
 #include <memory>
 #include "config_edit.hpp"
 #include "effect.hpp"
 #include "fans.hpp"
+#include "power_remote.hpp"
 #include "strip_remote.hpp"
 #include "motion.hpp"
 #include "rules.hpp"
@@ -48,19 +50,22 @@ static const json::Value& topLevel(const Config& cfg, const char* key)
     return v ? *v : none;
 }
 
-// are two configs identical apart from their "fans" block? A reload confined
-// to the fans (a curve edited by hand — the common case now that the
-// dashboard writes the same file) must not disturb the running effect.
-static bool sameExceptFans(const Config& a, const Config& b)
+// are two configs identical apart from the named top-level blocks? The
+// reload uses it with the blocks that don't feed the strip (each module names
+// its own): a change confined to those — a curve or a hold time edited by
+// hand, the common case now that the dashboard writes the same file — must
+// not disturb the running effect.
+static bool sameExcept(const Config& a, const Config& b, std::initializer_list<const char*> blocks)
 {
     json::Value x = a.root(), y = b.root();
     for (json::Value* v : {&x, &y})
-        for (auto it = v->members.begin(); it != v->members.end(); ++it)
-            if (it->first == "fans")
-            {
-                v->members.erase(it);
-                break;
-            }
+        for (const char* key : blocks)
+            for (auto it = v->members.begin(); it != v->members.end(); ++it)
+                if (it->first == key)
+                {
+                    v->members.erase(it);
+                    break;
+                }
     return json::equal(x, y);
 }
 
@@ -344,6 +349,11 @@ int main(int argc, char** argv)
     stripcfg::Remote stripRemote;
     stripRemote.load(cfg, &cfgWriter);
 
+    // and the power switch's (daemon/power_remote.hpp): its tunings, which
+    // the receiver runs but this file owns, and the short-press command
+    pwrcfg::Remote pwrRemote;
+    pwrRemote.load(cfg, &cfgWriter);
+
     // outputs the rendered frame goes to. The list is the fan-out: a serial
     // transport for the real strip (absent when running headless), plus the
     // on-screen viewer mirror (always attached — it's a no-op until a viewer
@@ -365,8 +375,10 @@ int main(int argc, char** argv)
     // standalone settings
     recordAndUpload(cfg, strip, sinks);
     fanCtl.pushStandalone(sinks);
+    pwrRemote.pushTuning(sinks);
     fanCtl.pushConfig(sinks); // for the BLE dashboard (daemon/fans.hpp)
     stripRemote.pushConfig(sinks); // ...and its strip card (daemon/strip_remote.hpp)
+    pwrRemote.pushConfig(sinks);   // ...and its power settings (daemon/power_remote.hpp)
 
     // the fan curves run on their own 0.5 s cadence in both loops below; a
     // no-op with no headers. The dashboard's messages back from the
@@ -419,6 +431,8 @@ int main(int argc, char** argv)
             {
                 if (kind == proto::MSG_STRIP_CONFIG)
                     stripRemote.onMessage(kind, payload, sinks);
+                else if (kind == proto::MSG_PWR_CONFIG)
+                    pwrRemote.onMessage(kind, payload, sinks);
                 else
                     fanCtl.onMessage(kind, payload, now, sinks);
             }
@@ -568,8 +582,9 @@ int main(int argc, char** argv)
     // re-read the config and swap it in under the running loop. Everything is
     // parsed and validated into fresh objects first, so a broken file is
     // reported and the running config kept — a save with a typo costs a
-    // journal line, not a crash loop. The receiver-side blocks (power_switch,
-    // fans' pins, ble_remote) are flash-time and simply aren't consulted here.
+    // journal line, not a crash loop. The flash-time parts of the receiver-side
+    // blocks (the pins, ble_remote) simply aren't consulted here; the power
+    // switch's tunings and short_press are, and go live.
     auto reload = [&](const char* why)
     {
         fprintf(stderr, "config: %s — reloading %s\n", why, cfgPath);
@@ -597,7 +612,9 @@ int main(int argc, char** argv)
                           !json::equal(topLevel(cfg, "shutdown"), topLevel(fresh, "shutdown")) ||
                           !json::equal(topLevel(cfg, "strip"), topLevel(fresh, "strip"));
 
-        bool fansOnly = sameExceptFans(cfg, fresh);
+        // the blocks whose owners never touch the strip: a reload confined
+        // to them keeps the running effect
+        bool effectKept = sameExcept(cfg, fresh, {fans::Controller::BLOCK, pwrcfg::Remote::BLOCK});
         int wantIdx = want ? (int)(want - rules.data()) : -1;
 
         // the rules' settings pointers target values inside the tree's
@@ -611,15 +628,19 @@ int main(int argc, char** argv)
         fanCtl.pushConfig(sinks);
         stripRemote.load(cfg, &cfgWriter);
         stripRemote.pushConfig(sinks);
+        pwrRemote.load(cfg, &cfgWriter);
+        pwrRemote.pushTuning(sinks);
+        pwrRemote.applyShortPress(sinks);
+        pwrRemote.pushConfig(sinks);
 
-        if (fansOnly)
+        if (effectKept)
         {
             // same rules, same everything else: the running effect stays, and
             // the two pointers into the old tree are re-aimed at their
             // counterparts (the rules are identical, so indices carry over)
             want = wantIdx >= 0 ? &rules[wantIdx] : nullptr;
             activeSettings = activeRule >= 0 ? rules[activeRule].settings : nullptr;
-            fprintf(stderr, "config: reloaded (fans only — effect kept)\n");
+            fprintf(stderr, "config: reloaded (nothing the strip depends on changed — effect kept)\n");
             return;
         }
 

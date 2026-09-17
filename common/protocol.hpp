@@ -237,6 +237,33 @@ static const uint8_t CMD_STRIP_CONFIG = 0x0C;
 // older firmware, which ignores it.
 static const uint8_t CMD_FAN_SENSORS = 0x0D;
 
+// The power switch (firmware/main/power_switch.cpp, README "Power switch")
+// is wired at flash time (the `pwrcfg` partition: pins and the enable), but
+// its four TUNINGS — how long a hold forces off, how long a boot may take
+// before the PSU is released, and the sense wire's two thresholds — are
+// values its task reads on every poll, so they move at runtime like the
+// fans' standalone settings: the daemon pushes the config's power_switch
+// block at startup, on a live reload and after a phone edit, and the receiver
+// applies them at once and persists them in NVS, layered over pwrcfg's (which
+// win again when re-flashed with different values — the fans' rule).
+
+// CMD_PWR_TUNING: hold_ms(2) boot_timeout_ms(2) sense_low_mv(2)
+// sense_high_mv(2), little-endian, PWR_TUNING_LEN bytes — the same ranges
+// tools/pwrcfg.py enforces (hold 100.., boot timeout 1000.., low < high); the
+// receiver rejects anything else whole. Unknown to older firmware, which
+// ignores it. The same eight bytes are the BLE control op 0x20's arguments,
+// for a phone dialling a receiver with no daemon around.
+static const uint8_t CMD_PWR_TUNING = 0x0E;
+static const uint16_t PWR_TUNING_LEN = 8;
+
+// CMD_PWR_CONFIG: the power switch's dashboard view — the config's
+// power_switch block as the daemon runs it: the four tunings in the config's
+// units, the short_press command (or null) and whether edits are accepted.
+// JSON text in the shape daemon/power_remote.hpp documents, at most 256
+// bytes. Sent once at startup, on a reload, and after every applied edit (the
+// answer to a MSG_PWR_CONFIG). The receiver relays it unread.
+static const uint8_t CMD_PWR_CONFIG = 0x0F;
+
 // MSG_FAN_CONFIG (msg frame): a phone's edit — a partial object of the same
 // shape holding only what changed (one header's source/curve/boost/fallback/
 // name, or the three globals). The daemon validates it exactly as it
@@ -260,6 +287,13 @@ static const uint8_t MSG_FAN_WATCH = 0x02;
 // (written into that rule). Answered with CMD_STRIP_CONFIG, refused like a
 // fan edit.
 static const uint8_t MSG_STRIP_CONFIG = 0x03;
+
+// MSG_PWR_CONFIG (msg frame): a phone's edit of the power switch view — a
+// partial object of CMD_PWR_CONFIG's shape (any of the four tunings, and/or
+// short_press as a command string or null). Validated like the config,
+// written into the config's power_switch block, pushed to the receiver as
+// CMD_PWR_TUNING, answered with CMD_PWR_CONFIG; refused like a fan edit.
+static const uint8_t MSG_PWR_CONFIG = 0x04;
 
 // REQ_HOST_SHUTDOWN: "power yourself down, gracefully." The receiver's power
 // switch sends this on a short button press while the machine is up — the

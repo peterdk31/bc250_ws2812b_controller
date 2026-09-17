@@ -314,6 +314,21 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
         // and the sensors a header could follow, for the phone's picker, same
         dash::set(dash::FAN_SENSORS, payload, len);
     }
+    else if (cmd == proto::CMD_PWR_TUNING)
+    {
+        // the power switch's tunings from the daemon config ("power_switch"
+        // block) — hand them to the pwr task (power_switch.hpp), which
+        // validates, applies and persists them; a no-op when the feature is off
+        const char* why = nullptr;
+        if (!pwr::setTuning(payload, len, &why) && why)
+            dbglog::line("led: host's power tuning rejected — %s", why);
+    }
+    else if (cmd == proto::CMD_PWR_CONFIG)
+    {
+        // and the daemon's view of that block for the BLE dashboard, same as
+        // the fans' (dash.hpp)
+        dash::set(dash::PWR_CONFIG, payload, len);
+    }
 }
 
 // the host endpoint: a proto::FrameHandler that drives the real strip. The

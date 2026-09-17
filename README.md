@@ -216,11 +216,11 @@ running — the second half the host's rendering:
     "shutdown": { ... },        // (standalone effects only, see below)
 
     "power_switch": {           // the ATX power button, see Power switch
-        "enabled": false,
-        "hold_seconds": 2,          // hold this long for a hard cut
-        "boot_timeout_seconds": 10, // rail not up by then = release PS_ON#
-        "sense_low_mv": 800,
-        "sense_high_mv": 2000,
+        "enabled": false,           // enabled + pins: flash-time (make flash-pwr)
+        "hold_seconds": 2,          // hold this long for a hard cut     ┐ the four tunings:
+        "boot_timeout_seconds": 10, // rail not up by then = release PS_ON# │ live (reload, or
+        "sense_low_mv": 800,        //                                     │ the phone's cog
+        "sense_high_mv": 2000,      //                                     ┘ on the Power tab)
         "pins": { "ps_on": 3, "button": 1, "button_gnd": null, "sense": 2, "led": 8,
                   "wake": null },   // wake: an OpenPuck's power-on pulse, see Power switch
         "short_press": null         // what the daemon runs on a short press,
@@ -261,21 +261,25 @@ run on a half-read file.
 
 The running daemon watches its config file and picks up a save within a
 second or two — rules, effects, sensors, strip settings, the fans block —
-with no restart. A change confined to the `fans` block leaves the running
-effect alone; anything else drops the current effect and the matching rule
-starts afresh (a crossfade on the strip, like any other switch). `systemctl reload
-led-controller` (SIGHUP) does the same immediately. A file that doesn't parse
-or validate is reported in the journal and the running config is kept, so a
-typo costs a log line rather than a crash loop; fix it and save again. Two
-things still need a restart: the `serial` block, because the port is opened
-once (the daemon says so when it changes), and anything flash-time on the
-receiver — `power_switch`, the fans' pins, `ble_remote` — which is `make
-flash`'s business. Editing `power_on`, `shutdown` or `strip` re-renders and
-re-sends the boot and shutdown recordings, which holds the strip for about a
-second. Edits from the phone's dashboard take a shorter path: they are
-applied live and written into the file by the daemon itself (`fans`, `strip`,
-a scene rule's `color`/`level`), which then treats the file's new mtime as
-its own doing rather than a change to reload.
+with no restart. A change confined to the `fans` or `power_switch` blocks
+leaves the running effect alone; anything else drops the current effect and
+the matching rule starts afresh (a crossfade on the strip, like any other
+switch). `systemctl reload led-controller` (SIGHUP) does the same
+immediately. A file that doesn't parse or validate is reported in the journal
+and the running config is kept, so a typo costs a log line rather than a
+crash loop; fix it and save again. Two things still need more than a reload:
+the `serial` block, because the port is opened once (the daemon says so when
+it changes; restart), and anything flash-time on the receiver — the power
+switch's pins and enable, the fans' pins, `ble_remote` — which is `make
+flash`'s business. The power switch's four tunings and `short_press` are
+not flash-time: a reload pushes the tunings to the receiver and changes what
+a press does at once. Editing `power_on`, `shutdown` or `strip` re-renders
+and re-sends the boot and shutdown recordings, which holds the strip for
+about a second. Edits from the phone's dashboard take a shorter path: they
+are applied live and written into the file by the daemon itself (`fans`,
+`strip`, a scene rule's `color`/`level`, the `power_switch` tunings and
+`short_press`), which then treats the file's new mtime as its own doing
+rather than a change to reload.
 
 ### Tuning the colors
 
@@ -749,6 +753,20 @@ sudo make flash-pwr      # rewrite only the power_switch block: seconds
 The switch runs standalone — no daemon involved; the button matters exactly
 when the host is off. Only `short_press` is the daemon's.
 
+Of the block, the **pins and `enabled` are flash-time only** — a pin the
+machine's power hangs on is nothing to change from a phone, and the flash
+tool is where the wiring gets checked. The four **tunings** are not:
+`hold_seconds`, `boot_timeout_seconds`, `sense_low_mv` and `sense_high_mv`
+are values the switch's task reads on every poll, so the partition's are
+just their defaults. The daemon pushes the config's values to the receiver
+at startup, on a [live reload](#live-reload) and after a phone edit
+(command `0x0E`), the receiver applies them at once and keeps them in NVS
+layered over the partition's — re-flashing `pwrcfg` with *different*
+tunings wins again, the fans' rule — and the [BLE dashboard](#the-dashboard)
+edits them from the Power tab's cog, against the sense wire's live reading.
+`short_press` follows the same path on the daemon's side: a reload or a phone
+edit changes what a press does without a restart.
+
 **Reflashing caveat:** once the machine's power hangs on this pin, remember
 that flashing the receiver *from that machine* resets the chip mid-write. On
 a **C3** the firmware defends itself: the asserted level is latched in the
@@ -1162,7 +1180,19 @@ temperature (the top-level `sensors` pick), CPU load and GPU load.
 
 - **Power** — the ring alone, centred where a thumb reaches. Its color is
   the PSU state and its label the one thing a tap does: connect, power on,
-  or (while on) open the sheet with **Shut down** and **Force off**.
+  or (while on) open the sheet with **Shut down** and **Force off**. A cog
+  in the corner opens the **power switch's settings**: the sense wire's two
+  thresholds as sliders under its live reading in millivolts (read it with
+  the machine on and off, put the values well apart between the two), the
+  boot timeout, the hold-to-force-off time, and — while the machine is on —
+  the **short press** switch (whether a press asks the machine to shut
+  down; the same `short_press` setting the sheet's Shut down uses). The
+  wiring is listed, read-only: pins are set when flashing. **Save** goes to
+  the daemon while the machine is up (into the config's `power_switch`
+  block, then pushed to the receiver — `saved` means the config came back)
+  and straight to the receiver otherwise, where it is stored until a daemon
+  next connects and the config wins again; the editor says which. A
+  receiver on firmware from before the settings shows no cog.
 - **Fans** — one row per header: its name, what it follows and that
   source's current reading (`CPU temperature · 58.3 °C`, `PWM input on
   GPIO0 · 65 %`), and the duty the receiver is actually applying. A chip
@@ -1324,17 +1354,19 @@ sync byte: a **log** frame (`0xAA 0x58`, the debug backchannel), a **request**
 frame (`0xAA 0x59`, the power button asking for a graceful shutdown; answered
 with command `0x06`), and a **message** frame (`0xAA 0x5A`) for the BLE
 dashboard — `kind(1) len(1) payload checksum`, sent once, carrying a phone's
-fan-curve edit (`0x01`), "a phone is watching" (`0x02`) or a strip edit
-(`0x03`). The dashboard's host → receiver commands are `0x0A` (the fan config
-as the daemon runs it), `0x0B` (its live readings), `0x0C` (the strip
-settings and scenes) and `0x0D` (the sensor catalogue: every hwmon
-temperature and pwm output a header could follow, with readings, every 5 s
-while a phone watches). All of these payloads are small JSON texts in the shapes
-`daemon/fans.hpp` and `daemon/strip_remote.hpp` document — the receiver relays
-them to the phone without parsing them. The fans' standalone settings
-(`0x08`) are binary — fallback and boost per header, then ramp and per header
-its source kind and a `gpio` source's pin and curve — because the receiver
-does read those: they are what it runs on its own.
+fan-curve edit (`0x01`), "a phone is watching" (`0x02`), a strip edit
+(`0x03`) or a power switch edit (`0x04`). The dashboard's host → receiver
+commands are `0x0A` (the fan config as the daemon runs it), `0x0B` (its live
+readings), `0x0C` (the strip settings and scenes), `0x0D` (the sensor
+catalogue: every hwmon temperature and pwm output a header could follow,
+with readings, every 5 s while a phone watches) and `0x0F` (the power
+switch's tunings and short-press command as the daemon runs them). All of
+these payloads are small JSON texts in the shapes `daemon/fans.hpp`,
+`daemon/strip_remote.hpp` and `daemon/power_remote.hpp` document — the
+receiver relays them to the phone without parsing them. The fans' standalone
+settings (`0x08`) and the power switch's tunings (`0x0E`: hold, boot timeout
+and the two sense thresholds, four little-endian u16s) are binary, because
+the receiver does read those: they are what it runs on its own.
 
 Byte values and payload formats live in `common/protocol.hpp`, shared by host
 and firmware. The receiver drops bad-checksum frames and rescans for sync, so a

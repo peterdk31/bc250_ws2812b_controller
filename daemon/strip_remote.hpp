@@ -54,6 +54,10 @@ namespace stripcfg
 class Remote
 {
 public:
+    // the top-level config block this module owns (it does feed the strip:
+    // a change to it re-renders the recordings, see main.cpp)
+    static constexpr const char* BLOCK = "strip";
+
     // read the strip block and collect the scenes from the rules. cfg is
     // held onto (its values are edited in place so the running tree matches
     // the file); writer is the config file's editor, null = read-only.
@@ -63,7 +67,7 @@ public:
         writer_ = writer;
         scenes_.clear();
 
-        const json::Value* block = cfg.root().find("strip");
+        const json::Value* block = cfg.root().find(BLOCK);
         hasBlock_ = block && block->isObject();
 
         leds_ = cfg.getInt("strip.leds", 10);
@@ -422,7 +426,7 @@ private:
             wb_ = wb;
             stripChanged_ = true;
 
-            json::Value& block = cfgedit::member(cfg_->root(), "strip");
+            json::Value& block = cfgedit::member(cfg_->root(), BLOCK);
             cfgedit::member(block, "reverse") = cfgedit::boolean(reverse_);
             cfgedit::member(block, "brightness") = cfgedit::number(brightness_);
             cfgedit::member(block, "gamma") = cfgedit::string(gammaText_);
@@ -432,7 +436,7 @@ private:
             fprintf(stderr, "strip: live edit applied from the dashboard (brightness %g, gamma %s, "
                             "white balance %s%s)\n",
                     brightness_, gammaText_.c_str(), hex, reverse_ ? ", reversed" : "");
-            written &= writer_->write({"strip"}, block, "strip");
+            written &= writer_->write({BLOCK}, block, "strip");
         }
 
         for (auto& e : sceneEdits)

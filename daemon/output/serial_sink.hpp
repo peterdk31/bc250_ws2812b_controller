@@ -61,10 +61,9 @@ public:
         // Deliberately off by default: a byte sequence on a serial port that
         // powers the machine down deserves an explicit yes, and a box without
         // the button wired should never grow the behavior just by updating
-        // the daemon.
-        const json::Value* sp = cfg.find("power_switch.short_press");
-        bool button = sp && sp->isString() && !sp->text.empty();
-        std::string buttonCmd = button ? sp->text : "";
+        // the daemon. (Changed live through setShortPress — a reload, a phone
+        // edit — by daemon/power_remote.hpp.)
+        std::string buttonCmd = shortPressOf(cfg);
 
         if (isHeadless(port))
         {
@@ -74,7 +73,14 @@ public:
         }
 
         return std::unique_ptr<SerialSink>(
-            new SerialSink(port.c_str(), baud, debug, button, buttonCmd));
+            new SerialSink(port.c_str(), baud, debug, buttonCmd));
+    }
+
+    // the config's short-press command, "" for null/absent/not a string
+    static std::string shortPressOf(const Config& cfg)
+    {
+        const json::Value* sp = cfg.find("power_switch.short_press");
+        return sp && sp->isString() ? sp->text : "";
     }
 
     // The link is opened read/write and a reader thread always listens for the
@@ -85,9 +91,8 @@ public:
     // messages queued for the main thread always (daemon/fans.hpp ignores
     // them when it has no fans). An idle reader is a 200 ms poll timeout.
     SerialSink(const char* port, int baud = 921600, bool debug = false,
-               bool powerButton = false,
-               const std::string& powerCmd = "systemctl poweroff")
-        : debug_(debug), powerButton_(powerButton), powerCmd_(powerCmd)
+               const std::string& powerCmd = "")
+        : debug_(debug), powerCmd_(powerCmd)
     {
         speed_t speed = baudToSpeed(baud);
 
@@ -130,11 +135,24 @@ public:
         if (debug_)
             fprintf(stderr, "serial: debug log backchannel on (%s)\n", port);
 
-        if (powerButton_)
+        if (!powerCmd_.empty())
             fprintf(stderr, "serial: receiver power button on, will run \"%s\"\n",
                     powerCmd_.c_str());
 
         reader_ = std::thread(&SerialSink::readerLoop, this);
+    }
+
+    void setShortPress(const std::string& cmd) override
+    {
+        std::lock_guard<std::mutex> lock(pwrMx_);
+        if (cmd == powerCmd_)
+            return;
+        powerCmd_ = cmd;
+        warnedOff_ = false; // a press ignored under the new setting is news again
+        if (cmd.empty())
+            fprintf(stderr, "serial: receiver power button now ignored (short_press is null)\n");
+        else
+            fprintf(stderr, "serial: receiver power button now runs \"%s\"\n", cmd.c_str());
     }
 
     SerialSink(const SerialSink&) = delete;
@@ -292,11 +310,18 @@ private:
         if (req != proto::REQ_HOST_SHUTDOWN)
             return; // a newer receiver asking for something we don't know
 
-        if (!powerButton_)
+        std::string cmd;
+        {
+            std::lock_guard<std::mutex> lock(pwrMx_);
+            cmd = powerCmd_;
+        }
+
+        if (cmd.empty())
         {
             // the return direction is always read, but acting is opt-in. Say so
             // once: from the button's end an ignored press is indistinguishable
             // from a broken wire, and this line is the difference.
+            std::lock_guard<std::mutex> lock(pwrMx_);
             if (!warnedOff_)
             {
                 warnedOff_ = true;
@@ -315,9 +340,8 @@ private:
         if (poweringOff_.exchange(true))
             return; // already running; the repeats are just asking again
 
-        fprintf(stderr, "serial: receiver power button — running \"%s\"\n",
-                powerCmd_.c_str());
-        spawnDetached(powerCmd_);
+        fprintf(stderr, "serial: receiver power button — running \"%s\"\n", cmd.c_str());
+        spawnDetached(cmd);
     }
 
     // Run a command without waiting on it. Double-forked so the grandchild is
@@ -521,11 +545,12 @@ private:
     std::atomic<uint32_t> lastSeq_{0}; // highest log seq received so far
     std::chrono::steady_clock::time_point lastDrain_{};
 
-    // receiver power button (see fromConfig); inert when powerButton_ is false
-    bool powerButton_ = false;
+    // receiver power button (see fromConfig); inert while powerCmd_ is empty.
+    // Read on the reader thread, set from the main thread (setShortPress).
+    std::mutex pwrMx_;
     std::string powerCmd_;
     std::atomic<bool> poweringOff_{false}; // the command has been run once
-    bool warnedOff_ = false;               // reader thread only
+    bool warnedOff_ = false;               // under pwrMx_ or reader thread
 
     // the dashboard's messages: the reader thread queues them, the main
     // thread takes them (takeMessage)

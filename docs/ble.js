@@ -11,6 +11,9 @@
 //                          args slot(1) percent(1) — the receiver's own
 //                          op 0x11=set a header's standalone source,
 //                          args slot(1) kind(1) gpio(1) npts(1) pts(2*npts)
+//                          op 0x20=set the power switch's tunings, args
+//                          hold_ms(2) boot_timeout_ms(2) sense_low_mv(2)
+//                          sense_high_mv(2), LE — the receiver's own
 //   status  a5f20003-... : read/notify  1 byte  0=off 1=booting 2=on
 //   fans    a5f20004-... : read/notify  the receiver's own fan view (parseFans)
 //   fancfg  a5f20005-... : read/notify  the daemon's fan config, JSON text;
@@ -22,6 +25,11 @@
 //   fansa   a5f20009-... : read/notify  the receiver's standalone fan settings
 //   sensors a5f2000a-... : read/notify  the daemon's sensor catalogue, JSON text
 //                          {"chip":{"label":61.0,"pwm1-8":48}} (fans.hpp sensorsJson)
+//   pwr     a5f2000b-... : read/notify  the receiver's own power switch view
+//                          (parsePwr): wiring, tunings in force, the sense
+//                          wire's live reading — notified 1 Hz while subscribed
+//   pwrcfg  a5f2000c-... : read/notify  the daemon's power switch view, JSON text
+//                          (power_remote.hpp); write token(16) + a partial edit
 // A receiver on older firmware has only the first two; the dashboard then
 // stays hidden and the power remote works as before.
 //
@@ -55,9 +63,12 @@ const TELEM  = 'a5f20007-8f11-4e0e-9b3a-0bc250e0c001';
 const STRIPCFG = 'a5f20008-8f11-4e0e-9b3a-0bc250e0c001';
 const FANSA  = 'a5f20009-8f11-4e0e-9b3a-0bc250e0c001';
 const SENSORS = 'a5f2000a-8f11-4e0e-9b3a-0bc250e0c001';
+const PWR    = 'a5f2000b-8f11-4e0e-9b3a-0bc250e0c001';
+const PWRCFG = 'a5f2000c-8f11-4e0e-9b3a-0bc250e0c001';
 export const OP_ON = 0x01, OP_SHUTDOWN = 0x02, OP_HARD_OFF = 0x03;
 export const OP_FAN_FALLBACK = 0x10; // + slot(1) percent(1)
 export const OP_FAN_SOURCE = 0x11;   // + slot(1) kind(1) gpio(1) npts(1) pts(2*npts)
+export const OP_PWR_TUNING = 0x20;   // + hold_ms(2) boot_ms(2) low_mv(2) high_mv(2)
 export const TOKEN_LEN = 16;
 export const DEFAULT_NAME = 'BC250'; // what the firmware advertises without a ble_remote.name
 
@@ -75,15 +86,18 @@ export const HAS_BT = 'bluetooth' in navigator;
 export const S = {
   device: null, ctrl: null, stat: null,   // the selected receiver + its live GATT
   fansChr: null, cfgChr: null, telemChr: null, stripChr: null, saChr: null, sensChr: null,
+  pwrChr: null, pcfgChr: null,
   psu: -1,         // last status byte seen, -1 = unknown
   busy: false,     // a user-initiated connect or write in flight
   attempt: null,   // the device an auto-reconnect (watch or connect) is live for
   editToken: false,// the token box is open on request (change / rejected)
   msg: { text: '', hint: false, html: false }, // one line under the header; errors, or capability hints
   fans: null, sa: null, cfg: null, telem: null, info: null, scfg: null,
+  pwr: null,       // the receiver's power switch view (parsePwr)
+  pcfg: null,      // the daemon's power switch view (parsePwrCfg)
   sens: null,      // the sensor catalogue: [{ spec, chip, label, pwm, value }] (parseSensors)
   sensMore: 0,     // sensors the catalogue left out for size (its "_more")
-  saving: null,    // 'g' or a slot: a write waiting for the daemon's config to come back
+  saving: null,    // 'g', 'p' or a slot: a write waiting for its answer
   notes: {},       // key ('g', a slot, 'strip') -> { text, cls } shown by that card
   demo: false,
 };
@@ -619,9 +633,54 @@ export function parseInfo(dv) {
   return { version: v, heap: u32(dv, 33), minHeap: u32(dv, 37), pins };
 }
 
+// ---- the power switch ----
+// the receiver's view (ble.cpp buildPwr): ver(1) flags(1) psu(1) senseMv(2)
+// then the four tunings as CMD_PWR_TUNING lays them out, then six pins
+export const PWR_LEN = 3 + 2 + 8 + 6;
+export const PIN_KEYS = ['ps_on', 'button', 'button_gnd', 'sense', 'led', 'wake']; // the config's names, wire order
+export function parsePwr(dv) {
+  if (dv.byteLength < PWR_LEN || dv.getUint8(0) !== 1) return null;
+  const f = dv.getUint8(1), mv = dv.getUint16(3, true);
+  const pins = {};
+  PIN_KEYS.forEach((k, i) => { const g = dv.getUint8(13 + i); pins[k] = g === 0xFF ? null : g; });
+  return { active: !!(f & 1), sense: !!(f & 2), psu: dv.getUint8(2), mv: mv === 0xFFFF ? null : mv,
+           hold: dv.getUint16(5, true), boot: dv.getUint16(7, true),
+           low: dv.getUint16(9, true), high: dv.getUint16(11, true), pins };
+}
+
+// the daemon's view (daemon/power_remote.hpp), keys as the config spells them
+export function parsePwrCfg(text) {
+  let j;
+  try { j = JSON.parse(text); } catch { return null; }
+  if (!j || typeof j !== 'object' || j.present === false) return null; // no block: the daemon has no say
+  return { editable: !!j.editable, hold: +j.hold_seconds || 2, boot: +j.boot_timeout_seconds || 10,
+           low: +j.sense_low_mv || 0, high: +j.sense_high_mv || 0,
+           shortPress: typeof j.short_press === 'string' && j.short_press ? j.short_press : null };
+}
+
+// where a power edit goes. 'daemon' while the machine is up with a daemon
+// that has the block (the edit lands in the config and the daemon pushes the
+// receiver); 'readonly' when that daemon can't write its config; 'receiver'
+// otherwise — the machine off, or no daemon at all: the control op stores the
+// tunings on the receiver until a daemon next connects and the config wins
+// again (short_press is the daemon's alone, so it can't be edited that way).
+export function powerRoute() {
+  const hostUp = S.fans ? S.fans.host : S.psu === 2;
+  if (S.pcfg && hostUp) return S.pcfg.editable ? 'daemon' : 'readonly';
+  return 'receiver';
+}
+// the tunings an editor starts from: the daemon's view when it decides, else
+// what the receiver runs — in seconds and millivolts either way
+export function powerTuning() {
+  const r = powerRoute();
+  if (r !== 'receiver' && S.pcfg) return { hold: S.pcfg.hold, boot: S.pcfg.boot, low: S.pcfg.low, high: S.pcfg.high, shortPress: S.pcfg.shortPress };
+  if (S.pwr) return { hold: S.pwr.hold / 1000, boot: S.pwr.boot / 1000, low: S.pwr.low, high: S.pwr.high, shortPress: S.pcfg ? S.pcfg.shortPress : null };
+  return null;
+}
+
 function dashReset() {
-  S.fansChr = S.cfgChr = S.telemChr = S.stripChr = S.saChr = S.sensChr = null;
-  S.fans = S.sa = S.cfg = S.telem = S.info = S.sens = null; S.sensMore = 0;
+  S.fansChr = S.cfgChr = S.telemChr = S.stripChr = S.saChr = S.sensChr = S.pwrChr = S.pcfgChr = null;
+  S.fans = S.sa = S.cfg = S.telem = S.info = S.sens = S.pwr = S.pcfg = null; S.sensMore = 0;
   S.saving = null; S.notes = {};
   clearTimeout(saveTimer);
   stripReset();
@@ -674,17 +733,24 @@ const onSensEvent = jsonNotifier(() => S.sensChr, dv => {
   S.sens = dv.byteLength ? parseSensors(utf8.decode(dv)) : null;
   emit();
 });
+const onPwrEvent = notifier(() => S.pwrChr, dv => dv.byteLength >= PWR_LEN, dv => {
+  const v = parsePwr(dv);
+  if (v) { S.pwr = v; emit(); }
+});
+const onPcfgEvent = jsonNotifier(() => S.pcfgChr, onPcfg);
+
+// an answer landed for the save in flight: that edit is done
+function settled(key) {
+  S.saving = null;
+  clearTimeout(saveTimer);
+  note(key, 'saved', 'ok');
+  onSaved?.(key);
+}
+const fanSaving = () => S.saving !== null && S.saving !== 'p'; // a fan save ('g' or a slot) is waiting
 
 export function onCfg(dv) {
   S.cfg = dv.byteLength ? parseCfg(utf8.decode(dv)) : null;
-  if (S.saving !== null) {
-    // the daemon answered a save with its new config: that edit is done
-    const key = S.saving;
-    S.saving = null;
-    clearTimeout(saveTimer);
-    note(key, 'saved', 'ok');
-    onSaved?.(key);
-  }
+  if (fanSaving()) settled(S.saving); // the daemon answered with its new config
   emit();
 }
 
@@ -693,13 +759,14 @@ export function onSa(dv) {
   const s = parseSa(dv);
   if (!s) return;
   S.sa = s;
-  if (S.saving !== null && !S.cfg) {
-    const key = S.saving;
-    S.saving = null;
-    clearTimeout(saveTimer);
-    note(key, 'saved', 'ok');
-    onSaved?.(key);
-  }
+  if (fanSaving() && !S.cfg) settled(S.saving);
+  emit();
+}
+
+// the daemon's power switch view (also the answer to a routed power save)
+export function onPcfg(dv) {
+  S.pcfg = dv.byteLength ? parsePwrCfg(utf8.decode(dv)) : null;
+  if (S.saving === 'p' && S.pcfg) settled('p');
   emit();
 }
 // the UI's hook: a save landed, close that editor
@@ -714,22 +781,27 @@ async function dashOpen(svc) {
     t = await svc.getCharacteristic(TELEM);
   } catch { return; } // older firmware: no dashboard, and nothing to say
   try { i = await svc.getCharacteristic(INFO); } catch { i = null; }
-  let sc = null, s = null, se = null;
+  let sc = null, s = null, se = null, pw = null, pc = null;
   try { sc = await svc.getCharacteristic(STRIPCFG); } catch { sc = null; } // firmware before the strip card
   try { s = await svc.getCharacteristic(FANSA); } catch { s = null; }      // firmware before gpio sources
   try { se = await svc.getCharacteristic(SENSORS); } catch { se = null; }  // firmware before the catalogue
+  try { pw = await svc.getCharacteristic(PWR); pc = await svc.getCharacteristic(PWRCFG); } catch { pw = pc = null; } // firmware before the power settings
   if (!connected()) return;
-  S.fansChr = f; S.cfgChr = c; S.telemChr = t; S.saChr = s; S.sensChr = se;
+  S.fansChr = f; S.cfgChr = c; S.telemChr = t; S.saChr = s; S.sensChr = se; S.pwrChr = pw; S.pcfgChr = pc;
   f.addEventListener('characteristicvaluechanged', onFansEvent);
   c.addEventListener('characteristicvaluechanged', onCfgEvent);
   t.addEventListener('characteristicvaluechanged', onTelemEvent);
   if (s) s.addEventListener('characteristicvaluechanged', onSaEvent);
   if (se) se.addEventListener('characteristicvaluechanged', onSensEvent);
+  if (pw) pw.addEventListener('characteristicvaluechanged', onPwrEvent);
+  if (pc) pc.addEventListener('characteristicvaluechanged', onPcfgEvent);
   await gattSubscribe(f);
   await gattSubscribe(c);
   await gattSubscribe(t); // this one tells the daemon to start reporting
   if (s) await gattSubscribe(s);
   if (se) await gattSubscribe(se);
+  if (pw) await gattSubscribe(pw);
+  if (pc) await gattSubscribe(pc);
   const fv = parseFans(await gattRead(f));
   if (fv) S.fans = fv;
   onCfg(await gattRead(c));
@@ -737,6 +809,8 @@ async function dashOpen(svc) {
   S.telem = tv.byteLength ? parseTelem(utf8.decode(tv)) : null;
   if (s) { try { onSa(await gattRead(s)); } catch {} }
   if (se) { try { const v = await gattRead(se); S.sens = v.byteLength ? parseSensors(utf8.decode(v)) : null; } catch { S.sens = null; } }
+  if (pw) { try { S.pwr = parsePwr(await gattRead(pw)); } catch { S.pwr = null; } }
+  if (pc) { try { onPcfg(await gattRead(pc)); } catch { S.pcfg = null; } }
   if (i) { try { S.info = parseInfo(await gattRead(i)); } catch { S.info = null; } }
   emit();
   if (sc) await stripOpen(sc);
@@ -775,15 +849,17 @@ export function checkEdit(h) {
 // write a partial edit (one header, or the globals — the daemon's JSON
 // shape), then wait for the daemon's config to come back (onCfg) — that is
 // what "saved" means here. Resolves true once the write itself went through.
-export async function writeCfg(key, edit) {
-  if (!S.cfgChr || S.saving !== null) return false;
+// `chr` is the daemon view's characteristic: the fan config by default, the
+// power switch's for a 'p' save (answered by onPcfg).
+export async function writeCfg(key, edit, chr = S.cfgChr) {
+  if (!chr || S.saving !== null) return false;
   const text = new TextEncoder().encode(JSON.stringify(edit));
   const buf = new Uint8Array(TOKEN_LEN + text.length);
   buf.set(tokenBytes()); buf.set(text, TOKEN_LEN);
   S.saving = key;
   note(key, 'saving…');
   try {
-    await gattWrite(S.cfgChr, buf);
+    await gattWrite(chr, buf);
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       if (S.saving !== key) return;
@@ -842,6 +918,49 @@ export function saveHeader(slot, h) {
 export function saveGlobals(g) {
   if (!S.cfg) return;
   writeCfg('g', { hysteresis: g.hyst, ramp: g.ramp, boost_seconds: g.boostSecs });
+}
+
+// ---- power switch edits ----
+// what the daemon and the receiver refuse (tools/pwrcfg.py's ranges), said here first
+export function checkPower(t) {
+  if (!(t.hold >= 0.1 && t.hold <= 65.535)) return 'hold is 0.1–65 seconds';
+  if (!(t.boot >= 1 && t.boot <= 65.535)) return 'the boot timeout is 1–65 seconds';
+  for (const v of [t.low, t.high]) if (!(Number.isInteger(v) && v >= 0 && v <= 65535)) return 'thresholds are whole millivolts';
+  if (t.low >= t.high) return 'the down threshold must be below the up threshold';
+  return '';
+}
+
+// the editor's Save: `t` = { hold, boot (seconds), low, high (mV), shortPress
+// (a command, null, or undefined = unchanged) }, routed by powerRoute()
+export function savePower(t) {
+  const bad = checkPower(t);
+  if (bad) { note('p', bad, 'err'); return; }
+  const route = powerRoute();
+  if (route === 'readonly') { note('p', 'settings are read-only right now', 'err'); return; }
+  if (route === 'daemon') {
+    const e = { hold_seconds: t.hold, boot_timeout_seconds: t.boot, sense_low_mv: t.low, sense_high_mv: t.high };
+    if (t.shortPress !== undefined) e.short_press = t.shortPress;
+    writeCfg('p', e, S.pcfgChr);
+    return;
+  }
+  writeTuning(t);
+}
+
+// straight to the receiver: it validates the set itself (a refusal comes back
+// as a write error) and applies it within a poll, so the write's success is
+// the answer; the pwr value's next notification shows the stored values
+async function writeTuning(t) {
+  if (!S.ctrl || S.saving !== null) return;
+  const u16 = v => [v & 0xFF, (v >> 8) & 0xFF];
+  S.saving = 'p';
+  note('p', 'saving…');
+  try {
+    await writeOp(OP_PWR_TUNING, ...u16(Math.round(t.hold * 1000)), ...u16(Math.round(t.boot * 1000)), ...u16(t.low), ...u16(t.high));
+    settled('p');
+  } catch {
+    S.saving = null;
+    note('p', 'refused by the receiver — a value out of its range', 'err'); // writeOp said more
+  }
 }
 
 // ---- the strip ----
@@ -1014,18 +1133,44 @@ export function demo() {
     // the receiver alone: a gpio header keeps its own curve, everything else runs its fallback
     S.fans.h.forEach(h => { if (!h.wired) return; if (h.kind === KIND_BYTE.gpio) h.src = 4; else { h.src = 1; h.duty = h.fb; } });
   }
-  S.info = { version: 'v1.26.0-demo', heap: 143 * 1024, minHeap: 121 * 1024, pins: [0, 20, 21] };
+  S.info = { version: 'v1.28.0-demo', heap: 143 * 1024, minHeap: 121 * 1024, pins: [0, 20, 21] };
   S.psu = S.fans.psu;
+  // the receiver's power switch: the shipped wiring, the config's tunings, a
+  // sense wire reading the board's rail (and the daemon's view of the block)
+  const pwrBytes = new Uint8Array(PWR_LEN), pdv = new DataView(pwrBytes.buffer);
+  const setPwr = (hold, boot, low, high) => { pdv.setUint16(5, hold, true); pdv.setUint16(7, boot, true); pdv.setUint16(9, low, true); pdv.setUint16(11, high, true); };
+  pwrBytes[0] = 1; pwrBytes[1] = 0x03; pwrBytes[2] = S.psu; pdv.setUint16(3, S.psu === 2 ? 2910 : 12, true);
+  setPwr(2000, 10000, 800, 2000);
+  pwrBytes.set([3, 1, 0xFF, 2, 8, 0xFF], 13);
+  S.pwr = parsePwr(pdv);
+  S.pcfg = parsePwrCfg(JSON.stringify({ editable: true, hold_seconds: 2, boot_timeout_seconds: 10, sense_low_mv: 800, sense_high_mv: 2000, short_press: 'systemctl poweroff' }));
+  if (location.search.includes('nodaemon')) S.pcfg = null;
+  // the wire drifts a little, as a real reading does
+  setInterval(() => { if (!S.pwr || !S.pwr.sense) return; pwrBytes[2] = S.psu; pdv.setUint16(3, S.psu === 2 ? 2890 + Math.round(Math.random() * 40) : 5 + Math.round(Math.random() * 12), true); S.pwr = parsePwr(pdv); emit(); }, 1000);
   // stand-ins for the GATT objects so the page believes it is connected
   S.device = { id: 'demo', gatt: { connected: true, disconnect() {} }, addEventListener() {} };
   receivers.demo = { name: 'BC250 (demo)', token: 'demo-token' };
   known.set('demo', S.device);
-  S.fansChr = S.telemChr = S.saChr = {};
+  S.fansChr = S.telemChr = S.saChr = S.pwrChr = {};
   S.stat = {};
+  S.pcfgChr = { writeValueWithResponse: async buf => {
+    // merge the partial edit the way the daemon would, then push the receiver
+    const edit = JSON.parse(utf8.decode(buf.subarray(TOKEN_LEN))), c = S.pcfg;
+    const out = { editable: true, hold_seconds: edit.hold_seconds ?? c.hold, boot_timeout_seconds: edit.boot_timeout_seconds ?? c.boot,
+                  sense_low_mv: edit.sense_low_mv ?? c.low, sense_high_mv: edit.sense_high_mv ?? c.high,
+                  short_press: 'short_press' in edit ? edit.short_press : c.shortPress };
+    setPwr(Math.round(out.hold_seconds * 1000), Math.round(out.boot_timeout_seconds * 1000), out.sense_low_mv, out.sense_high_mv);
+    S.pwr = parsePwr(pdv);
+    setTimeout(() => onPcfg(new DataView(new TextEncoder().encode(JSON.stringify(out)).buffer)), 600); } };
   S.ctrl = { writeValueWithResponse: async buf => {
     const op = buf[TOKEN_LEN], slot = buf[TOKEN_LEN + 1], h = S.fans.h[slot], st = S.sa.h[slot];
     if (op === OP_ON) { S.psu = S.fans.psu = 1; emit(); setTimeout(() => { S.psu = S.fans.psu = 2; emit(); }, 3000); return; }
     if (op === OP_SHUTDOWN || op === OP_HARD_OFF) { S.psu = S.fans.psu = 0; emit(); return; }
+    if (op === OP_PWR_TUNING) {
+      const a = new DataView(buf.buffer, buf.byteOffset + TOKEN_LEN + 1), v = [0, 2, 4, 6].map(o => a.getUint16(o, true));
+      if (v[0] < 100 || v[1] < 1000 || v[2] >= v[3]) throw new Error('GATT operation failed'); // what the receiver refuses
+      setPwr(...v); S.pwr = parsePwr(pdv); return;
+    }
     if (op === OP_FAN_FALLBACK) {
       h.fb = st.fb = buf[TOKEN_LEN + 2];
       if (h.src === 1) h.duty = h.fb;

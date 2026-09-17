@@ -1,7 +1,7 @@
 // The screens: Preact + htm (vendor/preact-htm.mjs, no build step) rendering
 // whatever ble.js holds in `S`. Four tabs — Power, Fans, LEDs, Receiver —
-// plus two full-screen editors (a fan header, the fan behaviour) and the
-// power sheet. Every one of those is a history entry, so the phone's back
+// plus three full-screen editors (a fan header, the fan behaviour, the power
+// switch's settings) and the power sheet. Every one of those is a history entry, so the phone's back
 // gesture closes the sheet, leaves the editor, returns to the Power tab, and
 // only then leaves the app.
 //
@@ -53,7 +53,7 @@ const I = {
 };
 
 // ---- routing: the route IS the history entry ----
-// { tab, editor: null | slot | 'g', sheet }
+// { tab, editor: null | slot | 'g' (fans) | 'p' (power), sheet }
 const TABS = ['power', 'fans', 'leds', 'receiver'];
 let route = { tab: 'power', editor: null, sheet: false };
 let setRouteState = null;
@@ -161,10 +161,76 @@ function PowerScreen() {
   else if (S.psu === 1) { label = 'Booting…'; disabled = true; }
   else { label = 'On'; act = () => go({ sheet: true }); }
   const cls = (['off', 'booting', 'on'][S.psu] || 'off') + (pending || S.busy ? ' wait' : '');
+  // the cog: the switch's tunings, on a receiver whose firmware publishes them
+  const cog = on && S.pwr && S.pwr.active;
   return html`<div class="center">
+    ${cog && html`<button class="pcog" aria-label="Power switch settings" onClick=${() => go({ editor: 'p' })}><${Icon} d=${I.cog} sw=${1.8} /></button>`}
     <button id="power" class=${cls} disabled=${disabled} onClick=${act}><span class="sym"></span><span>${label}</span></button>
     ${on && S.psu === 2 && html`<div class="hint">tap for shutdown options</div>`}
   </div>`;
+}
+
+// ---- the power switch editor ----
+// The four tunings the receiver runs, plus the daemon's short-press command.
+// Where Save goes depends on who can hear it (B.powerRoute): the daemon
+// while the machine is up (into the config, pushed to the receiver), the
+// receiver alone otherwise. The pins are shown, never edited: they are
+// flash-time, and a pin the machine's power hangs on is nothing for a phone.
+const fmtS = v => (Math.round(v * 10) / 10).toString();
+function PowerEditor() {
+  const origRef = useRef(null);
+  if (!origRef.current) origRef.current = B.powerTuning();
+  const orig = origRef.current;
+  const [t, setT] = useState(() => orig && { ...orig });
+  useEffect(() => { if (!t && orig) setT({ ...orig }); }, [!!orig]);
+  const dirty = () => JSON.stringify(t) !== JSON.stringify(orig);
+  useEffect(() => { leaveGuard = () => !dirty() || confirm('Leave without saving?'); return () => { leaveGuard = null; }; });
+  const p = S.pwr;
+  if (!B.connected() || !p || !t) return html`<${Header} back="Power" title="Power switch" /><div class="empty">${B.connected() ? 'No power switch on this receiver.' : 'Not connected.'}</div>`;
+  const route = B.powerRoute();
+  const ro = route === 'readonly';
+  const set = patch => setT(x => ({ ...x, ...patch }));
+  // the two number fields are uncontrolled and land as typed (a controlled
+  // value clamped on every keystroke would turn a "0" on its way to "0.5"
+  // into the floor and eat the dot); the range is applied on blur, and
+  // checkPower refuses anything still outside it at Save
+  const num = (k, v) => { const n = parseFloat(v); if (!isNaN(n)) set({ [k]: n }); };
+  const fit = (k, lo, hi) => e => { const n = parseFloat(e.target.value), v = clamp(isNaN(n) ? t[k] : n, lo, hi); set({ [k]: v }); e.target.value = fmtS(v); };
+  const saving = S.saving !== null;
+  // the wire as the current thresholds would read it
+  const mv = p.mv, level = mv === null ? null : mv > t.high ? 'up' : mv < t.low ? 'down' : 'between';
+  const wires = B.PIN_KEYS.map(k => [k, p.pins[k]]).filter(([, g]) => g !== null);
+  const NAMES = { ps_on: 'PS_ON#', button: 'Button', button_gnd: 'Button ground', sense: 'Sense', led: 'LED', wake: 'Wake' };
+  const cmd = t.shortPress ?? null;
+  return html`<${Header} back="Power" title="Power switch" />
+    <div class="list">
+      ${p.sense ? html`<div class="card">
+        <h2>Sense wire<span class="r">${mv === null ? '' : `reads ${level}`}</span></h2>
+        <div class="mvrow"><span class="mv">${mv === null ? '—' : mv}<small>mV</small></span>
+          <div class="note">The board's 3.3 V rail, as the receiver reads it right now. Above the upper value the board counts as up, below the lower one as down; in between nothing changes. Read it with the machine on and off, and put the two values well apart between those readings.</div></div>
+        <div class="sub">Board is up above</div>
+        <${Slider} value=${t.high} min=${0} max=${3300} step=${10} disabled=${ro} label=${v => `${v} mV`} live=${v => set({ high: v })} done=${v => set({ high: v })} />
+        <div class="sub">Board is down below</div>
+        <${Slider} value=${t.low} min=${0} max=${3300} step=${10} disabled=${ro} label=${v => `${v} mV`} live=${v => set({ low: v })} done=${v => set({ low: v })} />
+        <label class="frow"><span>Boot timeout</span><input type="number" min="1" max="65" step="1" disabled=${ro} defaultValue=${fmtS(t.boot)} onInput=${e => num('boot', e.target.value)} onBlur=${fit('boot', 1, 65.535)} /><small>s for the board to come up, else the power is cut</small></label>
+      </div>` : html`<div class="card"><h2>Sense wire</h2><div class="note">None on this receiver: the switch can't follow a shutdown down or give up on a boot that never comes up. Only the hold time applies.</div></div>`}
+      <div class="card">
+        <h2>Button</h2>
+        <label class="frow"><span>Hold to force off</span><input type="number" min="0.1" max="65" step="0.1" disabled=${ro} defaultValue=${fmtS(t.hold)} onInput=${e => num('hold', e.target.value)} onBlur=${fit('hold', 0.1, 65.535)} /><small>s while the machine is on</small></label>
+        ${S.pcfg && route !== 'receiver' ? html`<div class="swrow"><span>Short press shuts the machine down</span><${Switch} on=${cmd !== null} disabled=${ro} change=${on => set({ shortPress: on ? (orig.shortPress || 'systemctl poweroff') : null })} /></div>
+          <div class="note">${cmd !== null ? html`Runs <code>${cmd}</code> on the machine. ` : 'A short press is ignored. '}The same setting the phone's Shut down uses.</div>`
+        : html`<div class="note">What a short press does is the machine's setting — available when it is on.</div>`}
+      </div>
+      ${wires.length > 0 && html`<div class="card"><h2>Wiring<span class="r">set when flashing</span></h2>
+        <div class="facts">${wires.map(([k, g]) => html`<span key=${k} class="k">${NAMES[k]}</span><span key=${k + 'v'}>GPIO${g}</span>`)}</div>
+      </div>`}
+      <div class="note">${route === 'daemon' ? 'Saved into the machine\u2019s config and pushed to the receiver.'
+        : route === 'readonly' ? 'Settings are read-only right now: the machine\u2019s config can\u2019t be written.'
+        : 'Saved on the receiver. When the machine boots, its config takes over again — put the same values there to keep them.'}</div>
+      <${Note} k="p" />
+      <div class="btns two"><button class="minor" onClick=${back}>Cancel</button>
+        <button class="primary" disabled=${saving || ro} onClick=${() => B.savePower({ ...t, shortPress: t.shortPress === orig.shortPress ? undefined : t.shortPress })}>Save</button></div>
+    </div>`;
 }
 
 function PowerSheet() {
@@ -592,6 +658,8 @@ function App() {
   if (r.editor !== null && r.tab === 'fans') {
     return html`<div class="screen">${r.editor === 'g' ? html`<${GlobalsEditor} />` : html`<${FanEditor} key=${r.editor} slot=${r.editor} />`}</div>`;
   }
+  if (r.editor === 'p' && r.tab === 'power')
+    return html`<div class="screen"><${PowerEditor} /></div>`;
   const body = r.tab === 'power' ? html`<${PowerScreen} />` : r.tab === 'fans' ? html`<${FansScreen} />`
              : r.tab === 'leds' ? html`<${LedsScreen} />` : html`<${ReceiverScreen} />`;
   return html`<div class="screen">
@@ -605,11 +673,12 @@ function App() {
 }
 
 // the root entry: back from here leaves the app. ?tab=fans (&edit=<slot>|g,
-// &sheet) opens elsewhere — for the demo, and for a bookmark straight to a tab
+// &sheet; ?tab=power&edit=p) opens elsewhere — for the demo, and for a
+// bookmark straight to a tab
 const q = new URLSearchParams(location.search);
 const ed = q.get('edit');
 go({ tab: TABS.includes(q.get('tab')) ? q.get('tab') : 'power', editor: null, sheet: false }, true);
 // an editor or the sheet deep-linked sits on top of its tab, so back has somewhere to go
-if (ed !== null || q.has('sheet')) go({ editor: ed === null ? null : ed === 'g' ? 'g' : parseInt(ed, 10), sheet: q.has('sheet') });
+if (ed !== null || q.has('sheet')) go({ editor: ed === null ? null : ed === 'g' || ed === 'p' ? ed : parseInt(ed, 10), sheet: q.has('sheet') });
 B.boot();
 render(html`<${App} />`, document.getElementById('app'));

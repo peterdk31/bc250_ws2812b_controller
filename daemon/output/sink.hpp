@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <string>
 #include <vector>
 
 // A consumer of finished wire frames. The daemon builds a list of these
@@ -43,4 +44,11 @@ struct Sink
         (void)payload;
         return false;
     }
+
+    // the receiver's power button: the command a short press runs on this
+    // host ("power_switch.short_press"), empty = ignore the press. Set from
+    // the config at startup and again when it changes — a live reload, a
+    // phone edit — so the answer to a press is always the file's current
+    // word. Only the serial transport hears presses.
+    virtual void setShortPress(const std::string& cmd) { (void)cmd; }
 };

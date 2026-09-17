@@ -196,6 +196,11 @@ inline std::string findChipFile(const std::string& chip, const std::string& file
 class Controller
 {
 public:
+    // the top-level config block this module owns. Nothing in it feeds the
+    // strip, so a reload confined to it leaves the running effect alone
+    // (main.cpp asks each module for its block rather than knowing the names).
+    static constexpr const char* BLOCK = "fans";
+
     // read and validate the "fans" block. Returns false (having said what is
     // wrong, "fans.header2.curve: ...") on a bad block, so the daemon can
     // refuse to start the way it does for a bad rule; true with no block or no
@@ -204,7 +209,7 @@ public:
     // edit is written back (see the header comment); null = edits are refused.
     bool load(const Config& cfg, cfgedit::Writer* writer = nullptr)
     {
-        const json::Value* block = cfg.root().find("fans");
+        const json::Value* block = cfg.root().find(BLOCK);
 
         if (!block)
             return true;
@@ -1356,7 +1361,7 @@ private:
             cfgedit::member(hv, "fallback") = cfgedit::number(h.fallback);
         }
 
-        return writer_->write({"fans"}, block_, "fans");
+        return writer_->write({BLOCK}, block_, BLOCK);
     }
 
     std::vector<Header> headers_;

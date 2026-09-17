@@ -2,11 +2,10 @@
 
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-
-#include "esp_partition.h"
 
 #include "host/ble_att.h"
 #include "host/ble_gap.h"
@@ -22,6 +21,7 @@
 #include "esp_app_desc.h"
 #include "esp_system.h"
 
+#include "cfgstore.hpp"
 #include "dash.hpp"
 #include "dbglog.hpp"
 #include "fan.hpp"
@@ -33,7 +33,7 @@
 
 #define BLOG(fmt, ...) dbglog::line("ble: " fmt, ##__VA_ARGS__)
 
-// The GATT surface — one custom service, nine characteristics:
+// The GATT surface — one custom service, eleven characteristics:
 //
 //   control (write):        token(16) op(1) [args]. Token is the flash-time
 //                           shared secret, byte-for-byte (short tokens
@@ -57,7 +57,15 @@
 //                           sources a receiver runs with no daemon; a host
 //                           source, a bad curve or a pin this board can't
 //                           read on is rejected (VALUE_ERR, reason in the
-//                           debug log). Persisted like op 0x10.
+//                           debug log). Persisted like op 0x10. op 0x20 =
+//                           set the power switch's tunings, args the eight
+//                           bytes of proto::CMD_PWR_TUNING (hold ms, boot
+//                           timeout ms, sense low/high mV, LE u16s): applied
+//                           and persisted by the power switch (pwr::
+//                           setTuning), which rejects an out-of-range set
+//                           whole (VALUE_ERR) — for a receiver with no
+//                           daemon to route the edit through; a running
+//                           daemon's config wins again at its next start.
 //                           A wrong token is rejected with "write not
 //                           permitted" (TOKEN_ERR, below); a right power op
 //                           stages the request with the pwr task and
@@ -108,13 +116,25 @@
 //                           the page's source picker. The daemon sends it
 //                           while a phone watches telem; notified when a new
 //                           one lands.
+//   pwr (read + notify):    this board's power switch, PWR_LEN bytes (layout
+//                           at buildPwr): the wiring, the tunings in force,
+//                           the PSU state and what the sense wire reads right
+//                           now — the calibration view. Notified once a
+//                           second while subscribed, like fans.
+//   pwrcfg (read + write + notify):
+//                           the power switch as the daemon runs it — the last
+//                           CMD_PWR_CONFIG (the tunings in config units and
+//                           the short_press command); a write is token(16) +
+//                           a partial edit relayed as MSG_PWR_CONFIG, answered
+//                           by the daemon's next CMD_PWR_CONFIG.
 //
 // The 128-bit UUIDs are this project's own (random base, "bc250" spelled
 // into the tail); the web page must list the service UUID to find us.
 // NimBLE wants them little-endian:
 //   service a5f20001-8f11-4e0e-9b3a-0bc250e0c001, control ...0002,
 //   status ...0003, fans ...0004, fancfg ...0005, info ...0006, telem ...0007,
-//   stripcfg ...0008, fansa ...0009, sensors ...000A
+//   stripcfg ...0008, fansa ...0009, sensors ...000A, pwr ...000B,
+//   pwrcfg ...000C
 namespace ble
 {
 static const uint32_t POLL_MS = 250; // policy task cadence
@@ -147,50 +167,37 @@ static const int TOKEN_ERR = BLE_ATT_ERR_WRITE_NOT_PERMITTED;
 // from the length and token refusals in a debug log
 static const int VALUE_ERR = 0x80;
 
-static const ble_uuid128_t SVC_UUID = BLE_UUID128_INIT(
-    0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
-    0x0e, 0x4e, 0x11, 0x8f, 0x01, 0x00, 0xf2, 0xa5);
-static const ble_uuid128_t CTRL_UUID = BLE_UUID128_INIT(
-    0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
-    0x0e, 0x4e, 0x11, 0x8f, 0x02, 0x00, 0xf2, 0xa5);
-static const ble_uuid128_t STAT_UUID = BLE_UUID128_INIT(
-    0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
-    0x0e, 0x4e, 0x11, 0x8f, 0x03, 0x00, 0xf2, 0xa5);
-static const ble_uuid128_t FANS_UUID = BLE_UUID128_INIT(
-    0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
-    0x0e, 0x4e, 0x11, 0x8f, 0x04, 0x00, 0xf2, 0xa5);
-static const ble_uuid128_t FANCFG_UUID = BLE_UUID128_INIT(
-    0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
-    0x0e, 0x4e, 0x11, 0x8f, 0x05, 0x00, 0xf2, 0xa5);
-static const ble_uuid128_t INFO_UUID = BLE_UUID128_INIT(
-    0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
-    0x0e, 0x4e, 0x11, 0x8f, 0x06, 0x00, 0xf2, 0xa5);
-static const ble_uuid128_t TELEM_UUID = BLE_UUID128_INIT(
-    0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
-    0x0e, 0x4e, 0x11, 0x8f, 0x07, 0x00, 0xf2, 0xa5);
-static const ble_uuid128_t STRIPCFG_UUID = BLE_UUID128_INIT(
-    0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
-    0x0e, 0x4e, 0x11, 0x8f, 0x08, 0x00, 0xf2, 0xa5);
-
-static const ble_uuid128_t FANSA_UUID = BLE_UUID128_INIT(
-    0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
-    0x0e, 0x4e, 0x11, 0x8f, 0x09, 0x00, 0xf2, 0xa5);
-static const ble_uuid128_t SENSORS_UUID = BLE_UUID128_INIT(
-    0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b,
-    0x0e, 0x4e, 0x11, 0x8f, 0x0a, 0x00, 0xf2, 0xa5);
+// the project's UUID base with the characteristic's number in the 13th byte
+#define BC250_UUID(n)                                                                    \
+    BLE_UUID128_INIT(0x01, 0xc0, 0xe0, 0x50, 0xc2, 0x0b, 0x3a, 0x9b, 0x0e, 0x4e, 0x11, 0x8f, \
+                     (n), 0x00, 0xf2, 0xa5)
+static const ble_uuid128_t SVC_UUID = BC250_UUID(0x01);
+static const ble_uuid128_t CTRL_UUID = BC250_UUID(0x02);
+static const ble_uuid128_t STAT_UUID = BC250_UUID(0x03);
+static const ble_uuid128_t FANS_UUID = BC250_UUID(0x04);
+static const ble_uuid128_t FANCFG_UUID = BC250_UUID(0x05);
+static const ble_uuid128_t INFO_UUID = BC250_UUID(0x06);
+static const ble_uuid128_t TELEM_UUID = BC250_UUID(0x07);
+static const ble_uuid128_t STRIPCFG_UUID = BC250_UUID(0x08);
+static const ble_uuid128_t FANSA_UUID = BC250_UUID(0x09);
+static const ble_uuid128_t SENSORS_UUID = BC250_UUID(0x0a);
+static const ble_uuid128_t PWR_UUID = BC250_UUID(0x0b);
+static const ble_uuid128_t PWRCFG_UUID = BC250_UUID(0x0c);
 
 static const uint8_t OP_POWER_ON = 0x01;
 static const uint8_t OP_SHUTDOWN = 0x02;
 static const uint8_t OP_HARD_OFF = 0x03;
 static const uint8_t OP_FAN_FALLBACK = 0x10; // + slot(1) percent(1)
 static const uint8_t OP_FAN_SOURCE = 0x11;   // + slot(1) kind(1) gpio(1) npts(1) pts(2*npts)
-static const uint16_t OP_FAN_SOURCE_MAX = 4 + 2 * proto::FAN_CURVE_POINTS;
+static const uint8_t OP_PWR_TUNING = 0x20;   // + the CMD_PWR_TUNING payload (8)
+static const uint16_t OP_FAN_SOURCE_MAX = 4 + 2 * proto::FAN_CURVE_POINTS; // the longest args
 
-// dashboard cadence: the fans value is notified this often while subscribed
-// (the daemon's telemetry moves on its 0.5 s tick, the fan task's on 100 ms;
-// a phone doesn't need more than 1 Hz, and 36 bytes a second is nothing to
-// the radio), the watch keepalive goes to the daemon this often, and
-// telemetry older than this reads as "daemon gone"
+// dashboard cadence: the fans and pwr values are notified this often while
+// subscribed (the daemon's telemetry moves on its 0.5 s tick, the fan task's
+// on 100 ms, the sense wire is sampled every poll; a phone doesn't need more
+// than 1 Hz, and a few dozen bytes a second is nothing to the radio), the
+// watch keepalive goes to the daemon this often, and telemetry older than
+// this reads as "daemon gone"
 static const uint32_t FANS_POLL_MS = 1000;
 static const uint32_t WATCH_MS = 10000;
 static const uint32_t TELEM_FRESH_MS = 15000;
@@ -234,17 +241,14 @@ static Config g_cfg; // loaded once in start(), read-only after
 
 static bool loadConfig(Config& c)
 {
-    const esp_partition_t* part = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "blecfg");
-    if (!part)
+    uint8_t b[4 + WIRE_LEN];
+    bool found = false;
+    if (!cfgstore::partition("blecfg", b, sizeof b, &found))
     {
-        BLOG("no blecfg partition (older table?) — remote off");
+        if (!found)
+            BLOG("no blecfg partition (older table?) — remote off");
         return false;
     }
-
-    uint8_t b[4 + WIRE_LEN];
-    if (esp_partition_read(part, 0, b, sizeof b) != ESP_OK)
-        return false;
 
     if (memcmp(b, "BLE1", 4) != 0)
         return false;
@@ -259,34 +263,57 @@ static bool loadConfig(Config& c)
 static volatile bool g_synced = false; // host/controller sync done, can advertise
 static volatile uint16_t g_conn = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t g_ownAddrType = 0;
-static uint16_t g_statusHandle = 0; // value handles, filled by registration
-static uint16_t g_fansHandle = 0;
-static uint16_t g_fancfgHandle = 0;
-static uint16_t g_infoHandle = 0;
-static uint16_t g_telemHandle = 0;
-static uint16_t g_stripcfgHandle = 0;
-static uint16_t g_fansaHandle = 0;
-static uint16_t g_sensorsHandle = 0;
-static volatile bool g_fansSub = false;   // a client has fans notifications on
-static volatile bool g_fancfgSub = false; // ...fancfg's
-static volatile bool g_telemSub = false;  // ...telem's (= the daemon should send)
-static volatile bool g_stripcfgSub = false; // ...stripcfg's
-static volatile bool g_fansaSub = false;    // ...fansa's
-static volatile bool g_sensorsSub = false;  // ...sensors'
+
+// the characteristics, one row each (filled into NimBLE's own table in
+// start()): the value handle registration hands back, whether a client has
+// its notifications on (written by the host-task GAP callback, read by the
+// policy task), and — for a value that mirrors something with a change
+// counter — the counter last notified, so the policy loop can be one pass
+// over this table instead of a paragraph per characteristic
+struct Chr
+{
+    const ble_uuid128_t* uuid = nullptr;
+    ble_gatt_access_fn* access = nullptr;
+    ble_gatt_chr_flags flags = 0;
+    int dashSlot = -1;         // dash::Slot whose arrivals notify this, or -1
+    uint16_t handle = 0;
+    volatile bool sub = false;
+    uint32_t lastSeq = 0;
+};
+enum ChrId
+{
+    C_CTRL,
+    C_STAT,
+    C_FANS,
+    C_FANCFG,
+    C_INFO,
+    C_TELEM,
+    C_STRIPCFG,
+    C_FANSA,
+    C_SENSORS,
+    C_PWR,
+    C_PWRCFG,
+    C_COUNT
+};
+static Chr g_chr[C_COUNT];
+
+static void defineChr(ChrId id, const ble_uuid128_t* uuid, ble_gatt_access_fn* access,
+                      ble_gatt_chr_flags flags, int dashSlot = -1)
+{
+    g_chr[id].uuid = uuid;
+    g_chr[id].access = access;
+    g_chr[id].flags = flags;
+    g_chr[id].dashSlot = dashSlot;
+}
 
 // policy task locals
 static int g_lastState = -2;   // last pwr::psuState() seen (-2 = never)
 static uint16_t g_advItvl = 0; // interval the running advertisement was
                                // started with (0 = none), to restart it when
                                // the PSU state calls for the other pace
-static uint32_t g_lastFansPoll = 0;
+static uint32_t g_lastPoll = 0;    // last 1 Hz notify of the fans and pwr values
 static uint32_t g_lastWatch = 0;   // last MSG_FAN_WATCH 1 sent
 static bool g_watching = false;    // the daemon has been told a phone watches
-static uint32_t g_lastCfgSeq = 0;  // dash FAN_CONFIG seq last notified
-static uint32_t g_lastTelSeq = 0;  // dash FAN_TELEM seq last notified
-static uint32_t g_lastStripSeq = 0; // dash STRIP_CONFIG seq last notified
-static uint32_t g_lastSaSeq = 0;    // fan::standalone() seq last notified
-static uint32_t g_lastSensSeq = 0;  // dash FAN_SENSORS seq last notified
 
 // ---- the fans value ----
 
@@ -344,6 +371,40 @@ static uint16_t buildFans(uint8_t* p)
     for (int k = 0; k < 4; k++)
         p[at++] = (uint8_t)(up >> (8 * k));
 
+    return at;
+}
+
+// ---- the pwr value ----
+
+// PWR_LEN bytes, little-endian — this board's power switch (pwr::snapshot):
+//   ver(1) = 1
+//   flags(1): bit0 feature on, bit1 sense wire (ADC) in use
+//   psu(1): 0 off, 1 booting, 2 on
+//   senseMv(2): the last sense reading, 0xFFFF = none
+//   holdMs(2) bootTimeoutMs(2) senseLowMv(2) senseHighMv(2): the tunings in
+//     force (proto::CMD_PWR_TUNING's layout, so the page reuses one decoder)
+//   pins(6): ps_on button button_gnd sense led wake, GPIO numbers, 0xFF unwired
+static const uint16_t PWR_LEN = 3 + 2 + proto::PWR_TUNING_LEN + 6;
+
+static const uint8_t P_ACTIVE = 0x01, P_SENSE = 0x02;
+
+static uint16_t buildPwr(uint8_t* p)
+{
+    pwr::Snapshot s;
+    pwr::snapshot(s);
+
+    uint16_t at = 0;
+    p[at++] = 1;
+    p[at++] = (s.active ? P_ACTIVE : 0) | (s.sensePin >= 0 ? P_SENSE : 0);
+    p[at++] = s.psu;
+    p[at++] = (uint8_t)s.senseMv;
+    p[at++] = (uint8_t)(s.senseMv >> 8);
+    s.tuning.encode(p + at);
+    at += proto::PWR_TUNING_LEN;
+    const int8_t pins[6] = {s.psOnPin, s.buttonPin, s.buttonGndPin, s.sensePin, s.ledPin,
+                            s.wakePin};
+    for (int8_t g : pins)
+        p[at++] = g < 0 ? 0xFF : (uint8_t)g;
     return at;
 }
 
@@ -408,6 +469,20 @@ static int ctrlAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
         return 0;
     }
 
+    if (op == OP_PWR_TUNING)
+    {
+        if (args != proto::PWR_TUNING_LEN)
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        const char* why = nullptr;
+        if (!pwr::setTuning(buf + TOKEN_LEN + 1, args, &why))
+        {
+            BLOG("power tuning rejected — %s", why ? why : "?");
+            return VALUE_ERR;
+        }
+        BLOG("power tuning set from the phone");
+        return 0;
+    }
+
     if (args != 0)
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     if (op == OP_POWER_ON)
@@ -443,17 +518,21 @@ static bool tokenOk(const uint8_t* tok)
     return diff == 0;
 }
 
-static int fansAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
+// this board's own views, built fresh on every read (and on the notification
+// NimBLE builds through the same path): always the state as of now
+template <uint16_t (*BUILD)(uint8_t*), uint16_t MAX>
+static int viewAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
 {
     if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR)
         return BLE_ATT_ERR_UNLIKELY;
 
-    // a read (or the notification NimBLE builds through this same path) is
-    // always the state as of now
-    uint8_t b[FANS_LEN];
-    uint16_t n = buildFans(b);
-    return os_mbuf_append(ctxt->om, b, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    uint8_t b[MAX];
+    uint16_t n = BUILD(b);
+    return n == 0 || os_mbuf_append(ctxt->om, b, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
+
+// the stored standalone fan settings, in the view shape above
+static uint16_t buildFansa(uint8_t* p) { return fan::standalone(p, proto::FAN_STANDALONE_LEN); }
 
 // the daemon's payloads, served verbatim (dash.hpp); none yet reads as an
 // empty value, which the page shows as "nothing from the daemon" rather than
@@ -465,18 +544,12 @@ static int serve(ble_gatt_access_ctxt* ctxt, dash::Slot slot)
     return n == 0 || os_mbuf_append(ctxt->om, b, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
-static int telemAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
+template <dash::Slot SLOT>
+static int dashAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
 {
     if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR)
         return BLE_ATT_ERR_UNLIKELY;
-    return serve(ctxt, dash::FAN_TELEM);
-}
-
-static int sensorsAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
-{
-    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR)
-        return BLE_ATT_ERR_UNLIKELY;
-    return serve(ctxt, dash::FAN_SENSORS);
+    return serve(ctxt, SLOT);
 }
 
 // a phone's edit: token(16) + a partial edit (JSON text), relayed to the
@@ -506,33 +579,17 @@ static int relayEdit(ble_gatt_access_ctxt* ctxt, uint8_t kind, const char* what)
     return 0;
 }
 
-static int fancfgAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
+// the daemon's editable views: a read serves the last payload, a write is
+// relayed as the msg kind. `arg` (the row's registration argument) names it
+// for the log.
+template <dash::Slot SLOT, uint8_t KIND>
+static int editAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void* arg)
 {
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)
-        return serve(ctxt, dash::FAN_CONFIG);
+        return serve(ctxt, SLOT);
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
         return BLE_ATT_ERR_UNLIKELY;
-    return relayEdit(ctxt, proto::MSG_FAN_CONFIG, "fan");
-}
-
-// this board's stored standalone fan settings (fan::standalone)
-static int fansaAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
-{
-    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR)
-        return BLE_ATT_ERR_UNLIKELY;
-
-    uint8_t b[proto::FAN_STANDALONE_LEN];
-    uint16_t n = fan::standalone(b, sizeof b);
-    return n == 0 || os_mbuf_append(ctxt->om, b, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
-}
-
-static int stripcfgAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
-{
-    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)
-        return serve(ctxt, dash::STRIP_CONFIG);
-    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
-        return BLE_ATT_ERR_UNLIKELY;
-    return relayEdit(ctxt, proto::MSG_STRIP_CONFIG, "strip");
+    return relayEdit(ctxt, KIND, (const char*)arg);
 }
 
 // ver(1) = 2, version(32, NUL-padded; the app image's PROJECT_VER — the git
@@ -561,10 +618,14 @@ static int infoAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     return os_mbuf_append(ctxt->om, b, sizeof b) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
-// built in start() with plain field assignment: NimBLE's struct layouts have
-// grown fields across IDF versions, and C++ designated initializers would
-// pin this file to one ordering
-static ble_gatt_chr_def g_chrs[10];
+// the log name an editable view's relay uses (editAccess's arg)
+static const char* const EDIT_NAMES[C_COUNT] = {
+    nullptr, nullptr, nullptr, "fan", nullptr, nullptr, "strip", nullptr, nullptr, nullptr, "power"};
+
+// NimBLE's own tables, filled from g_chr in start() with plain field
+// assignment: NimBLE's struct layouts have grown fields across IDF versions,
+// and C++ designated initializers would pin this file to one ordering
+static ble_gatt_chr_def g_chrs[C_COUNT + 1];
 static ble_gatt_svc_def g_svcs[2];
 
 // ---- GAP / advertising ----
@@ -585,30 +646,17 @@ static int gapEvent(ble_gap_event* ev, void*)
     case BLE_GAP_EVENT_DISCONNECT:
         g_conn = BLE_HS_CONN_HANDLE_NONE;
         // the policy task tells the daemon nobody is watching any more
-        g_fansSub = false;
-        g_fancfgSub = false;
-        g_telemSub = false;
-        g_stripcfgSub = false;
-        g_sensorsSub = false;
-        g_fansaSub = false;
+        for (Chr& c : g_chr)
+            c.sub = false;
         BLOG("phone disconnected (reason=%d)", ev->disconnect.reason);
         break;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
         // the phone opened (or closed) the dashboard: notifications on the
         // telem value are what start the daemon's telemetry flowing
-        if (ev->subscribe.attr_handle == g_fansHandle)
-            g_fansSub = ev->subscribe.cur_notify != 0;
-        else if (ev->subscribe.attr_handle == g_fancfgHandle)
-            g_fancfgSub = ev->subscribe.cur_notify != 0;
-        else if (ev->subscribe.attr_handle == g_telemHandle)
-            g_telemSub = ev->subscribe.cur_notify != 0;
-        else if (ev->subscribe.attr_handle == g_stripcfgHandle)
-            g_stripcfgSub = ev->subscribe.cur_notify != 0;
-        else if (ev->subscribe.attr_handle == g_fansaHandle)
-            g_fansaSub = ev->subscribe.cur_notify != 0;
-        else if (ev->subscribe.attr_handle == g_sensorsHandle)
-            g_sensorsSub = ev->subscribe.cur_notify != 0;
+        for (Chr& c : g_chr)
+            if (c.handle && ev->subscribe.attr_handle == c.handle)
+                c.sub = ev->subscribe.cur_notify != 0;
         break;
 
     default:
@@ -667,15 +715,26 @@ static void hostTask(void*)
 
 // ---- the policy task ----
 
+// notify a value whose source counts its changes, when the count moved
+static void notifyOnChange(Chr& c, uint32_t seq)
+{
+    if (seq == c.lastSeq)
+        return;
+    c.lastSeq = seq;
+    if (c.sub)
+        ble_gatts_chr_updated(c.handle);
+}
+
 // the dashboard's half of the policy. While a phone has the telem value
 // subscribed, keep the daemon's telemetry alive with a watch keepalive and
-// notify each new one; while it has the fans value subscribed, notify it once
-// a second (NimBLE rebuilds the value through fansAccess); notify a new config
-// when the daemon pushes one. With nobody subscribed none of this runs — the
-// daemon then reads and sends nothing for the dashboard either.
+// notify each new one; while it has the fans or pwr value subscribed, notify
+// it once a second (NimBLE rebuilds the value through its access callback);
+// notify a daemon payload or a stored setting when it changes. With nobody
+// subscribed none of this runs — the daemon then reads and sends nothing for
+// the dashboard either.
 static void dashboard(uint32_t now)
 {
-    if (g_telemSub)
+    if (g_chr[C_TELEM].sub)
     {
         if (!g_watching || now - g_lastWatch >= WATCH_MS)
         {
@@ -695,52 +754,25 @@ static void dashboard(uint32_t now)
         hostreq::post(proto::MSG_FAN_WATCH, &off, 1);
     }
 
-    if (g_fansSub && now - g_lastFansPoll >= FANS_POLL_MS)
+    if (now - g_lastPoll >= FANS_POLL_MS)
     {
-        g_lastFansPoll = now;
-        ble_gatts_chr_updated(g_fansHandle);
+        g_lastPoll = now;
+        for (ChrId id : {C_FANS, C_PWR})
+            if (g_chr[id].sub)
+                ble_gatts_chr_updated(g_chr[id].handle);
     }
 
     uint32_t seq = 0;
-    dash::get(dash::FAN_TELEM, nullptr, 0, &seq);
-    if (seq != g_lastTelSeq)
-    {
-        g_lastTelSeq = seq;
-        if (g_telemSub)
-            ble_gatts_chr_updated(g_telemHandle);
-    }
-
-    dash::get(dash::FAN_CONFIG, nullptr, 0, &seq);
-    if (seq != g_lastCfgSeq)
-    {
-        g_lastCfgSeq = seq;
-        if (g_fancfgSub)
-            ble_gatts_chr_updated(g_fancfgHandle);
-    }
-
-    dash::get(dash::STRIP_CONFIG, nullptr, 0, &seq);
-    if (seq != g_lastStripSeq)
-    {
-        g_lastStripSeq = seq;
-        if (g_stripcfgSub)
-            ble_gatts_chr_updated(g_stripcfgHandle);
-    }
-
-    dash::get(dash::FAN_SENSORS, nullptr, 0, &seq);
-    if (seq != g_lastSensSeq)
-    {
-        g_lastSensSeq = seq;
-        if (g_sensorsSub)
-            ble_gatts_chr_updated(g_sensorsHandle);
-    }
+    for (Chr& c : g_chr)
+        if (c.dashSlot >= 0)
+        {
+            dash::get((dash::Slot)c.dashSlot, nullptr, 0, &seq);
+            notifyOnChange(c, seq);
+        }
 
     fan::standalone(nullptr, 0, &seq);
-    if (seq != g_lastSaSeq)
-    {
-        g_lastSaSeq = seq;
-        if (g_fansaSub)
-            ble_gatts_chr_updated(g_fansaHandle);
-    }
+    notifyOnChange(g_chr[C_FANSA], seq);
+    notifyOnChange(g_chr[C_PWR], pwr::tuningSeq());
 }
 
 // owns the advertising pace: quick while the PSU is off, slow while it is on
@@ -753,8 +785,8 @@ static void loop()
     if (st != g_lastState)
     {
         g_lastState = st;
-        if (g_statusHandle)
-            ble_gatts_chr_updated(g_statusHandle); // notify subscribers
+        if (g_chr[C_STAT].handle)
+            ble_gatts_chr_updated(g_chr[C_STAT].handle); // notify subscribers
         BLOG("psu state -> %d", st);
     }
 
@@ -820,51 +852,33 @@ void start()
     ble_svc_gatt_init();
     ble_svc_gap_device_name_set(g_cfg.name);
 
-    g_chrs[0] = {};
-    g_chrs[0].uuid = &CTRL_UUID.u;
-    g_chrs[0].access_cb = ctrlAccess;
-    g_chrs[0].flags = BLE_GATT_CHR_F_WRITE;
-    g_chrs[1] = {};
-    g_chrs[1].uuid = &STAT_UUID.u;
-    g_chrs[1].access_cb = statAccess;
-    g_chrs[1].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY;
-    g_chrs[1].val_handle = &g_statusHandle;
-    g_chrs[2] = {};
-    g_chrs[2].uuid = &FANS_UUID.u;
-    g_chrs[2].access_cb = fansAccess;
-    g_chrs[2].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY;
-    g_chrs[2].val_handle = &g_fansHandle;
-    g_chrs[3] = {};
-    g_chrs[3].uuid = &FANCFG_UUID.u;
-    g_chrs[3].access_cb = fancfgAccess;
-    g_chrs[3].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY;
-    g_chrs[3].val_handle = &g_fancfgHandle;
-    g_chrs[4] = {};
-    g_chrs[4].uuid = &INFO_UUID.u;
-    g_chrs[4].access_cb = infoAccess;
-    g_chrs[4].flags = BLE_GATT_CHR_F_READ;
-    g_chrs[4].val_handle = &g_infoHandle;
-    g_chrs[5] = {};
-    g_chrs[5].uuid = &TELEM_UUID.u;
-    g_chrs[5].access_cb = telemAccess;
-    g_chrs[5].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY;
-    g_chrs[5].val_handle = &g_telemHandle;
-    g_chrs[6] = {};
-    g_chrs[6].uuid = &STRIPCFG_UUID.u;
-    g_chrs[6].access_cb = stripcfgAccess;
-    g_chrs[6].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY;
-    g_chrs[6].val_handle = &g_stripcfgHandle;
-    g_chrs[7] = {};
-    g_chrs[7].uuid = &FANSA_UUID.u;
-    g_chrs[7].access_cb = fansaAccess;
-    g_chrs[7].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY;
-    g_chrs[7].val_handle = &g_fansaHandle;
-    g_chrs[8] = {};
-    g_chrs[8].uuid = &SENSORS_UUID.u;
-    g_chrs[8].access_cb = sensorsAccess;
-    g_chrs[8].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY;
-    g_chrs[8].val_handle = &g_sensorsHandle;
-    g_chrs[9] = {}; // terminator
+    const ble_gatt_chr_flags R = BLE_GATT_CHR_F_READ, RN = R | BLE_GATT_CHR_F_NOTIFY,
+                             RWN = RN | BLE_GATT_CHR_F_WRITE;
+    defineChr(C_CTRL, &CTRL_UUID, ctrlAccess, BLE_GATT_CHR_F_WRITE);
+    defineChr(C_STAT, &STAT_UUID, statAccess, RN);
+    defineChr(C_FANS, &FANS_UUID, viewAccess<buildFans, FANS_LEN>, RN);
+    defineChr(C_FANCFG, &FANCFG_UUID, editAccess<dash::FAN_CONFIG, proto::MSG_FAN_CONFIG>, RWN,
+              dash::FAN_CONFIG);
+    defineChr(C_INFO, &INFO_UUID, infoAccess, R);
+    defineChr(C_TELEM, &TELEM_UUID, dashAccess<dash::FAN_TELEM>, RN, dash::FAN_TELEM);
+    defineChr(C_STRIPCFG, &STRIPCFG_UUID,
+              editAccess<dash::STRIP_CONFIG, proto::MSG_STRIP_CONFIG>, RWN, dash::STRIP_CONFIG);
+    defineChr(C_FANSA, &FANSA_UUID, viewAccess<buildFansa, proto::FAN_STANDALONE_LEN>, RN);
+    defineChr(C_SENSORS, &SENSORS_UUID, dashAccess<dash::FAN_SENSORS>, RN, dash::FAN_SENSORS);
+    defineChr(C_PWR, &PWR_UUID, viewAccess<buildPwr, PWR_LEN>, RN);
+    defineChr(C_PWRCFG, &PWRCFG_UUID, editAccess<dash::PWR_CONFIG, proto::MSG_PWR_CONFIG>, RWN,
+              dash::PWR_CONFIG);
+
+    for (int i = 0; i < C_COUNT; i++)
+    {
+        g_chrs[i] = {};
+        g_chrs[i].uuid = &g_chr[i].uuid->u;
+        g_chrs[i].access_cb = g_chr[i].access;
+        g_chrs[i].arg = (void*)EDIT_NAMES[i];
+        g_chrs[i].flags = g_chr[i].flags;
+        g_chrs[i].val_handle = &g_chr[i].handle;
+    }
+    g_chrs[C_COUNT] = {}; // terminator
 
     g_svcs[0] = {};
     g_svcs[0].type = BLE_GATT_SVC_TYPE_PRIMARY;
