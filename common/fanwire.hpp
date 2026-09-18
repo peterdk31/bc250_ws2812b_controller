@@ -1,0 +1,81 @@
+#pragma once
+
+#include <stdint.h>
+#include <string.h>
+
+#include "protocol.hpp"
+
+// One fan header's standalone record — the unit of CMD_FAN_STANDALONE (six
+// of them), of the receiver's fancfg partition and NVS blob, and of the
+// phone's control op (one). Encoded and decoded here, on both ends of the
+// wire, so the layout is written down exactly once; protocol.hpp says what
+// each field means. tools/fancfg.py and docs/ble.js mirror this by hand.
+namespace fanwire
+{
+static const uint8_t NONE = proto::FAN_NONE;
+static const int POINTS = proto::FAN_CURVE_POINTS;
+static const uint16_t LEN = proto::FAN_HEADER_LEN;
+
+struct Header
+{
+    uint8_t fallback = NONE; // NONE = not this header (leave it alone)
+    uint8_t boost = NONE;    // NONE = sits the boost out
+    uint8_t boostSecs = proto::FAN_DEFAULT_BOOST_SECS;
+    uint8_t ramp = proto::FAN_DEFAULT_RAMP;
+    uint8_t kind = proto::FAN_KIND_HOST;
+    uint8_t gpio = NONE;     // a gpio header's input pin
+    uint8_t npts = 0;        // a gpio header's curve: points (0 = none)
+    uint8_t pts[POINTS][2] = {}; // (input %, duty %), sorted by input
+
+    void encode(uint8_t* p) const
+    {
+        p[0] = fallback;
+        p[1] = boost;
+        p[2] = boostSecs;
+        p[3] = ramp;
+        p[4] = kind;
+        p[5] = gpio;
+        p[6] = npts;
+        memcpy(p + 7, pts, sizeof pts);
+    }
+
+    static Header decode(const uint8_t* p)
+    {
+        Header h;
+        h.fallback = p[0];
+        h.boost = p[1];
+        h.boostSecs = p[2];
+        h.ramp = p[3];
+        h.kind = p[4];
+        h.gpio = p[5];
+        h.npts = p[6];
+        memcpy(h.pts, p + 7, sizeof h.pts);
+        return h;
+    }
+
+    // a curve as it arrives, checked: 1..POINTS points, inputs strictly
+    // rising, everything 0..100
+    bool curveOk() const
+    {
+        if (npts < 1 || npts > POINTS)
+            return false;
+        for (int j = 0; j < npts; j++)
+        {
+            if (pts[j][0] > 100 || pts[j][1] > 100)
+                return false;
+            if (j && pts[j][0] <= pts[j - 1][0])
+                return false;
+        }
+        return true;
+    }
+
+    bool operator==(const Header& o) const
+    {
+        uint8_t a[LEN], b[LEN];
+        encode(a);
+        o.encode(b);
+        return memcmp(a, b, LEN) == 0;
+    }
+    bool operator!=(const Header& o) const { return !(*this == o); }
+};
+} // namespace fanwire

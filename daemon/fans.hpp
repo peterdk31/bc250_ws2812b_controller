@@ -24,6 +24,7 @@
 #include "config_edit.hpp"
 #include "config_loader.hpp"
 #include "fancurve.hpp"
+#include "fanwire.hpp"
 #include "hwmon.hpp"
 #include "protocol.hpp"
 #include "sink.hpp"
@@ -33,18 +34,22 @@
 // config's "fans" block:
 //
 //     "fans": {
-//         "hysteresis": 3, "ramp": 5, "boost_seconds": 5,
 //         "header1": { "name": "pump", "source": "fallback",
-//                      "boost": 100, "fallback": 65 },
+//                      "boost": 100, "boost_seconds": 5, "fallback": 65 },
 //         "header2": { ... "source": "temp", "curve": "45:35 60:55 75:100",
-//                      "boost": null, "fallback": 100 },
+//                      "hysteresis": 3, "ramp": 5, "boost": null, "fallback": 100 },
 //         "header3": { ... "source": "gpio:0", "curve": "0:25 100:80",
-//                      "boost": null, "fallback": 100 },
+//                      "ramp": 0, "boost": null, "fallback": 100 },
 //         ...
 //     }
 //
 // Every header has name, source, boost and fallback, plus a curve for every
-// source but "fallback"; a header listed here is driven: its curve runs, its
+// source but "fallback", and optionally its tunings — hysteresis, ramp,
+// boost_seconds (TUNINGS below: each has a default and applies to some
+// headers only; on the others it is refused). There is nothing global: a
+// board's own fan header mirrored over pwm wants no ramp at all while the
+// radiator next to it wants one, so each header says for itself. A header
+// listed here is driven: its curve runs, its
 // output is wired at flash time. To take one out of service, delete its
 // block (and reflash fancfg); to stop its fan, give it source "fallback" and
 // a fallback of 0. There is no enable flag — one existed, and meant two
@@ -78,10 +83,10 @@
 // and flat beyond the ends; the x unit is the source's. `boost` is the duty
 // for the first boost_seconds after the host powers on (null = sits it out)
 // and `fallback` what the receiver runs whenever nothing else drives the
-// header. Those two, boost_seconds, ramp, and every header's source kind
-// (with a gpio header's pin and curve) are the receiver's standalone
-// settings: pushed at startup and after any edit that moves them
-// (CMD_FAN_STANDALONE, common/protocol.hpp) and also baked into its fancfg
+// header. Those, the ramp, and every header's source kind (with a gpio
+// header's pin and curve) are the receiver's standalone settings — one
+// fanwire::Header record per header: pushed at startup and after any edit
+// that moves them (CMD_FAN_STANDALONE, common/protocol.hpp) and also baked into its fancfg
 // partition at flash time from this same block (tools/fancfg.py). They are
 // pushed for every header in this block — the config is the one source of
 // truth while a daemon is connected, and a value dialled on the receiver
@@ -102,16 +107,17 @@
 // The JSON shape the wire and the phone's edits use:
 //
 //     { "editable": true,        // the config file is writable
-//       "hysteresis": 3, "ramp": 5, "boost_seconds": 5,
-//       "header1": { "n": "pump", "s": "fallback", "b": 100, "f": 65 },
+//       "header1": { "n": "pump", "s": "fallback", "b": 100, "t": 5, "f": 65 },
 //       "header2": { "n": "radiator", "s": "temp",
-//                    "c": "45:35 60:55 75:100", "f": 100 }, ... }
+//                    "c": "45:35 60:55 75:100", "f": 100, "h": 3, "r": 5 }, ... }
 //
 // s is the source exactly as the config spells it, c/b/f are curve, boost
 // and fallback in the config's own notation (c absent for a fallback source,
-// b absent = null, no boost), n the name. All of them are editable; a phone
-// that changes s sends the curve for the new source in the same edit. Keys
-// are short because a GATT attribute holds 512 bytes at most and six headers
+// b absent = null, no boost), n the name, h/r/t the tunings (TUNINGS' short
+// keys; one is absent when it doesn't apply to the header or sits at its
+// default, which the page knows). All of them are editable; a phone that
+// changes s sends the curve for the new source in the same edit. Keys are
+// short because a GATT attribute holds 512 bytes at most and six headers
 // have to fit — pushConfig says so in the journal when they don't.
 namespace fans
 {
@@ -122,6 +128,8 @@ static const double REFRESH_S = 5.0; // resend unchanged live duties this often
 static const int MAX_GPIO = 48;      // the highest GPIO on any target (S3);
                                      // the flasher and the receiver know the
                                      // real chip and check the pin properly
+static const float DEFAULT_HYSTERESIS = 3; // °C; the ramp's and boost length's
+                                           // defaults are the wire's (protocol.hpp)
 
 static_assert(proto::FAN_CURVE_POINTS == fancurve::MAX_POINTS,
               "the wire's point count is the evaluator's");
@@ -141,6 +149,11 @@ struct Header
     std::string curveText;           // the curve, canonical "x:y x:y"
     int boost = -1;                  // percent, -1 = null (no boost)
     int fallback = 100;
+    // the tunings (TUNINGS below); one that doesn't apply to this header's
+    // kind holds its default and is never written out
+    float hysteresis = DEFAULT_HYSTERESIS;       // °C a temperature must fall before the fan follows
+    float ramp = proto::FAN_DEFAULT_RAMP;        // percent per second on the way down, 0 = at once
+    float boostSecs = proto::FAN_DEFAULT_BOOST_SECS;
 
     // runtime
     std::string spec;                // hwmon candidates (Temp) / chip (Pwm)
@@ -162,7 +175,57 @@ struct Header
     {
         return curve.empty() ? fallback : fancurve::eval(curve.data(), (int)curve.size(), x);
     }
+
+    // the receiver's record of this header (protocol.hpp CMD_FAN_STANDALONE)
+    fanwire::Header wire() const
+    {
+        fanwire::Header w;
+        w.fallback = (uint8_t)fallback;
+        w.boost = boost < 0 ? fanwire::NONE : (uint8_t)boost;
+        w.boostSecs = (uint8_t)(boostSecs + 0.5f);
+        w.ramp = (uint8_t)(ramp + 0.5f);
+        w.kind = kind == Fallback ? proto::FAN_KIND_FALLBACK
+               : kind == Gpio     ? proto::FAN_KIND_GPIO
+                                  : proto::FAN_KIND_HOST;
+        if (kind == Gpio)
+        {
+            w.gpio = (uint8_t)gpio;
+            w.npts = (uint8_t)curve.size();
+            for (size_t i = 0; i < curve.size(); i++)
+            {
+                w.pts[i][0] = (uint8_t)(curve[i].x + 0.5f);
+                w.pts[i][1] = (uint8_t)(curve[i].y + 0.5f);
+            }
+        }
+        return w;
+    }
 };
+
+// A header's tunings: optional numbers with a default, each meaningful for
+// some headers only — and refused on the others, so a hysteresis on a load
+// header is a typo caught at startup rather than a number that silently does
+// nothing. This one table drives the config parser, the dashboard's JSON in
+// both directions, the write-back into the file and --fan-status.
+struct Tuning
+{
+    const char* key;      // the config's
+    const char* shortKey; // the dashboard's
+    const char* range;    // what a value outside lo..hi is told
+    float lo, hi;
+    float Header::* field;
+    bool (*applies)(const Header&);
+    const char* onlyFor;  // "...only applies to <onlyFor>"
+    float dflt;
+};
+static const Tuning TUNINGS[] = {
+    {"hysteresis", "h", "a number of °C, 0 or more", 0, 1e9f, &Header::hysteresis,
+     [](const Header& h) { return h.kind == Header::Temp; }, "a temperature source", DEFAULT_HYSTERESIS},
+    {"ramp", "r", "percent per second, 0..255 (0 = at once)", 0, 255, &Header::ramp,
+     [](const Header& h) { return h.kind != Header::Fallback; }, "a source with a curve", proto::FAN_DEFAULT_RAMP},
+    {"boost_seconds", "t", "seconds, 0..255", 0, 255, &Header::boostSecs,
+     [](const Header& h) { return h.boost >= 0; }, "a header with a boost", proto::FAN_DEFAULT_BOOST_SECS},
+};
+static const int TUNING_COUNT = sizeof TUNINGS / sizeof *TUNINGS;
 
 // find /sys/class/hwmon/<chip>/<file> (a pwmN output, say); "" when absent
 inline std::string findChipFile(const std::string& chip, const std::string& file)
@@ -227,24 +290,9 @@ public:
             const std::string& k = m.first;
             const json::Value& v = m.second;
 
-            if (k == "hysteresis")
-            {
-                if (!v.isNumber() || v.number < 0)
-                    return bad("fans.hysteresis", "expected a number of °C, 0 or more");
-                hysteresis_ = (float)v.number;
-            }
-            else if (k == "ramp")
-            {
-                if (!v.isNumber() || v.number < 0)
-                    return bad("fans.ramp", "expected percent per second, 0 or more");
-                ramp_ = (float)v.number;
-            }
-            else if (k == "boost_seconds")
-            {
-                if (!v.isNumber() || v.number < 0 || v.number > 255)
-                    return bad("fans.boost_seconds", "expected seconds, 0..255");
-                boostSeconds_ = (int)v.number;
-            }
+            if (k == "hysteresis" || k == "ramp" || k == "boost_seconds")
+                return bad("fans." + k, "moved: this is each header's own setting now — put it "
+                                        "in the fans.headerN block it belongs to (README \"Fans\")");
             else if (k == "pins")
             {
                 // the flasher's business (tools/fancfg.py); only the shape is
@@ -296,33 +344,7 @@ public:
             return;
 
         uint8_t p[proto::FAN_STANDALONE_LEN];
-        memset(p, proto::FAN_NONE, sizeof p);
-        p[0] = (uint8_t)boostSeconds_;
-        p[proto::FAN_STANDALONE_V1_LEN] = ramp_ > 255 ? 255 : (uint8_t)(ramp_ + 0.5f);
-
-        for (auto& h : headers_)
-        {
-            p[1 + 2 * h.slot] = (uint8_t)h.fallback;
-            p[2 + 2 * h.slot] = h.boost < 0 ? proto::FAN_NONE : (uint8_t)h.boost;
-
-            uint8_t* q = p + proto::FAN_STANDALONE_V1_LEN + 1 +
-                         h.slot * (3 + 2 * proto::FAN_CURVE_POINTS);
-            q[0] = h.kind == Header::Fallback ? proto::FAN_KIND_FALLBACK
-                   : h.kind == Header::Gpio   ? proto::FAN_KIND_GPIO
-                                              : proto::FAN_KIND_HOST;
-            q[1] = h.kind == Header::Gpio ? (uint8_t)h.gpio : proto::FAN_NONE;
-            q[2] = 0;
-            if (h.kind == Header::Gpio)
-            {
-                q[2] = (uint8_t)h.curve.size();
-                for (size_t i = 0; i < h.curve.size(); i++)
-                {
-                    q[3 + 2 * i] = (uint8_t)(h.curve[i].x + 0.5f);
-                    q[4 + 2 * i] = (uint8_t)(h.curve[i].y + 0.5f);
-                }
-            }
-        }
-
+        standaloneBlob(p);
         for (auto& s : sinks)
             s->sendCommand(proto::CMD_FAN_STANDALONE, p, sizeof p);
     }
@@ -430,9 +452,7 @@ public:
         nanosleep(&ts, nullptr);
         tick(0.5, none);
 
-        fprintf(out, "fans: hysteresis %g °C, ramp %g %%/s, boost %d s\n",
-                hysteresis_, ramp_, boostSeconds_);
-        fprintf(out, "  dashboard edits: %s\n",
+        fprintf(out, "fans: dashboard edits: %s\n",
                 writable() ? "written back to the config" : "off (config not writable)");
         fprintf(out, "  sensors a header could follow (the phone's picker): %s\n", sensorsJson().c_str());
 
@@ -457,9 +477,13 @@ public:
                 fprintf(out, "  -> %d%%", (int)live_[h.slot]);
             }
 
-            fprintf(out, "   boost %s, fallback %d%%\n",
+            fprintf(out, "   boost %s, fallback %d%%",
                     h.boost < 0 ? "none" : (std::to_string(h.boost) + "%").c_str(),
                     h.fallback);
+            for (auto& t : TUNINGS)
+                if (t.applies(h))
+                    fprintf(out, ", %s %g", t.key, h.*t.field);
+            fprintf(out, "\n");
         }
     }
 
@@ -650,6 +674,8 @@ private:
             bool known = false;
             for (const char* k : KEYS)
                 known |= m.first == k;
+            for (auto& t : TUNINGS)
+                known |= m.first == t.key;
             if (!known)
                 return bad(where + "." + m.first, "unknown key");
         }
@@ -704,6 +730,19 @@ private:
         if (!fb.isNumber() || fb.number < 0 || fb.number > 100)
             return bad(where + ".fallback", "expected a percent 0..100");
         h.fallback = (int)(fb.number + 0.5);
+
+        for (auto& t : TUNINGS)
+        {
+            const json::Value* tv = v.find(t.key);
+            if (!tv)
+                continue;
+            if (!tv->isNumber() || tv->number < t.lo || tv->number > t.hi)
+                return bad(where + "." + t.key, std::string("expected ") + t.range);
+            if (!t.applies(h))
+                return bad(where + "." + t.key, std::string(t.key) + " only applies to " + t.onlyFor +
+                                                    " — delete this key");
+            h.*t.field = (float)tv->number;
+        }
 
         if (h.kind == Header::Temp || h.kind == Header::Pwm)
         {
@@ -866,19 +905,20 @@ private:
         }
         h.lastIn = in;
 
-        // hysteresis: a temperature has to fall `hysteresis` below the value
-        // the fan is running for before the fan follows it down; rises are
-        // taken at once. Percent sources (loads, a mirrored pwm) skip it.
+        // hysteresis: a temperature has to fall the header's `hysteresis`
+        // below the value the fan is running for before the fan follows it
+        // down; rises are taken at once. Percent sources (loads, a mirrored
+        // pwm) skip it.
         if (h.kind == Header::Temp)
         {
-            if (!h.haveIn || in > h.effIn || in < h.effIn - hysteresis_)
+            if (!h.haveIn || in > h.effIn || in < h.effIn - h.hysteresis)
                 h.effIn = in;
         }
         else
             h.effIn = in;
         h.haveIn = true;
 
-        h.out = fancurve::ramp(h.eval(h.effIn), h.out, h.haveOut, ramp_, dt);
+        h.out = fancurve::ramp(h.eval(h.effIn), h.out, h.haveOut, h.ramp, dt);
         h.haveOut = true;
 
         return (int)(h.out + 0.5f);
@@ -910,11 +950,8 @@ private:
     // the block as run, for the dashboard (see the header comment)
     std::string toJson() const
     {
-        char buf[80];
+        char buf[40];
         std::string j = writable() ? "{\"editable\":true" : "{\"editable\":false";
-        snprintf(buf, sizeof buf, ",\"hysteresis\":%g,\"ramp\":%g,\"boost_seconds\":%d",
-                 hysteresis_, ramp_, boostSeconds_);
-        j += buf;
 
         for (auto& h : headers_)
         {
@@ -923,7 +960,16 @@ private:
             if (h.kind != Header::Fallback)
                 j += ",\"c\":\"" + h.curveText + "\"";
             j += (h.boost < 0 ? std::string() : ",\"b\":" + std::to_string(h.boost)) +
-                 ",\"f\":" + std::to_string(h.fallback) + "}";
+                 ",\"f\":" + std::to_string(h.fallback);
+            // a tuning travels when it applies and moved off its default; the
+            // page fills in the defaults (the wire's, protocol.hpp)
+            for (auto& t : TUNINGS)
+                if (t.applies(h) && h.*t.field != t.dflt)
+                {
+                    snprintf(buf, sizeof buf, ",\"%s\":%g", t.shortKey, (double)(h.*t.field));
+                    j += buf;
+                }
+            j += "}";
         }
         return j + "}";
     }
@@ -1123,6 +1169,19 @@ private:
         int boost;    // -1 = none
         int fallback;
         std::string name;
+        float tuning[TUNING_COUNT];     // TUNINGS' values to run...
+        bool tuningGiven[TUNING_COUNT]; // ...and which the edit named (held to the kind)
+
+        HeaderEdit(Header* hp)
+            : h(hp), source(hp->source), curve(hp->curveText), boost(hp->boost),
+              fallback(hp->fallback), name(hp->name)
+        {
+            for (int i = 0; i < TUNING_COUNT; i++)
+            {
+                tuning[i] = hp->*TUNINGS[i].field;
+                tuningGiven[i] = false;
+            }
+        }
     };
 
     static const size_t NAME_CHARS = 16; // the card's title (characters, not bytes);
@@ -1138,12 +1197,8 @@ private:
 
     // validate a set of edits and, only if every one passes, apply them.
     // `where` prefixes the error lines. Returns false with nothing changed.
-    bool applyValues(float hyst, float ramp, int boostSecs, const std::vector<HeaderEdit>& edits,
-                     const std::string& where)
+    bool applyValues(const std::vector<HeaderEdit>& edits, const std::string& where)
     {
-        if (hyst < 0 || ramp < 0 || boostSecs < 0 || boostSecs > 255)
-            return bad(where, "hysteresis, ramp or boost_seconds out of range");
-
         // each edit's source and curve, parsed into a scratch copy of its header
         std::vector<Header> next;
         for (auto& e : edits)
@@ -1192,6 +1247,15 @@ private:
             t.boost = e.boost;
             t.fallback = e.fallback;
             t.name = e.name;
+            for (int i = 0; i < TUNING_COUNT; i++)
+            {
+                const Tuning& tn = TUNINGS[i];
+                if (e.tuningGiven[i] && (e.tuning[i] < tn.lo || e.tuning[i] > tn.hi))
+                    return bad(at + "." + tn.shortKey, std::string("expected ") + tn.range);
+                if (e.tuningGiven[i] && !tn.applies(t))
+                    return bad(at + "." + tn.shortKey, std::string(tn.key) + " only applies to " + tn.onlyFor);
+                t.*tn.field = e.tuning[i];
+            }
 
             if (moved)
             {
@@ -1202,9 +1266,6 @@ private:
             }
         }
 
-        hysteresis_ = hyst;
-        ramp_ = ramp;
-        boostSeconds_ = boostSecs;
         for (size_t i = 0; i < edits.size(); i++)
             *edits[i].h = std::move(next[i]);
 
@@ -1212,12 +1273,10 @@ private:
     }
 
     // apply a phone's partial edit (the shape in the header comment): every
-    // key optional, a header's s/c/b/f/n each optional (the rest keeps its
+    // header optional, its s/c/b/f/n/h/r/t each optional (the rest keeps its
     // value), anything else an error. Validated as a whole by applyValues.
     bool applyJson(const json::Value& root, const std::string& where)
     {
-        float hyst = hysteresis_, ramp = ramp_;
-        int boostSecs = boostSeconds_;
         std::vector<HeaderEdit> edits;
 
         for (auto& m : root.members)
@@ -1226,18 +1285,7 @@ private:
             const json::Value& v = m.second;
             if (k == "editable")
                 continue;
-            if (k == "hysteresis" || k == "ramp" || k == "boost_seconds")
-            {
-                if (!v.isNumber())
-                    return bad(where + "." + k, "expected a number");
-                if (k == "hysteresis")
-                    hyst = (float)v.number;
-                else if (k == "ramp")
-                    ramp = (float)v.number;
-                else
-                    boostSecs = (int)v.number;
-            }
-            else if (k.rfind("header", 0) == 0 && v.isObject())
+            if (k.rfind("header", 0) == 0 && v.isObject())
             {
                 Header* h = nullptr;
                 for (auto& o : headers_)
@@ -1246,12 +1294,21 @@ private:
                 if (!h)
                     return bad(where + "." + k, "no such header in the config");
 
-                HeaderEdit e{h, h->source, h->curveText, h->boost, h->fallback, h->name};
+                HeaderEdit e(h);
                 for (auto& f : v.members)
                 {
                     const std::string& fk = f.first;
                     const json::Value& fv = f.second;
-                    if (fk == "s" && fv.isString())
+                    int ti = -1;
+                    for (int i = 0; i < TUNING_COUNT; i++)
+                        if (fk == TUNINGS[i].shortKey)
+                            ti = i;
+                    if (ti >= 0 && fv.isNumber())
+                    {
+                        e.tuning[ti] = (float)fv.number;
+                        e.tuningGiven[ti] = true;
+                    }
+                    else if (fk == "s" && fv.isString())
                         e.source = fv.text;
                     else if (fk == "n" && fv.isString())
                         e.name = fv.text;
@@ -1272,7 +1329,7 @@ private:
                 return bad(where + "." + k, "unknown key");
         }
 
-        return applyValues(hyst, ramp, boostSecs, edits, where);
+        return applyValues(edits, where);
     }
 
     // a phone edit: parse, apply, write it into the config, and re-push the
@@ -1307,19 +1364,21 @@ private:
         return writeConfig();
     }
 
-    // the receiver's standalone settings as one comparable string — what
-    // pushStandalone would send
+    // the receiver's standalone settings as pushStandalone sends them: one
+    // record per header, a header not in the block left as FAN_NONE
+    void standaloneBlob(uint8_t* p) const
+    {
+        memset(p, proto::FAN_NONE, proto::FAN_STANDALONE_LEN);
+        for (auto& h : headers_)
+            h.wire().encode(p + h.slot * proto::FAN_HEADER_LEN);
+    }
+
+    // ...as one comparable string, for "did an edit move them"
     std::string standaloneKey() const
     {
-        std::string k = std::to_string(boostSeconds_) + "/" + std::to_string(ramp_);
-        for (auto& h : headers_)
-        {
-            k += "|" + std::to_string(h.boost) + ":" + std::to_string(h.fallback) + ":" +
-                 std::to_string((int)h.kind);
-            if (h.kind == Header::Gpio)
-                k += ":" + std::to_string(h.gpio) + ":" + h.curveText;
-        }
-        return k;
+        uint8_t p[proto::FAN_STANDALONE_LEN];
+        standaloneBlob(p);
+        return std::string((const char*)p, sizeof p);
     }
 
     // ---- writing an edit back into the config file ----
@@ -1331,9 +1390,6 @@ private:
     // turns read-only, so the phone stops offering saves that can't stick).
     bool writeConfig()
     {
-        cfgedit::member(block_, "hysteresis") = cfgedit::number(hysteresis_);
-        cfgedit::member(block_, "ramp") = cfgedit::number(ramp_);
-        cfgedit::member(block_, "boost_seconds") = cfgedit::number(boostSeconds_);
         for (auto& h : headers_)
         {
             json::Value& hv = cfgedit::member(block_, h.key);
@@ -1359,15 +1415,22 @@ private:
             }
             cfgedit::member(hv, "boost") = h.boost < 0 ? json::Value() : cfgedit::number(h.boost);
             cfgedit::member(hv, "fallback") = cfgedit::number(h.fallback);
+            // a tuning that stopped applying (the source moved) goes; one at
+            // its default is written only where the hand already had it, so
+            // a lean file stays lean
+            for (auto& t : TUNINGS)
+            {
+                if (!t.applies(h))
+                    cfgedit::erase(hv, t.key);
+                else if (hv.find(t.key) || h.*t.field != t.dflt)
+                    cfgedit::member(hv, t.key) = cfgedit::number(h.*t.field);
+            }
         }
 
         return writer_->write({BLOCK}, block_, BLOCK);
     }
 
     std::vector<Header> headers_;
-    float hysteresis_ = 3;
-    float ramp_ = 5;
-    int boostSeconds_ = 5;
 
     std::string sensors_;    // the top-level `sensors` spec (telemetry temp)
     json::Value block_;      // the fans block as written (writeConfig updates it)

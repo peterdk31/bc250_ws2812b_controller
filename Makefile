@@ -47,9 +47,9 @@ STRIP_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),4)
 # explicit "enabled": false may do it (pwrcfg.py exits 3 for "no block").
 
 # The fans' standalone part (which headers there are, each one's fallback
-# duty and boost, the boost length, the ramp, and a "gpio:N" header's input
-# pin and curve, which the receiver runs itself) is what fancfg holds; host
-# curves are the daemon's. The header → GPIO map is the carrier board's (tools/pincheck.py
+# duty, boost and boost length, ramp, and a "gpio:N" header's input pin and
+# curve, which the receiver runs itself) is what fancfg holds; host curves
+# and the hysteresis are the daemon's. The header → GPIO map is the carrier board's (tools/pincheck.py
 # FAN_PINS; "pins" in the block overrides it for a hand-wired build). Each
 # encoder's --list-pins feeds the other's collision check below.
 FAN_PINS_USED = $(if $(CONFIG),$(shell python3 tools/fancfg.py --config "$(CONFIG)" --target $(TARGET) --list-pins 2>/dev/null))
@@ -471,11 +471,11 @@ flash-pwr:
 
 # write only the 4 KB fancfg partition — the config's "fans" block, after an
 # edit — without reflashing the firmware (seconds). Only useful once the chip
-# runs a firmware that reads the FAN2 layout (this change on) and whose
-# partition table has the fancfg entry — against an older layout the write
-# lands in the (unused) factory tail and the firmware never sees it; the debug
-# log says so at boot. An older firmware that knows only FAN1 reads a FAN2 blob
-# as "no config" and turns the fans off — reflash the firmware first.
+# runs a firmware that reads the blob's layout (FAN4, per-header tunings on)
+# and whose partition table has the fancfg entry — against an older layout the
+# write lands in the (unused) factory tail and the firmware never sees it; the
+# debug log says so at boot. A firmware that knows only an older layout reads
+# this blob as "no config" and turns the fans off — reflash the firmware first.
 flash-fan:
 	-@$(MAKE) --no-print-directory serial-perms
 	@[ -n "$(CONFIG)" ] || { echo 'no config found — set CONFIG=path/to/config.json (its "fans" block is what gets written)'; exit 1; }; \

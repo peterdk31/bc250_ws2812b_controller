@@ -6,30 +6,30 @@ the `fancfg` flash partition at boot. Invoked by the Makefile (`make flash`,
 The settings come from the daemon config's "fans" block (--config) — the same
 block the daemon reads at runtime — so there is one place to describe the
 fans, and the receiver runs the standalone part of it without any daemon at
-all: every header's fallback duty and boost, the boost length, the ramp, and
-for a header whose source is "gpio:N" the curve itself — the receiver samples
-the PWM signal on that GPIO and follows the curve on its own. Curves on host
-sources (temperatures, loads, hwmon pwm outputs) are daemon-only and are not
-encoded. The header → GPIO map is the board's (pincheck.FAN_PINS, overridable
-with "pins" in the block).
+all: every header's fallback duty, boost and boost length, its ramp, and for
+a header whose source is "gpio:N" the curve itself — the receiver samples the
+PWM signal on that GPIO and follows the curve on its own. Curves on host
+sources (temperatures, loads, hwmon pwm outputs) and the hysteresis are
+daemon-only and are not encoded. The header → GPIO map is the board's
+(pincheck.FAN_PINS, overridable with "pins" in the block).
 
 The layout must match Config::decode in firmware/main/fan.cpp:
 
-    "FAN3" magic, then
-    enabled(1) boost_secs(1) pin[6] duty[6] boost[6]          (the FAN2 body)
-    ramp(1), then per header kind(1) gpio(1) npts(1) pts[8][2]
+    "FAN4" magic, then enabled(1) pin[6], then per header the record
+    CMD_FAN_STANDALONE carries (common/protocol.hpp, common/fanwire.hpp):
+    fallback(1) boost(1) boost_secs(1) ramp(1) kind(1) gpio(1) npts(1) pts[8][2]
 
 Slot i is header i+1. Pins are GPIO numbers, 0xFF = header not wired (a
 header the block doesn't list — the firmware never configures its output, and
-a 4-pin fan plugged into it runs full, per the fan spec's floating-PWM rule).
-duty is the header's fallback percent; boost its boost percent, 0xFF = sits
-the boost out. kind is the source's kind (protocol.hpp FAN_KIND_*: 0 fallback,
-1 gpio, 2 host); gpio the input pin of a gpio header (0xFF otherwise); the
-points are (input percent, duty percent) pairs, npts of them, sorted. ramp is
-the slow-down rate in whole percent per second.
-Fields are only ever APPENDED (firmware newer than a blob reads erased flash
-for the tail: 0xFF pins = not wired, duty bytes past 100 clamp to 100, kind
-0xFF = host). The firmware also still reads the "FAN2" and "FAN1" layouts.
+a 4-pin fan plugged into it runs full, per the fan spec's floating-PWM rule;
+its record is all 0xFF, which the firmware leaves alone). fallback is the
+header's resting duty percent; boost its boost percent, 0xFF = sits the boost
+out, boost_secs how long it runs; ramp the slow-down rate in whole percent
+per second; kind the source's kind (protocol.hpp FAN_KIND_*: 0 fallback, 1
+gpio, 2 host); gpio the input pin of a gpio header (0xFF otherwise); the
+points are (input percent, duty percent) pairs, npts of them, sorted. Every
+tuning is the header's own; there is nothing global. Older layouts are not
+read: `make flash` writes the firmware and this blob together.
 
 The firmware has no console and quietly drops anything it can't use (a pin
 past GPIO_NUM_MAX decodes as "not wired", so a typo'd pin silently becomes a
@@ -57,6 +57,18 @@ MAX_POINTS = 8  # common/fancurve.hpp MAX_POINTS = protocol.hpp FAN_CURVE_POINTS
 NONE = 0xFF
 KIND_FALLBACK, KIND_GPIO, KIND_HOST = 0, 1, 2  # protocol.hpp FAN_KIND_*
 HEADER_KEYS = ('name', 'source', 'curve', 'boost', 'fallback')
+RECORD_LEN = 7 + 2 * MAX_POINTS  # protocol.hpp FAN_HEADER_LEN
+# the header's tunings, as daemon/fans.hpp TUNINGS has them: key, what a bad
+# value is told, range, which headers it applies to (kind, has_boost), what
+# it is for, default (protocol.hpp FAN_DEFAULT_*, fans.hpp DEFAULT_HYSTERESIS)
+TUNINGS = (
+    ('hysteresis', 'a number of °C, 0 or more', 0, float('inf'),
+     lambda kind, boost, temp: temp, 'a temperature source', 3),
+    ('ramp', 'percent per second, 0..255 (0 = at once)', 0, 255,
+     lambda kind, boost, temp: kind != KIND_FALLBACK, 'a source with a curve', 5),
+    ('boost_seconds', 'seconds, 0..255', 0, 255,
+     lambda kind, boost, temp: boost is not None, 'a header with a boost', 5),
+)
 SOURCE_HELP = ('expected fallback, gpio:N, temp, cpu_load, gpu_load, or a hwmon '
                'chip:label / chip:pwmN')
 
@@ -107,8 +119,6 @@ if block is not None and not isinstance(block, dict):
     block = None
 block = block or {}
 
-boost_secs = 5
-ramp = 5
 pins_override = None
 headers = {}  # slot -> dict
 
@@ -116,8 +126,8 @@ number = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
 def parse_source(src, where):
-    """Mirror of fans::Controller::parseSource: (kind, gpio) or None after an
-    error."""
+    """Mirror of fans::Controller::parseSource: (kind, gpio, is_temperature)
+    or None after an error."""
     if not isinstance(src, str) or not src:
         return err(where, SOURCE_HELP)
     if src == 'constant':
@@ -125,17 +135,20 @@ def parse_source(src, where):
                           'runs its fallback value and takes no curve (move the '
                           'constant into fallback)')
     if src == 'fallback':
-        return KIND_FALLBACK, None
-    if src in ('temp', 'cpu_load', 'gpu_load'):
-        return KIND_HOST, None
+        return KIND_FALLBACK, None, False
+    if src == 'temp':
+        return KIND_HOST, None, True
+    if src in ('cpu_load', 'gpu_load'):
+        return KIND_HOST, None, False
     chip, sep, label = src.partition(':')
     if not sep:
         return err(where, SOURCE_HELP)
     if chip == 'gpio':
         if not re.fullmatch(r'\d+', label) or int(label) > 48:
             return err(where, 'gpio:N names a receiver GPIO, 0..48')
-        return KIND_GPIO, int(label)
-    return KIND_HOST, None  # chip:label / chip:pwmN — the daemon's
+        return KIND_GPIO, int(label), False
+    # chip:label / chip:pwmN — the daemon's; a pwmN label is a percent, the rest °C
+    return KIND_HOST, None, not re.fullmatch(r'pwm\d+', label)
 
 
 def parse_curve(text, kind, where):
@@ -169,19 +182,9 @@ def parse_curve(text, kind, where):
 
 for k, v in block.items():
     where = f'fans.{k}'
-    if k == 'hysteresis':
-        if not number(v) or v < 0:
-            err(where, 'expected a number of °C, 0 or more')
-    elif k == 'ramp':
-        if not number(v) or v < 0:
-            err(where, 'expected percent per second, 0 or more')
-        else:
-            ramp = min(255, int(round(v)))
-    elif k == 'boost_seconds':
-        if not number(v) or not 0 <= v <= 255:
-            err(where, 'expected seconds, 0..255')
-        else:
-            boost_secs = int(v)
+    if k in ('hysteresis', 'ramp', 'boost_seconds'):
+        err(where, "moved: this is each header's own setting now — put it in the "
+                   'fans.headerN block it belongs to (README "Fans")')
     elif k == 'pins':
         try:
             vals = v if isinstance(v, list) else str(v).split(',')
@@ -201,7 +204,7 @@ for k, v in block.items():
                 err(f'{where}.enabled', 'retired — a header listed here is always '
                     'driven; delete the header\'s block to drop it, or give it '
                     'source "fallback" with a fallback of 0 to stop the fan')
-            elif kk not in HEADER_KEYS:
+            elif kk not in HEADER_KEYS and kk not in [t[0] for t in TUNINGS]:
                 err(f'{where}.{kk}', 'unknown key')
         missing = [kk for kk in HEADER_KEYS if kk != 'curve' and kk not in v]
         if missing:
@@ -211,7 +214,7 @@ for k, v in block.items():
         if not isinstance(v['name'], str):
             err(f'{where}.name', 'expected a string')
         parsed = parse_source(v['source'], f'{where}.source')
-        kind, gpio = parsed if parsed else (KIND_HOST, None)
+        kind, gpio, temp = parsed if parsed else (KIND_HOST, None, False)
         pts = []
         if kind == KIND_FALLBACK:
             if 'curve' in v:
@@ -228,11 +231,25 @@ for k, v in block.items():
         fb = v['fallback']
         if not (number(fb) and 0 <= fb <= 100):
             err(f'{where}.fallback', 'expected a percent 0..100')
+        tunings = {}
+        for key, rng, lo, hi, applies, only_for, dflt in TUNINGS:
+            tunings[key] = dflt
+            if key not in v:
+                continue
+            tv = v[key]
+            if not number(tv) or not lo <= tv <= hi:
+                err(f'{where}.{key}', f'expected {rng}')
+            elif not applies(kind, b, temp):
+                err(f'{where}.{key}', f'{key} only applies to {only_for} — delete this key')
+            else:
+                tunings[key] = tv
         if not errors:
             headers[n - 1] = dict(name=v['name'], kind=kind, gpio=gpio,
                                   pts=[(int(x), int(round(y))) for x, y in pts]
                                   if kind == KIND_GPIO else [],
                                   boost=NONE if b is None else int(round(b)),
+                                  boost_secs=int(round(tunings['boost_seconds'])),
+                                  ramp=int(round(tunings['ramp'])),
                                   fallback=int(round(fb)))
     else:
         err(where, 'unknown key')
@@ -356,28 +373,19 @@ if not a.out:
 
 wire_pins = [pin_byte(board_pins[i]) if i in headers else NONE
              for i in range(MAX_FANS)]
-wire_duty = [headers[i]['fallback'] if i in headers else 100
-             for i in range(MAX_FANS)]
-wire_boost = [headers[i]['boost'] if i in headers else NONE
-              for i in range(MAX_FANS)]
 
-blob = b'FAN3' + struct.pack(
-    '<BB6B6B6B',
-    1 if headers else 0,
-    boost_secs,
-    *wire_pins,
-    *wire_duty,
-    *wire_boost)
+blob = b'FAN4' + struct.pack('<B6B', 1 if headers else 0, *wire_pins)
 
-blob += bytes([ramp])
 for i in range(MAX_FANS):
     h = headers.get(i)
     if not h:
-        blob += bytes([NONE, NONE, 0]) + bytes(2 * MAX_POINTS)
+        blob += bytes([NONE] * RECORD_LEN)  # not listed: the firmware leaves it alone
         continue
     pts = h['pts']
     flat = [c for pt in pts for c in pt] + [0] * (2 * (MAX_POINTS - len(pts)))
-    blob += bytes([h['kind'], NONE if h['gpio'] is None else h['gpio'], len(pts)] + flat)
+    blob += bytes([h['fallback'], h['boost'], h['boost_secs'], h['ramp'], h['kind'],
+                   NONE if h['gpio'] is None else h['gpio'], len(pts)] + flat)
+assert len(blob) == 4 + 1 + MAX_FANS + MAX_FANS * RECORD_LEN
 
 with open(a.out, 'wb') as f:
     f.write(blob)

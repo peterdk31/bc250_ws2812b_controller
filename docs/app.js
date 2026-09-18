@@ -1,7 +1,7 @@
 // The screens: Preact + htm (vendor/preact-htm.mjs, no build step) rendering
 // whatever ble.js holds in `S`. Four tabs — Power, Fans, LEDs, Receiver —
-// plus three full-screen editors (a fan header, the fan behaviour, the power
-// switch's settings) and the power sheet. Every one of those is a history entry, so the phone's back
+// plus two full-screen editors (a fan header, the power switch's settings)
+// and the power sheet. Every one of those is a history entry, so the phone's back
 // gesture closes the sheet, leaves the editor, returns to the Power tab, and
 // only then leaves the app.
 //
@@ -53,7 +53,7 @@ const I = {
 };
 
 // ---- routing: the route IS the history entry ----
-// { tab, editor: null | slot | 'g' (fans) | 'p' (power), sheet }
+// { tab, editor: null | slot (fans) | 'p' (power), sheet }
 const TABS = ['power', 'fans', 'leds', 'receiver'];
 let route = { tab: 'power', editor: null, sheet: false };
 let setRouteState = null;
@@ -312,7 +312,6 @@ function FansScreen() {
   return html`<div class="list">
     ${!slots.length && html`<div class="empty">${S.fans && !S.fans.active ? 'No fan headers wired on this receiver.' : 'No fan settings yet.'}</div>`}
     ${slots.map(slot => html`<${FanRow} key=${slot} slot=${slot} open=${open.has(slot)} toggle=${() => toggle(slot)} />`)}
-    ${S.cfg && html`<button class="rowlink" disabled=${!S.cfg.editable} onClick=${() => go({ editor: 'g' })}><span>Fan behaviour</span><${Icon} d=${I.right} size=${18} /></button>`}
     ${S.cfg && !S.cfg.editable && html`<div class="empty">Settings are read-only right now.</div>`}
   </div>`;
 }
@@ -448,6 +447,7 @@ function FanEditor({ slot }) {
   const dirty = () => JSON.stringify(h) !== JSON.stringify(orig);
   useEffect(() => { leaveGuard = () => !dirty() || confirm('Leave without saving?'); return () => { leaveGuard = null; }; });
   const set = patch => setH(x => ({ ...x, ...patch }));
+  const num = (k, v, lo, hi, round) => { const n = parseFloat(v); if (!isNaN(n)) set({ [k]: clamp(round ? Math.round(n) : n, lo, hi) }); };
   // the receiver's free pins (plus the configured one, should it not be free), or null for a typed pin
   const pins = S.info && S.info.pins;
   const pinOpts = h && pins && (pins.includes(h.gpio) ? pins : [...pins, h.gpio].sort((a, b) => a - b));
@@ -505,7 +505,8 @@ function FanEditor({ slot }) {
         : typed && html`<label class="frow"><span>${h.kind === 'pwm' ? 'Header' : 'Sensor'}</span>
           <input class="text" type="text" autocomplete="off" placeholder=${cur.hint} value=${h.spec || ''} onInput=${e => set({ spec: e.target.value.trim() })} /></label>`}
       </div>
-      ${!B.isFixed(h) && html`<div class="card">
+      ${h.kind === 'host' && html`<div class="card"><div class="note">This header follows a curve the host runs; with the host off it sits at its fallback speed. Pick Fixed speed or PWM input for something the receiver runs on its own.</div></div>`}
+      ${!B.isFixed(h) && h.kind !== 'host' && html`<div class="card">
         <h2>Curve</h2>
         <${Curve} h=${h} editing=${true} onChange=${setPt} />
         <div class="pts">${h.pts.map((p, i) => html`<div key=${i} class="prow">
@@ -515,6 +516,8 @@ function FanEditor({ slot }) {
           ${h.pts.length > 1 ? html`<button class="x" aria-label="remove point" onClick=${() => rmPt(i)}>×</button>` : html`<span></span>`}
         </div>`)}</div>
         ${h.pts.length < B.MAX_POINTS && html`<button class="rowlink add" onClick=${addPt}><${Icon} d=${I.plus} size=${16} /><span>add a point</span></button>`}
+        <label class="frow"><span>Ramp down</span><input type="number" min="0" max="255" step="0.5" value=${h.ramp} onInput=${e => num('ramp', e.target.value, 0, 255)} /><small>%/s, 0 = at once</small></label>
+        ${B.hasHyst(h) && html`<label class="frow"><span>Hysteresis</span><input type="number" min="0" max="50" step="0.5" value=${h.hyst} onInput=${e => num('hyst', e.target.value, 0, 50)} /><small>°C before slowing down</small></label>`}
       </div>`}
       ${h.fallback !== null && h.fallback !== undefined && html`<div class="card">
         <h2>Fallback speed</h2>
@@ -522,30 +525,16 @@ function FanEditor({ slot }) {
         <div class="note">What this header runs when nothing drives it: off, or before the host connects.</div>
       </div>`}
       ${daemon && html`<div class="card"><h2>Power-on boost</h2>
-        <label class="frow"><span class="grow">Speed for the first ${S.cfg ? S.cfg.boostSecs : ''} s after power-on</span>
+        <label class="frow"><span class="grow">Speed after power-on</span>
           <input type="number" min="0" max="100" step="1" placeholder="—" value=${h.boost === B.NONE ? '' : h.boost}
             onInput=${e => set({ boost: e.target.value === '' ? B.NONE : clamp(Math.round(+e.target.value), 0, 100) })} /><small>%</small></label>
+        ${B.hasBoostSecs(h) ? html`<label class="frow"><span class="grow">For the first</span>
+          <input type="number" min="0" max="255" step="1" value=${h.boostSecs} onInput=${e => num('boostSecs', e.target.value, 0, 255, true)} /><small>s</small></label>`
+        : html`<div class="note">Blank: this header starts at its fallback speed instead.</div>`}
       </div>`}
       <div class="btns two"><button class="minor" onClick=${back}>Cancel</button>
         <button class="primary" disabled=${saving} onClick=${() => B.saveHeader(slot, h)}>Save</button></div>
     </div>`;
-}
-
-function GlobalsEditor() {
-  const orig = S.cfg;
-  const [g, setG] = useState(() => orig && { hyst: orig.hyst, ramp: orig.ramp, boostSecs: orig.boostSecs });
-  useEffect(() => { if (!g && orig) setG({ hyst: orig.hyst, ramp: orig.ramp, boostSecs: orig.boostSecs }); }, [!!orig]);
-  useEffect(() => { leaveGuard = () => JSON.stringify(g) === JSON.stringify(orig && { hyst: orig.hyst, ramp: orig.ramp, boostSecs: orig.boostSecs }) || confirm('Leave without saving?'); return () => { leaveGuard = null; }; });
-  if (!g) return html`<${Header} back="Fans" /><div class="empty">Not connected.</div>`;
-  const num = (k, v, lo, hi, round) => { const n = parseFloat(v); if (!isNaN(n)) setG(x => ({ ...x, [k]: clamp(round ? Math.round(n) : n, lo, hi) })); };
-  return html`<${Header} back="Fans" title="Fan behaviour" />
-    <div class="list"><div class="card">
-      <label class="frow"><span>Hysteresis</span><input type="number" min="0" max="50" step="0.5" value=${g.hyst} onInput=${e => num('hyst', e.target.value, 0, 50)} /><small>°C before slowing down</small></label>
-      <label class="frow"><span>Ramp down</span><input type="number" min="0" max="100" step="0.5" value=${g.ramp} onInput=${e => num('ramp', e.target.value, 0, 100)} /><small>%/s, 0 = at once</small></label>
-      <label class="frow"><span>Boost</span><input type="number" min="0" max="255" step="1" value=${g.boostSecs} onInput=${e => num('boostSecs', e.target.value, 0, 255, true)} /><small>s after power-on</small></label>
-    </div>
-    <div class="btns two"><button class="minor" onClick=${back}>Cancel</button>
-      <button class="primary" disabled=${S.saving !== null} onClick=${() => B.saveGlobals(g)}>Save</button></div></div>`;
 }
 
 // ---- LEDs ----
@@ -654,9 +643,8 @@ function App() {
   // a save that landed closes its editor; nothing is unsaved, so no guard
   useEffect(() => { B.whenSaved(key => { if (route.editor === key) { skipGuard = true; back(); } }); }, []);
   const tokenBox = hasBt() && (S.editToken || !B.token());
-  if (r.editor !== null && r.tab === 'fans') {
-    return html`<div class="screen">${r.editor === 'g' ? html`<${GlobalsEditor} />` : html`<${FanEditor} key=${r.editor} slot=${r.editor} />`}</div>`;
-  }
+  if (r.editor !== null && r.tab === 'fans')
+    return html`<div class="screen"><${FanEditor} key=${r.editor} slot=${r.editor} /></div>`;
   if (r.editor === 'p' && r.tab === 'power')
     return html`<div class="screen"><${PowerEditor} /></div>`;
   const body = r.tab === 'power' ? html`<${PowerScreen} />` : r.tab === 'fans' ? html`<${FansScreen} />`
@@ -671,13 +659,13 @@ function App() {
   </div>`;
 }
 
-// the root entry: back from here leaves the app. ?tab=fans (&edit=<slot>|g,
+// the root entry: back from here leaves the app. ?tab=fans (&edit=<slot>,
 // &sheet; ?tab=power&edit=p) opens elsewhere — for the demo, and for a
 // bookmark straight to a tab
 const q = new URLSearchParams(location.search);
 const ed = q.get('edit');
 go({ tab: TABS.includes(q.get('tab')) ? q.get('tab') : 'power', editor: null, sheet: false }, true);
 // an editor or the sheet deep-linked sits on top of its tab, so back has somewhere to go
-if (ed !== null || q.has('sheet')) go({ editor: ed === null ? null : ed === 'g' || ed === 'p' ? ed : parseInt(ed, 10), sheet: q.has('sheet') });
+if (ed !== null || q.has('sheet')) go({ editor: ed === null ? null : ed === 'p' ? ed : parseInt(ed, 10), sheet: q.has('sheet') });
 B.boot();
 render(html`<${App} />`, document.getElementById('app'));

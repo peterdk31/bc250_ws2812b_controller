@@ -66,8 +66,7 @@ const SENSORS = 'a5f2000a-8f11-4e0e-9b3a-0bc250e0c001';
 const PWR    = 'a5f2000b-8f11-4e0e-9b3a-0bc250e0c001';
 const PWRCFG = 'a5f2000c-8f11-4e0e-9b3a-0bc250e0c001';
 export const OP_ON = 0x01, OP_SHUTDOWN = 0x02, OP_HARD_OFF = 0x03;
-export const OP_FAN_FALLBACK = 0x10; // + slot(1) percent(1)
-export const OP_FAN_SOURCE = 0x11;   // + slot(1) kind(1) gpio(1) npts(1) pts(2*npts)
+export const OP_FAN_HEADER = 0x10;   // + slot(1) + the header's record (SA_HEADER_LEN, encodeRecord)
 export const OP_PWR_TUNING = 0x20;   // + hold_ms(2) boot_ms(2) low_mv(2) high_mv(2)
 export const TOKEN_LEN = 16;
 export const DEFAULT_NAME = 'BC250'; // what the firmware advertises without a ble_remote.name
@@ -97,7 +96,7 @@ export const S = {
   pcfg: null,      // the daemon's power switch view (parsePwrCfg)
   sens: null,      // the sensor catalogue: [{ spec, chip, label, pwm, value }] (parseSensors)
   sensMore: 0,     // sensors the catalogue left out for size (its "_more")
-  saving: null,    // 'g', 'p' or a slot: a write waiting for its answer
+  saving: null,    // 'p' or a slot: a write waiting for its answer
   note: null,      // the one status line: { text, cls } — a save's progress, or a refusal
   demo: false,
 };
@@ -468,9 +467,13 @@ const KIND_BYTE = { fallback: 0, gpio: 1, host: 2 }; // protocol.hpp FAN_KIND_*
 // 2 adds the receiver's stored fallback(1), 3 the source kind(1) and input(1)
 const FANS_STRIDE = { 1: 2, 2: 3, 3: 5 };
 export const FANS_LEN = ver => 4 + CHANNELS * FANS_STRIDE[ver] + 4;
-// the standalone value: protocol.hpp CMD_FAN_STANDALONE's layout
-export const SA_V1_LEN = 1 + 2 * CHANNELS, SA_PER_HEADER = 3 + 2 * MAX_POINTS;
-export const SA_LEN = SA_V1_LEN + 1 + CHANNELS * SA_PER_HEADER;
+// the standalone value: protocol.hpp CMD_FAN_STANDALONE's layout — one record
+// per header (common/fanwire.hpp): fallback boost boost_secs ramp kind gpio npts pts[8][2]
+export const SA_HEADER_LEN = 7 + 2 * MAX_POINTS;
+export const SA_LEN = CHANNELS * SA_HEADER_LEN;
+// what a header runs when its config says nothing (protocol.hpp FAN_DEFAULT_*,
+// fans.hpp DEFAULT_HYSTERESIS): the daemon's JSON leaves a tuning out at its default
+export const DEFAULTS = { hyst: 3, ramp: 5, boostSecs: 5 };
 const SAVE_TIMEOUT_MS = 6000;
 const utf8 = new TextDecoder();
 const u32 = (dv, o) => dv.getUint32(o, true);
@@ -495,18 +498,30 @@ export function parseFans(dv) {
   return out;
 }
 
-// the receiver's standalone settings → { boostSecs, ramp, h[slot]: { fb, boost, kind, gpio, pts } }
+// one header's record → { fb, boost, boostSecs, ramp, kind, gpio, pts }
+function decodeRecord(dv, q) {
+  const k = dv.getUint8(q + 4), n = Math.min(MAX_POINTS, dv.getUint8(q + 6));
+  const pts = [];
+  if (k === KIND_BYTE.gpio) for (let j = 0; j < n; j++) pts.push({ x: dv.getUint8(q + 7 + 2 * j), y: dv.getUint8(q + 8 + 2 * j) });
+  return { fb: dv.getUint8(q), boost: dv.getUint8(q + 1), boostSecs: dv.getUint8(q + 2), ramp: dv.getUint8(q + 3),
+           kind: k === KIND_BYTE.fallback ? 'fallback' : k === KIND_BYTE.gpio ? 'gpio' : 'host', gpio: dv.getUint8(q + 5), pts };
+}
+// ...and a card's header → the record the receiver stores (the control op's argument)
+export function encodeRecord(h) {
+  const r = new Uint8Array(SA_HEADER_LEN);
+  const gpio = h.kind === 'gpio';
+  r.set([h.fallback, h.boost === NONE || h.boost === null || h.boost === undefined ? NONE : h.boost,
+         Math.round(h.boostSecs ?? DEFAULTS.boostSecs), Math.round(h.ramp ?? DEFAULTS.ramp),
+         KIND_BYTE[h.kind] ?? KIND_BYTE.host, gpio ? h.gpio : NONE, gpio ? h.pts.length : 0]);
+  if (gpio) h.pts.forEach((p, j) => r.set([p.x, p.y], 7 + 2 * j));
+  return r;
+}
+
+// the receiver's standalone settings → { h[slot]: decodeRecord }
 export function parseSa(dv) {
   if (dv.byteLength < SA_LEN) return null;
-  const out = { boostSecs: dv.getUint8(0), ramp: dv.getUint8(SA_V1_LEN), h: [] };
-  for (let i = 0; i < CHANNELS; i++) {
-    const q = SA_V1_LEN + 1 + i * SA_PER_HEADER, k = dv.getUint8(q), n = Math.min(MAX_POINTS, dv.getUint8(q + 2));
-    const pts = [];
-    if (k === KIND_BYTE.gpio) for (let j = 0; j < n; j++) pts.push({ x: dv.getUint8(q + 3 + 2 * j), y: dv.getUint8(q + 4 + 2 * j) });
-    out.h.push({ fb: dv.getUint8(1 + 2 * i), boost: dv.getUint8(2 + 2 * i),
-                 kind: k === KIND_BYTE.fallback ? 'fallback' : k === KIND_BYTE.gpio ? 'gpio' : 'host',
-                 gpio: dv.getUint8(q + 1), pts });
-  }
+  const out = { h: [] };
+  for (let i = 0; i < CHANNELS; i++) out.h.push(decodeRecord(dv, i * SA_HEADER_LEN));
   return out;
 }
 
@@ -521,7 +536,8 @@ export function cardHeader(slot) {
   const f = S.fans && S.fans.h[slot], s = S.sa && S.sa.h[slot];
   if (!f || !f.wired || !s) return null;
   return { name: `header${slot + 1}`, kind: s.kind, src: s.kind === 'gpio' ? `gpio:${s.gpio}` : s.kind,
-           gpio: s.gpio, spec: '', pts: s.pts.map(p => ({ ...p })), boost: s.boost,
+           gpio: s.gpio, spec: '', pts: s.pts.map(p => ({ ...p })), boost: s.boost, boostSecs: s.boostSecs,
+           ramp: s.ramp, hyst: DEFAULTS.hyst,
            fallback: f.fb !== null && f.fb !== NONE ? f.fb : (s.fb !== NONE ? s.fb : null), route: 'receiver' };
 }
 
@@ -588,24 +604,31 @@ export function parseCurve(text) {
 }
 export const curveText = pts => pts.map(p => `${p.x}:${p.y}`).join(' ');
 
-// the daemon's config JSON -> { editable, hyst, ramp, boostSecs, h[slot] }
+// the daemon's config JSON -> { editable, h[slot] }; a header's tunings
+// (h/r/t) are absent at their defaults or where they don't apply
 export function parseCfg(text) {
   let j;
   try { j = JSON.parse(text); } catch { return null; }
   if (!j || typeof j !== 'object') return null;
-  const c = { editable: !!j.editable, hyst: +j.hysteresis || 0, ramp: +j.ramp || 0,
-              boostSecs: +j.boost_seconds || 0, h: [] };
+  const c = { editable: !!j.editable, h: [] };
   for (let i = 0; i < CHANNELS; i++) {
     const h = j['header' + (i + 1)];
     if (!h) { c.h.push(null); continue; }
     const s = srcInfo(h.s);
-    const pts = s.kind === 'fallback' ? [] : parseCurve(h.c); // an older daemon wrote a constant's value as the curve
+    const pts = s.kind === 'fallback' ? [] : parseCurve(h.c);
     c.h.push({ name: String(h.n || ''), ...s, pts,
                boost: h.b === null || h.b === undefined ? NONE : +h.b,
-               fallback: h.f === undefined ? null : +h.f });
+               fallback: h.f === undefined ? null : +h.f,
+               hyst: h.h === undefined ? DEFAULTS.hyst : +h.h, ramp: h.r === undefined ? DEFAULTS.ramp : +h.r,
+               boostSecs: h.t === undefined ? DEFAULTS.boostSecs : +h.t });
   }
   return c;
 }
+// which tunings a header has (fans.hpp TUNINGS): the editor shows these, the
+// daemon refuses the others
+export const hasHyst = h => isTempX(h);                 // a temperature source
+export const hasRamp = h => !isFixed(h);                // a source with a curve
+export const hasBoostSecs = h => h.boost !== NONE;     // a header with a boost
 
 // the daemon's telemetry JSON -> { temp, cpu, gpu, h[slot]: { in, duty } }
 export function parseTelem(text) {
@@ -845,6 +868,9 @@ export function checkEdit(h) {
     }
   }
   if (h.boost !== NONE && !(h.boost >= 0 && h.boost <= 100)) return 'boost must be 0–100 % or blank';
+  if (hasHyst(h) && !(h.hyst >= 0)) return 'hysteresis is 0 °C or more';
+  if (hasRamp(h) && !(h.ramp >= 0 && h.ramp <= 255)) return 'the ramp is 0–255 % per second';
+  if (hasBoostSecs(h) && !(Number.isInteger(h.boostSecs) && h.boostSecs >= 0 && h.boostSecs <= 255)) return 'the boost runs 0–255 whole seconds';
   if (h.fallback !== null && h.fallback !== undefined && !(h.fallback >= 0 && h.fallback <= 100)) return 'the fallback speed is 0–100 %';
   return '';
 }
@@ -878,19 +904,15 @@ export async function writeCfg(key, edit, chr = S.cfgChr) {
   }
 }
 
-// a standalone header's edit: the control ops straight to the receiver,
+// a standalone header's edit: its whole record straight to the receiver,
 // which validates the pin and the curve itself (a refusal comes back as a
 // write error) and echoes the stored value on the standalone characteristic
-async function writeSource(slot, h, before) {
+async function writeRecord(slot, h) {
   if (!S.ctrl || S.saving !== null) return;
-  const kind = KIND_BYTE[h.kind] ?? KIND_BYTE.host;
-  const pts = h.kind === 'gpio' ? h.pts.flatMap(p => [p.x, p.y]) : [];
   S.saving = slot;
   note('saving…');
   try {
-    if (h.fallback !== null && h.fallback !== undefined && h.fallback !== before.fallback)
-      await writeOp(OP_FAN_FALLBACK, slot, h.fallback);
-    await writeOp(OP_FAN_SOURCE, slot, kind, h.kind === 'gpio' ? h.gpio : NONE, pts.length / 2, ...pts);
+    await writeOp(OP_FAN_HEADER, slot, ...encodeRecord(h));
     if (!S.saChr) { S.saving = null; note('saved', 'ok'); onSaved?.(slot); return; }
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
@@ -900,7 +922,7 @@ async function writeSource(slot, h, before) {
     }, SAVE_TIMEOUT_MS);
   } catch {
     S.saving = null;
-    note('refused by the receiver — a pin it can’t read on, or a bad curve', 'err'); // writeOp said more
+    note('refused by the receiver — a pin it can’t read on, a bad curve, or a value out of range', 'err'); // writeOp said more
   }
 }
 
@@ -909,18 +931,18 @@ export function saveHeader(slot, h) {
   h.pts.sort((a, b) => a.x - b.x);
   const bad = checkEdit(h);
   if (bad) { note(bad, 'err'); return; }
-  const before = cardHeader(slot) || {};
-  if (h.route !== 'daemon') { writeSource(slot, h, before); return; }
+  if (h.route !== 'daemon') { writeRecord(slot, h); return; }
   if (!S.cfg) return;
+  const before = cardHeader(slot) || {};
   const e = { s: srcText(h), b: h.boost === NONE ? null : h.boost, n: h.name.trim() };
   if (!isFixed(h)) e.c = curveText(h.pts);
   if (h.fallback !== null && h.fallback !== undefined) e.f = h.fallback;
+  // a tuning travels when it applies to the header as saved and moved (the
+  // daemon refuses one that doesn't apply, so an old value stays home)
+  if (hasHyst(h) && h.hyst !== before.hyst) e.h = h.hyst;
+  if (hasRamp(h) && h.ramp !== before.ramp) e.r = h.ramp;
+  if (hasBoostSecs(h) && h.boostSecs !== before.boostSecs) e.t = h.boostSecs;
   writeCfg(slot, { ['header' + (slot + 1)]: e });
-}
-
-export function saveGlobals(g) {
-  if (!S.cfg) return;
-  writeCfg('g', { hysteresis: g.hyst, ramp: g.ramp, boost_seconds: g.boostSecs });
 }
 
 // ---- power switch edits ----
@@ -1093,10 +1115,10 @@ document.addEventListener('visibilitychange', () => {
 // is the same board with the host off.
 export function demo() {
   S.demo = true;
-  S.cfg = parseCfg(JSON.stringify({ editable: true, hysteresis: 3, ramp: 5, boost_seconds: 5,
+  S.cfg = parseCfg(JSON.stringify({ editable: true,
     header1: { n: 'pump', s: 'fallback', b: 100, f: 65 },
     header2: { n: 'radiator', s: 'temp', c: '45:35 60:55 75:100', b: null, f: 100 },
-    header3: { n: 'exhaust', s: 'gpio:0', c: '0:25 100:80', b: null, f: 100 },
+    header3: { n: 'exhaust', s: 'gpio:0', c: '0:25 100:80', b: null, f: 100, r: 0 },
     header4: { n: 'intake', s: 'gpu_load', c: '0:20 40:20 100:60', b: null, f: 60 } }));
   S.scfg = parseStripCfg(JSON.stringify({ editable: true, leds: 33, pin: 4, reverse: false, brightness: 1,
     gamma: '2.2', white_balance: 'ffb0f0', scenes: [
@@ -1110,15 +1132,10 @@ export function demo() {
   // pushes them (header6 is wired but not in the daemon's config — dropped
   // from the file after flashing — and was dialled from the phone)
   const saBytes = new Uint8Array(SA_LEN);
-  saBytes[0] = 5; saBytes[SA_V1_LEN] = 5;
-  [[65, 100, 'fallback', NONE, []], [100, NONE, 'host', NONE, []], [100, NONE, 'gpio', 0, [[0, 25], [100, 80]]],
-   [60, NONE, 'host', NONE, []], [NONE, NONE, 'host', NONE, []], [40, NONE, 'gpio', 20, [[0, 30], [100, 100]]]]
-    .forEach(([fb, b, k, g, pts], i) => {
-      saBytes[1 + 2 * i] = fb; saBytes[2 + 2 * i] = b;
-      const q = SA_V1_LEN + 1 + i * SA_PER_HEADER;
-      saBytes[q] = KIND_BYTE[k]; saBytes[q + 1] = g; saBytes[q + 2] = pts.length;
-      pts.forEach(([x, y], j) => { saBytes[q + 3 + 2 * j] = x; saBytes[q + 4 + 2 * j] = y; });
-    });
+  [[65, 100, 'fallback', NONE, [], 5], [100, NONE, 'host', NONE, [], 5], [100, NONE, 'gpio', 0, [[0, 25], [100, 80]], 0],
+   [60, NONE, 'host', NONE, [], 5], [NONE, NONE, 'host', NONE, [], 5], [40, NONE, 'gpio', 20, [[0, 30], [100, 100]], 5]]
+    .forEach(([fb, b, k, g, pts, ramp], i) =>
+      saBytes.set(encodeRecord({ fallback: fb, boost: b, boostSecs: 5, ramp, kind: k, gpio: g, pts: pts.map(([x, y]) => ({ x, y })) }), i * SA_HEADER_LEN));
   S.sa = parseSa(new DataView(saBytes.buffer));
   const f = new Uint8Array(FANS_LEN(3)), dv = new DataView(f.buffer);
   f[0] = 3; f[1] = 0x01 | 0x08 | 0x10 | 0x20; f[2] = 2; f[3] = 1;
@@ -1174,33 +1191,29 @@ export function demo() {
       if (v[0] < 100 || v[1] < 1000 || v[2] >= v[3]) throw new Error('GATT operation failed'); // what the receiver refuses
       setPwr(...v); S.pwr = parsePwr(pdv); return;
     }
-    if (op === OP_FAN_FALLBACK) {
-      h.fb = st.fb = buf[TOKEN_LEN + 2];
-      if (h.src === 1) h.duty = h.fb;
-    } else if (op === OP_FAN_SOURCE) {
-      const kind = buf[TOKEN_LEN + 2], gpio = buf[TOKEN_LEN + 3], n = buf[TOKEN_LEN + 4];
-      if (kind === KIND_BYTE.gpio && (gpio === 4 || gpio === 9 || gpio > 21)) throw new Error('GATT operation failed'); // a pin the receiver refuses
-      st.kind = kind === KIND_BYTE.gpio ? 'gpio' : 'fallback'; st.gpio = gpio; st.pts = [];
-      for (let j = 0; j < n; j++) st.pts.push({ x: buf[TOKEN_LEN + 5 + 2 * j], y: buf[TOKEN_LEN + 6 + 2 * j] });
-      h.kind = kind;
-      if (st.kind === 'gpio') { h.in = 50; h.src = 4; h.duty = Math.round(st.pts.length ? st.pts[0].y : 50); }
+    if (op === OP_FAN_HEADER) {
+      const rec = buf.subarray(TOKEN_LEN + 2, TOKEN_LEN + 2 + SA_HEADER_LEN), r = decodeRecord(new DataView(rec.buffer, rec.byteOffset), 0);
+      if (r.kind === 'gpio' && (r.gpio === 4 || r.gpio === 9 || r.gpio > 21)) throw new Error('GATT operation failed'); // a pin the receiver refuses
+      Object.assign(st, r);
+      h.fb = r.fb; h.kind = KIND_BYTE[r.kind];
+      if (r.kind === 'gpio') { h.in = 50; h.src = 4; h.duty = Math.round(r.pts.length ? r.pts[0].y : 50); }
       else { h.in = NONE; h.src = 1; h.duty = h.fb; }
-      const q = SA_V1_LEN + 1 + slot * SA_PER_HEADER; // the stored value, as the receiver would echo it
-      saBytes.fill(0, q, q + SA_PER_HEADER);
-      saBytes[q] = kind; saBytes[q + 1] = gpio; saBytes[q + 2] = n;
-      saBytes.set(buf.subarray(TOKEN_LEN + 5, TOKEN_LEN + 5 + 2 * n), q + 3);
-      saBytes[1 + 2 * slot] = st.fb;
+      saBytes.set(rec, slot * SA_HEADER_LEN); // the stored value, as the receiver would echo it
       setTimeout(() => onSa(new DataView(saBytes.buffer)), 400);
     } } };
   S.cfgChr = { writeValueWithResponse: async buf => {
     // merge the partial edit the way the daemon would
     const edit = JSON.parse(utf8.decode(buf.subarray(TOKEN_LEN)));
-    const cur = S.cfg, out = { editable: true, hysteresis: edit.hysteresis ?? cur.hyst, ramp: edit.ramp ?? cur.ramp,
-                               boost_seconds: edit.boost_seconds ?? cur.boostSecs };
+    const cur = S.cfg, out = { editable: true };
     cur.h.forEach((h, i) => { if (!h) return; const k = 'header' + (i + 1), e = edit[k] || {};
       const s = srcInfo(e.s ?? h.src);
       out[k] = { n: e.n ?? h.name, s: s.src, b: 'b' in e ? e.b : (h.boost === NONE ? null : h.boost), f: e.f ?? h.fallback };
-      if (s.kind !== 'fallback') out[k].c = e.c ?? curveText(h.pts); });
+      if (s.kind !== 'fallback') out[k].c = e.c ?? curveText(h.pts);
+      // the tunings, as the daemon sends them: where they apply and off their default
+      const t = { hyst: e.h ?? h.hyst, ramp: e.r ?? h.ramp, boostSecs: e.t ?? h.boostSecs }, n = { ...h, ...s, boost: out[k].b === null ? NONE : out[k].b };
+      if (hasHyst(n) && t.hyst !== DEFAULTS.hyst) out[k].h = t.hyst;
+      if (hasRamp(n) && t.ramp !== DEFAULTS.ramp) out[k].r = t.ramp;
+      if (hasBoostSecs(n) && t.boostSecs !== DEFAULTS.boostSecs) out[k].t = t.boostSecs; });
     // ...and push the standalone values to the receiver, as the daemon does
     cur.h.forEach((h, i) => { const e = edit['header' + (i + 1)]; const f = S.fans.h[i];
       if (e && 'f' in e && f.wired) { f.fb = e.f; if (f.src === 1) f.duty = e.f; } });

@@ -232,12 +232,9 @@ running — the second half the host's rendering:
         "token": ""                 // 8-16 chars; readable by anyone with a shell here
     },
     "fans": {                   // the PWM fan headers, see Fans — one block per
-        "hysteresis": 3,        // header, all with the same keys
-        "ramp": 5,
-        "boost_seconds": 5,
-        "header1": { "name": "pump", "source": "fallback",
-                     "boost": 100, "fallback": 65 },
-        "header2": { ... }
+        "header1": { "name": "pump", "source": "fallback",   // header, all with the
+                     "boost": 100, "fallback": 65 },        // same keys; every
+        "header2": { ... }                                  // tuning is the header's own
     },
 
     "strip": {
@@ -835,26 +832,27 @@ labelled FAN1–FAN4; elsewhere, see the wiring table below.
 
 Everything about the fans is the config's `fans` block. Each header gets one
 entry with a `name`, a `source`, a `boost` and a `fallback`, plus a `curve`
-for every source but `fallback`; a header listed here is driven — its curve
-runs, its output is wired at flash time. Delete a header's block to take it
-out of service (and reflash fancfg, since that is wiring).
+for every source but `fallback`, and optionally its tunings — `hysteresis`,
+`ramp`, `boost_seconds`; a header listed here is driven — its curve runs, its
+output is wired at flash time. Delete a header's block to take it out of
+service (and reflash fancfg, since that is wiring). There is nothing global
+in the block: every setting belongs to one header.
 
 ```jsonc
 "fans": {
-    "hysteresis": 3,       // a temperature source must fall this many °C before a fan slows (default 3)
-    "ramp": 5,             // max percent per second on the way down; speed-ups are immediate (default 5, 0 = instant)
-    "boost_seconds": 5,    // how long a header with a `boost` runs it after the host powers on
-
     "header1": {
         "name": "pump",             // log lines and the phone's card
         "source": "fallback",       // fixed speed: the header runs its fallback, always — no curve.
-        "boost": 100,               //   AIO pumps want a steady 100 (70-80 for quiet)
-        "fallback": 65              // duty for the first `boost_seconds` after power-on, or null for
-    },                              //   no boost; what the receiver runs whenever nothing else drives the header
+        "boost": 100,               //   AIO pumps want a steady 100 (70-80 for quiet): the duty for the
+        "boost_seconds": 5,         //   first boost_seconds after power-on (null = no boost; default 5 s)
+        "fallback": 65              // what the receiver runs whenever nothing else drives the header
+    },
     "header2": {
         "name": "radiator",
         "source": "temp",           // the top-level `sensors` pick, in °C
         "curve": "45:35 60:55 75:100",   // source:percent points, linear between, flat beyond the ends
+        "hysteresis": 3,            // the temperature must fall this many °C before the fan slows (default 3)
+        "ramp": 5,                  // max percent per second on the way down; speed-ups are immediate (default 5)
         "boost": null,
         "fallback": 100
     },
@@ -862,7 +860,8 @@ out of service (and reflash fancfg, since that is wiring).
         "name": "exhaust",
         "source": "gpio:0",         // the BC-250's own fan header's PWM wire, on receiver GPIO0: the
         "curve": "0:25 100:80",     //   RECEIVER reads it and runs this curve — daemon or no daemon.
-        "boost": null,              //   floor of 25, scaled to 80 % of what the board asks for
+        "ramp": 0,                  //   floor of 25, scaled to 80 % of what the board asks for; the
+        "boost": null,              //   board's firmware already smooths its output, so no ramp on top
         "fallback": 100
     },
     "header4": {
@@ -906,8 +905,8 @@ those two, never the header's +12 V, which would parallel the board's fan
 rail with the PSU's. The receiver reads the pin with its internal pull-up (a
 PC fan header drives its PWM open-drain, so the level is the receiver's own
 3.3 V; a push-pull 5 V driver needs a series resistor — check with a meter),
-samples the duty four times a second, and runs the curve with the same
-`ramp` the daemon uses. Unplugged, the pin reads high — 100 %, the fan
+samples the duty four times a second, and runs the curve with the header's
+own `ramp`. Unplugged, the pin reads high — 100 %, the fan
 spec's own answer to a missing signal. On the carrier board the free pins
 are GPIO0, 20 and 21 on J11 (each with a GND beside it; 20 and 21 are also
 the J5 UART candidates), and `make flash` refuses anything else: a listed
@@ -950,8 +949,9 @@ powers on" means *its* power-on event — the button press asserting PS_ON# —
 confirmed by the sense wire reading the rail up, so a reset of the receiver
 itself (a crash, a reflash, a daemon reconnect) never re-fires the boost.
 Without the power switch, USB host presence stands in (debounced 3 s so a bus
-reset doesn't re-fire it), else the boost fires once at receiver boot.
-`boost_seconds: 0` disables boosting altogether.
+reset doesn't re-fire it), else the boost fires once at receiver boot. Each
+header's window is its own `boost_seconds` long; `boost: null` (or
+`boost_seconds: 0`) sits it out.
 
 **The fallback is a slider on the phone**, on every header's card, and the
 **source is a picker** in the card's editor; both write to wherever the value
@@ -973,10 +973,19 @@ in its block over whatever the receiver held — so a value dialled standalone
 lasts exactly until then, and the phone writes into the file whenever a
 daemon is there.
 
-**`hysteresis`** and **`ramp`** are global, because they exist to stop hunting
-and apply the same way to every fan. Hysteresis applies to temperature sources
-only; a fallback ignores both; the receiver rounds `ramp` to whole percent
-per second for its own curves.
+**`hysteresis`**, **`ramp`** and **`boost_seconds`** are each header's own,
+with a default where the header says nothing (3 °C, 5 %/s, 5 s). They used to
+be one setting for every fan, which stopped fitting once headers could follow
+different kinds of source: a board header mirrored over `gpio:N` or
+`chip:pwmN` is already smoothed by the board's firmware and wants `ramp: 0`,
+while the temperature curve next to it wants the ramp — so each says for
+itself. Each applies to some headers only and is refused on the rest, so a
+key that would silently do nothing is a startup error instead: `hysteresis`
+to a temperature source (`temp`, `chip:label`, `pmbus:`, `file:`), `ramp` to
+any source with a curve, `boost_seconds` to a header with a `boost`. The
+receiver runs `ramp` and `boost_seconds` itself (rounded to whole units);
+`hysteresis` is the daemon's, since only its curves read a temperature. The
+old top-level keys are refused with a line saying where they went.
 
 **There is no enable switch.** A header in the block is driven; one that
 isn't gets no pin at flash time, so the receiver never touches that output.
@@ -1042,9 +1051,9 @@ should you prefer that service's reads to the daemon's own.
 Two consumers read the same block:
 
 - **`make flash` / `make flash-source`** bake the standalone part — which
-  headers there are, their pins, `fallback`, `boost`, `boost_seconds`,
-  `ramp`, each header's source kind and a `gpio` header's pin and curve —
-  into the receiver's `fancfg` flash partition, exactly as `strip.pin` is
+  headers there are, their pins, and per header `fallback`, `boost`,
+  `boost_seconds`, `ramp`, the source kind and a `gpio` header's pin and
+  curve — into the receiver's `fancfg` flash partition, exactly as `strip.pin` is
   baked. So a box that never runs the daemon is configured by editing the
   block and running `sudo make flash-fan` (the fancfg partition alone, a couple
   of seconds); its fans run their `fallback` duties and their gpio curves,
@@ -1075,7 +1084,7 @@ the config.
 ### Editing curves from the phone
 
 With the BLE remote on, the web page shows every header live and lets you
-redraw its curve, pick its source, set boost and fallback, and change
+redraw its curve, pick its source, set boost and fallback, and change its
 hysteresis, ramp and boost length — see the dashboard under
 [BLE remote](#ble-remote). An edit
 travels phone → receiver → daemon, which validates it exactly as it validates
@@ -1127,8 +1136,8 @@ firmware has no console and a bad pin just looks like a fan that never spins.
 
 Two guardrails, mirroring the power switch's:
 
-- **The chip must run a firmware that reads this block's layout** (the `FAN3`
-  fancfg, from the gpio sources on; `FAN2` and `FAN1` blobs are still read) **and whose partition table has the `fancfg`
+- **The chip must run a firmware that reads this block's layout** (the `FAN4`
+  fancfg, from the per-header tunings on; older blobs are not read) **and whose partition table has the `fancfg`
   entry** (v1.13.0 or newer). `make flash-fan` against an older layout writes
   a sector that firmware never reads — a silent no-op, except the receiver's
   debug log says `no fancfg partition` at boot — and a firmware that knows
@@ -1229,10 +1238,11 @@ temperature (the top-level `sensors` pick), CPU load and GPU load.
 - **Fans** — one row per header: its name, what it follows and that
   source's current reading (`CPU temperature · 58.3 °C`, `PWM input on
   GPIO0 · 65 %`), and the duty the receiver is actually applying. A chip
-  appears only when the header is *not* doing what it is set up to do:
-  `boost` for the power-on boost, `fallback` when nothing is driving it (the
-  machine off, the daemon not yet up), `hold` while the machine powers
-  down. Tapping a row shows its curve with the operating point marked; the
+  appears only when the header is *not* doing what it is set up to do, and
+  the row then says what it runs instead: `boost` for the power-on boost,
+  `fallback` when nothing is driving it (the host off, the daemon not yet
+  up), `hold` while the host powers down and the last live speed is kept.
+  Tapping a row shows its curve with the operating point marked; the
   cog opens the header's editor: name, **Follows** (every kind in the
   [Fans](#fans) table, each with its live reading beside it so the pick is
   made on the numbers — then every labelled hwmon temperature and every
@@ -1243,7 +1253,9 @@ temperature (the top-level `sensors` pick), CPU load and GPU load.
   with more sensors than fit loses pwm outputs first, then temperatures
   from the end, never one a header follows, and the row says how many are
   missing; a pin list for `gpio`), the curve (drag the points or type them; add and remove up
-  to eight), the **fallback speed** and the power-on **boost**. **Save**
+  to eight) with its **ramp** and, for a temperature source, its
+  **hysteresis**, the **fallback speed** and the power-on **boost** with its
+  length. **Save**
   sends just that header's change and the row says `saved` only when the
   daemon has applied it, written it into the config and pushed the config
   back — see [Editing curves from the phone](#editing-curves-from-the-phone).
@@ -1251,9 +1263,7 @@ temperature (the top-level `sensors` pick), CPU load and GPU load.
   its row. With no daemon at all the rows come from the receiver's own
   stored settings: Follows then offers `fallback` and `gpio` — the two
   sources a receiver runs alone — and Save stores the header on the receiver
-  until a daemon next connects and the config wins again. **Fan behaviour**
-  at the bottom edits hysteresis, ramp-down rate and boost length the same
-  way.
+  until a daemon next connects and the config wins again.
 - **LEDs** — the config's `strip` block, no Save: a slider applies on
   release, a switch on the tap — the daemon corrects the live strip on its
   next frame and writes the value into the config, and the card says

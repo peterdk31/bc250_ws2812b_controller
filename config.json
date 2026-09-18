@@ -61,19 +61,19 @@
         "token": ""
     },
     "fans": {
-        "hysteresis": 3,
-        "ramp": 5,
-        "boost_seconds": 5,
         "header1": {
             "name": "pump",
             "source": "fallback",
             "boost": 100,
+            "boost_seconds": 5,
             "fallback": 65
         },
         "header2": {
             "name": "radiator",
             "source": "temp",
             "curve": "45:35 60:55 75:100",
+            "hysteresis": 3,
+            "ramp": 5,
             "boost": null,
             "fallback": 100
         },
@@ -81,6 +81,7 @@
             "name": "exhaust",
             "source": "gpio:0",
             "curve": "0:25 100:80",
+            "ramp": 0,
             "boost": null,
             "fallback": 100
         },

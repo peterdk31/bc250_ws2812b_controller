@@ -145,34 +145,38 @@ static const uint8_t FAN_CHANNELS = 6;
 static const uint8_t FAN_NONE = 0xFF;
 
 // CMD_FAN_STANDALONE: everything the receiver runs on its own — before the
-// daemon is up, after it dies, on a daemon-less box. Payload
-// (FAN_STANDALONE_LEN bytes), in two parts so an older receiver still reads
-// the first:
+// daemon is up, after it dies, on a daemon-less box. Payload: FAN_CHANNELS
+// records of FAN_HEADER_LEN bytes, header1 first (FAN_STANDALONE_LEN in all;
+// common/fanwire.hpp is the codec both ends use):
 //
-//     boost_secs(1), then per header fallback(1) boost(1)      (13 bytes)
-//     ramp(1), then per header kind(1) gpio(1) npts(1) pts[FAN_CURVE_POINTS][2]
+//     fallback(1) boost(1) boost_secs(1) ramp(1) kind(1) gpio(1) npts(1) pts[FAN_CURVE_POINTS][2]
 //
 // fallback is the resting duty percent (FAN_NONE = this header is not the
 // daemon's, leave every field of it alone); boost the duty the header runs
-// for boost_secs after the host powers on (FAN_NONE = sits the boost out).
-// kind says what the header's source is (FAN_KIND_*): a FALLBACK header
-// just runs its fallback; a GPIO header is one whose curve the RECEIVER
-// evaluates, reading a PWM signal's duty on GPIO `gpio` — the points are
-// (input percent, duty percent) pairs, npts of them, sorted by x — and it
-// keeps doing so with no daemon at all; a HOST header's curve is the daemon's
-// (a temperature, a load, a hwmon pwm) and the receiver runs the fallback
-// until CMD_FAN_LIVE says otherwise. ramp is the receiver's slow-down rate in
-// whole percent per second (0 = instant), the config's `ramp` rounded. The
-// receiver persists all of it in NVS, so it applies on daemon-less boots too;
-// the daemon sends it once at startup and again when an edit moves it.
+// for boost_secs after the host powers on (FAN_NONE = sits the boost out);
+// ramp its slow-down rate in whole percent per second (0 = instant), which
+// the receiver applies to its own curve. kind says what the header's source
+// is (FAN_KIND_*): a FALLBACK header just runs its fallback; a GPIO header is
+// one whose curve the RECEIVER evaluates, reading a PWM signal's duty on GPIO
+// `gpio` — the points are (input percent, duty percent) pairs, npts of them,
+// sorted by x — and it keeps doing so with no daemon at all; a HOST header's
+// curve is the daemon's (a temperature, a load, a hwmon pwm) and the
+// receiver runs the fallback until CMD_FAN_LIVE says otherwise. Every
+// tuning is the header's own — there is nothing global. The receiver
+// persists all of it in NVS, so it applies on daemon-less boots too; the
+// daemon sends it once at startup and again when an edit moves it. The same
+// record, for one header, is the BLE control op 0x10's argument.
 static const uint8_t CMD_FAN_STANDALONE = 0x08;
 static const uint8_t FAN_KIND_FALLBACK = 0;
 static const uint8_t FAN_KIND_GPIO = 1;
 static const uint8_t FAN_KIND_HOST = 2;
 static const uint8_t FAN_CURVE_POINTS = 8; // = fancurve::MAX_POINTS
-static const uint16_t FAN_STANDALONE_V1_LEN = 1 + 2 * FAN_CHANNELS;
-static const uint16_t FAN_STANDALONE_LEN =
-    FAN_STANDALONE_V1_LEN + 1 + FAN_CHANNELS * (3 + 2 * FAN_CURVE_POINTS);
+static const uint16_t FAN_HEADER_LEN = 7 + 2 * FAN_CURVE_POINTS;
+static const uint16_t FAN_STANDALONE_LEN = FAN_CHANNELS * FAN_HEADER_LEN;
+// what a header runs when its config says nothing (the daemon's, the
+// flasher's and the phone's defaults, so the three never disagree)
+static const uint8_t FAN_DEFAULT_RAMP = 5;       // percent per second
+static const uint8_t FAN_DEFAULT_BOOST_SECS = 5;
 
 // CMD_FAN_LIVE: the duties the daemon's curves want right now. Payload:
 // FAN_CHANNELS duty percents (FAN_NONE = not driven — a fallback or gpio
@@ -198,11 +202,11 @@ static const uint8_t CMD_FAN_LIVE = 0x09;
 // All three payloads below are JSON text (UTF-8, no NUL), in the shape
 // daemon/fans.hpp documents; the receiver never parses them.
 
-// CMD_FAN_CONFIG: the fan config as the daemon runs it — per header
-// its name, source, curve, boost and fallback, plus hysteresis, ramp,
-// boost_seconds and whether edits are accepted (the config file is writable).
-// At most 512 bytes (a GATT
-// attribute's ceiling; the daemon refuses to send a larger one and says so).
+// CMD_FAN_CONFIG: the fan config as the daemon runs it — per header its
+// name, source, curve, boost and fallback and its tunings (hysteresis, ramp,
+// boost length), plus whether edits are accepted (the config file is
+// writable). At most 512 bytes (a GATT attribute's ceiling; the daemon
+// refuses to send a larger one and says so).
 // Sent once at startup after CMD_FAN_STANDALONE and again whenever it changes
 // (a phone edit was applied), which is also how a MSG_FAN_CONFIG gets its
 // answer: the receiver notifies the phone with the new truth. Unknown to older
@@ -265,8 +269,8 @@ static const uint16_t PWR_TUNING_LEN = 8;
 static const uint8_t CMD_PWR_CONFIG = 0x0F;
 
 // MSG_FAN_CONFIG (msg frame): a phone's edit — a partial object of the same
-// shape holding only what changed (one header's source/curve/boost/fallback/
-// name, or the three globals). The daemon validates it exactly as it
+// shape holding only what changed (one header's source, curve, boost,
+// fallback, name or tunings). The daemon validates it exactly as it
 // validates the config, applies it live, writes it into its config file's
 // fans block (README "Fans"), and answers with CMD_FAN_CONFIG. An invalid or
 // read-only edit is dropped with a journal line; the phone's timeout on the

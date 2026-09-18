@@ -41,23 +41,22 @@
 //                           0x01 = power on, 0x02 = graceful shutdown, 0x03 =
 //                           hard off (release PS_ON#: the remote form of
 //                           holding the button, for a crashed machine) — no
-//                           args. op 0x10 = set a fan header's fallback duty,
-//                           args slot(1) percent(1): the receiver's own
-//                           resting duty for that header (the fans layout's
-//                           position, 0-based), applied and persisted by the
+//                           args. op 0x10 = set a fan header's standalone
+//                           record, args slot(1) (the fans layout's
+//                           position, 0-based) then the header's record in
+//                           CMD_FAN_STANDALONE's per-header layout
+//                           (protocol.hpp FAN_HEADER_LEN bytes): its
+//                           resting duty, boost and boost length, ramp,
+//                           and source — FAN_KIND_FALLBACK (the header runs
+//                           its fallback), FAN_KIND_GPIO with the input pin
+//                           and the (input %, duty %) curve this board runs
+//                           itself, or FAN_KIND_HOST (the fallback until a
+//                           daemon drives it). Applied and persisted by the
 //                           fan module without any daemon — what makes this
 //                           board a fan controller on its own. Rejected
-//                           (VALUE_ERR) for a slot that isn't wired. op 0x11
-//                           = set a fan header's source, args slot(1)
-//                           kind(1) gpio(1) npts(1) pts(2*npts): kind is
-//                           protocol.hpp FAN_KIND_FALLBACK (the header runs
-//                           its fallback) or FAN_KIND_GPIO (this board
-//                           samples the PWM on GPIO `gpio` and runs the
-//                           (input %, duty %) curve itself) — the two
-//                           sources a receiver runs with no daemon; a host
-//                           source, a bad curve or a pin this board can't
-//                           read on is rejected (VALUE_ERR, reason in the
-//                           debug log). Persisted like op 0x10. op 0x20 =
+//                           (VALUE_ERR, reason in the debug log) for a slot
+//                           that isn't wired, a value out of range, a bad
+//                           curve or a pin this board can't read on. op 0x20 =
 //                           set the power switch's tunings, args the eight
 //                           bytes of proto::CMD_PWR_TUNING (hold ms, boot
 //                           timeout ms, sense low/high mV, LE u16s): applied
@@ -95,12 +94,12 @@
 //                           daemon's answering CMD_FAN_CONFIG notifies the
 //                           new value.
 //   fansa (read + notify):  this board's standalone fan settings as stored —
-//                           CMD_FAN_STANDALONE's layout (protocol.hpp): per
-//                           header fallback, boost, source kind, and a gpio
-//                           header's pin and curve, plus boost length and
-//                           ramp. What the page shows and edits with no
-//                           daemon around (ops 0x10/0x11 write it); notified
-//                           when it changes.
+//                           CMD_FAN_STANDALONE's layout (protocol.hpp): one
+//                           record per header with its fallback, boost and
+//                           boost length, ramp, source kind, and a gpio
+//                           header's pin and curve. What the page shows and
+//                           edits with no daemon around (op 0x10 writes one
+//                           header's record); notified when it changes.
 //   stripcfg (read + write + notify):
 //                           the same for the strip: the last CMD_STRIP_CONFIG
 //                           (brightness, gamma, white balance, the file: rule
@@ -187,10 +186,9 @@ static const ble_uuid128_t PWRCFG_UUID = BC250_UUID(0x0c);
 static const uint8_t OP_POWER_ON = 0x01;
 static const uint8_t OP_SHUTDOWN = 0x02;
 static const uint8_t OP_HARD_OFF = 0x03;
-static const uint8_t OP_FAN_FALLBACK = 0x10; // + slot(1) percent(1)
-static const uint8_t OP_FAN_SOURCE = 0x11;   // + slot(1) kind(1) gpio(1) npts(1) pts(2*npts)
-static const uint8_t OP_PWR_TUNING = 0x20;   // + the CMD_PWR_TUNING payload (8)
-static const uint16_t OP_FAN_SOURCE_MAX = 4 + 2 * proto::FAN_CURVE_POINTS; // the longest args
+static const uint8_t OP_FAN_HEADER = 0x10; // + slot(1) + one header's record (FAN_HEADER_LEN)
+static const uint8_t OP_PWR_TUNING = 0x20; // + the CMD_PWR_TUNING payload (8)
+static const uint16_t OP_FAN_HEADER_ARGS = 1 + proto::FAN_HEADER_LEN; // the longest args
 
 // dashboard cadence: the fans and pwr values are notified this often while
 // subscribed (the daemon's telemetry moves on its 0.5 s tick, the fan task's
@@ -329,8 +327,8 @@ static bool g_watching = false;    // the daemon has been told a phone watches
 //   per header ×6: state(1) duty(1) fallback(1) kind(1) in(1)
 //     state: bit0 wired, bits1-3 source (fan::SRC_*)
 //     duty: the duty this board applies (0xFF unwired)
-//     fallback: the resting duty in force — the control op 0x10 sets it, so
-//               the page's slider shows what is stored (0xFF unwired)
+//     fallback: the resting duty in force — the control op 0x10's record
+//               sets it, so the page's slider shows what is stored (0xFF unwired)
 //     kind: the source kind in force (protocol.hpp FAN_KIND_*, 0xFF unwired)
 //     in: a gpio header's sampled input percent (0xFF = no reading)
 //   uptime(4): this board's seconds since reset
@@ -415,9 +413,9 @@ static int ctrlAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
         return BLE_ATT_ERR_UNLIKELY;
 
-    // token, op, and the arguments (the fan source op's are the longest);
+    // token, op, and the arguments (the fan header op's are the longest);
     // the length is checked per op below, once the token has been
-    uint8_t buf[TOKEN_LEN + 1 + OP_FAN_SOURCE_MAX];
+    uint8_t buf[TOKEN_LEN + 1 + OP_FAN_HEADER_ARGS];
     uint16_t len = 0;
     if (ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof buf, &len) != 0 ||
         len < TOKEN_LEN + 1)
@@ -437,35 +435,19 @@ static int ctrlAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     uint8_t op = buf[TOKEN_LEN];
     uint16_t args = len - TOKEN_LEN - 1;
 
-    if (op == OP_FAN_FALLBACK)
+    if (op == OP_FAN_HEADER)
     {
-        if (args != 2)
+        if (args != OP_FAN_HEADER_ARGS)
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-        uint8_t slot = buf[TOKEN_LEN + 1], pct = buf[TOKEN_LEN + 2];
-        if (!fan::setFallback(slot, pct))
-        {
-            BLOG("fan fallback header%u=%u%% rejected — not a wired header "
-                 "(or the fan feature is off)", slot + 1u, pct);
-            return VALUE_ERR;
-        }
-        BLOG("fan fallback header%u=%u%% set from the phone", slot + 1u, pct);
-        return 0;
-    }
-
-    if (op == OP_FAN_SOURCE)
-    {
         const uint8_t* a = buf + TOKEN_LEN + 1;
-        if (args < 4 || args != 4 + 2 * (uint16_t)a[3])
-            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         const char* why = nullptr;
-        if (!fan::setSource(a[0], a[1], a[2], a[3], a + 4, &why))
+        if (!fan::setHeader(a[0], a + 1, proto::FAN_HEADER_LEN, &why))
         {
-            BLOG("fan source header%u kind=%u gpio=%u rejected — %s", a[0] + 1u, a[1],
-                 a[2], why ? why : "?");
+            BLOG("fan header%u record rejected — %s", a[0] + 1u, why ? why : "?");
             return VALUE_ERR;
         }
-        BLOG("fan source header%u kind=%u gpio=%u (%u points) set from the phone",
-             a[0] + 1u, a[1], a[2], a[3]);
+        BLOG("fan header%u set from the phone: fallback %u%%, kind %u, gpio %u (%u points), ramp %u%%/s",
+             a[0] + 1u, a[1], a[5], a[6], a[7], a[4]);
         return 0;
     }
 
