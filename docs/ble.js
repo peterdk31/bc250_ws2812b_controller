@@ -98,7 +98,7 @@ export const S = {
   sens: null,      // the sensor catalogue: [{ spec, chip, label, pwm, value }] (parseSensors)
   sensMore: 0,     // sensors the catalogue left out for size (its "_more")
   saving: null,    // 'g', 'p' or a slot: a write waiting for its answer
-  notes: {},       // key ('g', a slot, 'strip') -> { text, cls } shown by that card
+  note: null,      // the one status line: { text, cls } — a save's progress, or a refusal
   demo: false,
 };
 const subs = new Set();
@@ -442,7 +442,7 @@ export const SRC_KINDS = {
   pwm:      { label: 'Board fan header', hint: 'chip:pwmN, e.g. nct6686:pwm1' },
   cpu_load: { label: 'CPU load' },
   gpu_load: { label: 'GPU load' },
-  host:     { label: 'Machine’s curve', hint: 'a source only the machine reads' },
+  host:     { label: 'Host curve', hint: 'a source only the host reads' },
 };
 export const HOST_KINDS = ['temp', 'hwmon', 'pwm', 'cpu_load', 'gpu_load']; // the daemon runs these
 export const FILE_PREFIX = 'file:'; // hwmon.hpp: a spec naming a file holding one temperature
@@ -658,10 +658,10 @@ export function parsePwrCfg(text) {
            shortPress: typeof j.short_press === 'string' && j.short_press ? j.short_press : null };
 }
 
-// where a power edit goes. 'daemon' while the machine is up with a daemon
+// where a power edit goes. 'daemon' while the host is up with a daemon
 // that has the block (the edit lands in the config and the daemon pushes the
 // receiver); 'readonly' when that daemon can't write its config; 'receiver'
-// otherwise — the machine off, or no daemon at all: the control op stores the
+// otherwise — the host off, or no daemon at all: the control op stores the
 // tunings on the receiver until a daemon next connects and the config wins
 // again (short_press is the daemon's alone, so it can't be edited that way).
 export function powerRoute() {
@@ -681,17 +681,20 @@ export function powerTuning() {
 function dashReset() {
   S.fansChr = S.cfgChr = S.telemChr = S.stripChr = S.saChr = S.sensChr = S.pwrChr = S.pcfgChr = null;
   S.fans = S.sa = S.cfg = S.telem = S.info = S.sens = S.pwr = S.pcfg = null; S.sensMore = 0;
-  S.saving = null; S.notes = {};
+  S.saving = null; S.note = null;
   clearTimeout(saveTimer);
   stripReset();
 }
 
-// a message a card shows: 'ok' ones clear themselves
-export function note(key, text, cls) {
-  S.notes[key] = text ? { text, cls: cls || '' } : null;
+// the status line the page shows under its header — one for the whole page,
+// whatever is saving: 'ok' ones clear themselves, an error stays until the
+// next one, a tap on it, or the user moves on (dismiss)
+export function note(text, cls) {
+  S.note = text ? { text, cls: cls || '' } : null;
   emit();
-  if (cls === 'ok') setTimeout(() => { if (S.notes[key]?.text === text) { S.notes[key] = null; emit(); } }, 2500);
+  if (cls === 'ok') setTimeout(() => { if (S.note?.text === text) { S.note = null; emit(); } }, 2500);
 }
+export function dismiss() { if (S.note && S.note.cls === 'err') { S.note = null; emit(); } }
 
 // a notification is truncated to the ATT MTU; a read isn't. The fans value
 // fits any MTU; the JSON values and the standalone value may not. A value
@@ -743,7 +746,7 @@ const onPcfgEvent = jsonNotifier(() => S.pcfgChr, onPcfg);
 function settled(key) {
   S.saving = null;
   clearTimeout(saveTimer);
-  note(key, 'saved', 'ok');
+  note('saved', 'ok');
   onSaved?.(key);
 }
 const fanSaving = () => S.saving !== null && S.saving !== 'p'; // a fan save ('g' or a slot) is waiting
@@ -823,7 +826,7 @@ export function checkEdit(h) {
     const nm = (h.name || '').trim();
     if (!nm || [...nm].length > 16) return 'a name is 1–16 characters'; // characters, as the daemon counts
   }
-  if (h.route !== 'daemon' && h.kind !== 'fallback' && h.kind !== 'gpio') return 'with the machine off a header runs a fixed speed or a PWM input — pick one';
+  if (h.route !== 'daemon' && h.kind !== 'fallback' && h.kind !== 'gpio') return 'the receiver alone runs a fixed speed or a PWM input — pick one';
   if (h.kind === 'gpio' && !(Number.isInteger(h.gpio) && h.gpio >= 0 && h.gpio <= 48)) return 'the pin is a number 0–48';
   if (h.kind === 'hwmon' && (h.spec || '').startsWith(FILE_PREFIX) && !/^\/\S/.test(h.spec.slice(FILE_PREFIX.length))) // the daemon insists on an absolute path
     return 'a temperature file is its full path, e.g. /tmp/some_custom_temp_reading';
@@ -857,20 +860,20 @@ export async function writeCfg(key, edit, chr = S.cfgChr) {
   const buf = new Uint8Array(TOKEN_LEN + text.length);
   buf.set(tokenBytes()); buf.set(text, TOKEN_LEN);
   S.saving = key;
-  note(key, 'saving…');
+  note('saving…');
   try {
     await gattWrite(chr, buf);
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       if (S.saving !== key) return;
       S.saving = null;
-      note(key, 'no answer from the machine — is it on?', 'err');
+      note('no answer from the host', 'err');
     }, SAVE_TIMEOUT_MS);
     return true;
   } catch (e) {
     S.saving = null;
-    if (tokenRejected(e)) { note(key, 'token rejected', 'err'); S.editToken = true; emit(); }
-    else note(key, `write failed: ${e.message}${writeHint(e)}`, 'err');
+    if (tokenRejected(e)) { note('token rejected', 'err'); S.editToken = true; emit(); }
+    else note(`write failed: ${e.message}${writeHint(e)}`, 'err');
     return false;
   }
 }
@@ -883,21 +886,21 @@ async function writeSource(slot, h, before) {
   const kind = KIND_BYTE[h.kind] ?? KIND_BYTE.host;
   const pts = h.kind === 'gpio' ? h.pts.flatMap(p => [p.x, p.y]) : [];
   S.saving = slot;
-  note(slot, 'saving…');
+  note('saving…');
   try {
     if (h.fallback !== null && h.fallback !== undefined && h.fallback !== before.fallback)
       await writeOp(OP_FAN_FALLBACK, slot, h.fallback);
     await writeOp(OP_FAN_SOURCE, slot, kind, h.kind === 'gpio' ? h.gpio : NONE, pts.length / 2, ...pts);
-    if (!S.saChr) { S.saving = null; note(slot, 'saved', 'ok'); onSaved?.(slot); return; }
+    if (!S.saChr) { S.saving = null; note('saved', 'ok'); onSaved?.(slot); return; }
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       if (S.saving !== slot) return;
       S.saving = null;
-      note(slot, 'the receiver did not confirm the change', 'err');
+      note('the receiver did not confirm the change', 'err');
     }, SAVE_TIMEOUT_MS);
   } catch {
     S.saving = null;
-    note(slot, 'refused by the receiver — a pin it can’t read on, or a bad curve', 'err'); // writeOp said more
+    note('refused by the receiver — a pin it can’t read on, or a bad curve', 'err'); // writeOp said more
   }
 }
 
@@ -905,7 +908,7 @@ async function writeSource(slot, h, before) {
 export function saveHeader(slot, h) {
   h.pts.sort((a, b) => a.x - b.x);
   const bad = checkEdit(h);
-  if (bad) { note(slot, bad, 'err'); return; }
+  if (bad) { note(bad, 'err'); return; }
   const before = cardHeader(slot) || {};
   if (h.route !== 'daemon') { writeSource(slot, h, before); return; }
   if (!S.cfg) return;
@@ -934,9 +937,9 @@ export function checkPower(t) {
 // (a command, null, or undefined = unchanged) }, routed by powerRoute()
 export function savePower(t) {
   const bad = checkPower(t);
-  if (bad) { note('p', bad, 'err'); return; }
+  if (bad) { note(bad, 'err'); return; }
   const route = powerRoute();
-  if (route === 'readonly') { note('p', 'settings are read-only right now', 'err'); return; }
+  if (route === 'readonly') { note('settings are read-only right now', 'err'); return; }
   if (route === 'daemon') {
     const e = { hold_seconds: t.hold, boot_timeout_seconds: t.boot, sense_low_mv: t.low, sense_high_mv: t.high };
     if (t.shortPress !== undefined) e.short_press = t.shortPress;
@@ -953,13 +956,13 @@ async function writeTuning(t) {
   if (!S.ctrl || S.saving !== null) return;
   const u16 = v => [v & 0xFF, (v >> 8) & 0xFF];
   S.saving = 'p';
-  note('p', 'saving…');
+  note('saving…');
   try {
     await writeOp(OP_PWR_TUNING, ...u16(Math.round(t.hold * 1000)), ...u16(Math.round(t.boot * 1000)), ...u16(t.low), ...u16(t.high));
     settled('p');
   } catch {
     S.saving = null;
-    note('p', 'refused by the receiver — a value out of its range', 'err'); // writeOp said more
+    note('refused by the receiver — a value out of its range', 'err'); // writeOp said more
   }
 }
 
@@ -1023,7 +1026,7 @@ export function onStripCfg(dv) {
   if (sSaving && S.scfg && reflects(S.scfg, sInflight)) {
     sSaving = false; sInflight = null;
     clearTimeout(sTimer);
-    note('strip', 'saved', 'ok');
+    note('saved', 'ok');
     if (sPending) { const e = sPending; sPending = null; writeStrip(e); }
   }
   emit();
@@ -1060,19 +1063,19 @@ export async function writeStrip(edit) {
   const buf = new Uint8Array(TOKEN_LEN + text.length);
   buf.set(tokenBytes()); buf.set(text, TOKEN_LEN);
   sSaving = true; sInflight = edit;
-  note('strip', 'saving…');
+  note('saving…');
   try {
     await gattWrite(S.stripChr, buf);
     clearTimeout(sTimer);
     sTimer = setTimeout(() => {
       if (!sSaving) return;
       sSaving = false; sInflight = null; sPending = null;
-      note('strip', 'no answer from the machine — is it on?', 'err');
+      note('no answer from the host', 'err');
     }, SAVE_TIMEOUT_MS);
   } catch (e) {
     sSaving = false; sInflight = null; sPending = null;
-    if (tokenRejected(e)) { note('strip', 'token rejected', 'err'); S.editToken = true; emit(); }
-    else note('strip', `write failed: ${e.message}${writeHint(e)}`, 'err');
+    if (tokenRejected(e)) { note('token rejected', 'err'); S.editToken = true; emit(); }
+    else note(`write failed: ${e.message}${writeHint(e)}`, 'err');
   }
 }
 
@@ -1087,7 +1090,7 @@ document.addEventListener('visibilitychange', () => {
 // ?demo: the dashboard on sample data, no receiver needed — to see the
 // layout on a desktop, or to try the editor before wiring anything. Saves
 // land locally after a moment, the way a round trip would. ?demo&nodaemon
-// is the same board with the machine off.
+// is the same board with the host off.
 export function demo() {
   S.demo = true;
   S.cfg = parseCfg(JSON.stringify({ editable: true, hysteresis: 3, ramp: 5, boost_seconds: 5,

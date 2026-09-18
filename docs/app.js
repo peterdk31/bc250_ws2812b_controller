@@ -61,6 +61,7 @@ let leaveGuard = null; // () => true when a dirty editor may be left (asks the u
 let skipGuard = false; // one back() that must not ask: a save just landed
 function go(patch, replace = false) {
   route = { ...route, ...patch };
+  B.dismiss();
   try { history[replace ? 'replaceState' : 'pushState'](route, ''); } catch {}
   setRouteState?.(route);
 }
@@ -72,6 +73,7 @@ window.addEventListener('popstate', e => {
     return;
   }
   skipGuard = false;
+  B.dismiss();
   route = next;
   setRouteState?.(route);
 });
@@ -99,7 +101,9 @@ const Card = ({ title, right, children, cls = '' }) => html`<div class="card ${c
   ${title && html`<h2>${title}${right && html`<span class="r">${right}</span>`}</h2>`}
   ${children}</div>`;
 
-const Note = ({ k }) => { const n = S.notes[k]; return n?.text ? html`<div class="note ${n.cls}">${n.text}</div>` : null; };
+// the page's one status line, under the header: a save's progress, or a
+// refusal. Positioned over the content, so nothing moves when it shows.
+const Status = () => { const n = S.note; return n?.text ? html`<div class="status ${n.cls}" onClick=${B.dismiss}>${n.text}</div>` : null; };
 
 // ---- the header: receiver, PSU state, the host's readings ----
 function Header({ back: backLabel, title }) {
@@ -131,6 +135,7 @@ function Header({ back: backLabel, title }) {
       <div><span class="k">CPU</span><span class="v">${S.telem.cpu ?? '—'}<small>%</small></span></div>
       <div><span class="k">GPU</span><span class="v">${S.telem.gpu ?? '—'}<small>%</small></span></div>
     </div>`}
+    <${Status} />
   </header>`;
 }
 
@@ -173,9 +178,9 @@ function PowerScreen() {
 // ---- the power switch editor ----
 // The four tunings the receiver runs, plus the daemon's short-press command.
 // Where Save goes depends on who can hear it (B.powerRoute): the daemon
-// while the machine is up (into the config, pushed to the receiver), the
+// while the host is up (into the config, pushed to the receiver), the
 // receiver alone otherwise. The pins are shown, never edited: they are
-// flash-time, and a pin the machine's power hangs on is nothing for a phone.
+// flash-time, and a pin the host's power hangs on is nothing for a phone.
 const fmtS = v => (Math.round(v * 10) / 10).toString();
 function PowerEditor() {
   const origRef = useRef(null);
@@ -207,7 +212,7 @@ function PowerEditor() {
       ${p.sense ? html`<div class="card">
         <h2>Sense wire<span class="r">${mv === null ? '' : `reads ${level}`}</span></h2>
         <div class="mvrow"><span class="mv">${mv === null ? '—' : mv}<small>mV</small></span>
-          <div class="note">The board's 3.3 V rail, as the receiver reads it right now. Above the upper value the board counts as up, below the lower one as down; in between nothing changes. Read it with the machine on and off, and put the two values well apart between those readings.</div></div>
+          <div class="note">The board's 3.3 V rail, as the receiver reads it right now. Above the upper value the board counts as up, below the lower one as down; in between nothing changes. Read it with the board on and off, and put the two values well apart between those readings.</div></div>
         <div class="sub">Board is up above</div>
         <${Slider} value=${t.high} min=${0} max=${3300} step=${10} disabled=${ro} label=${v => `${v} mV`} live=${v => set({ high: v })} done=${v => set({ high: v })} />
         <div class="sub">Board is down below</div>
@@ -216,25 +221,24 @@ function PowerEditor() {
       </div>` : html`<div class="card"><h2>Sense wire</h2><div class="note">None on this receiver: the switch can't follow a shutdown down or give up on a boot that never comes up. Only the hold time applies.</div></div>`}
       <div class="card">
         <h2>Button</h2>
-        <label class="frow"><span>Hold to force off</span><input type="number" min="0.1" max="65" step="0.1" disabled=${ro} defaultValue=${fmtS(t.hold)} onInput=${e => num('hold', e.target.value)} onBlur=${fit('hold', 0.1, 65.535)} /><small>s while the machine is on</small></label>
-        ${S.pcfg && route !== 'receiver' ? html`<div class="swrow"><span>Short press shuts the machine down</span><${Switch} on=${cmd !== null} disabled=${ro} change=${on => set({ shortPress: on ? (orig.shortPress || 'systemctl poweroff') : null })} /></div>
-          <div class="note">${cmd !== null ? html`Runs <code>${cmd}</code> on the machine. ` : 'A short press is ignored. '}The same setting the phone's Shut down uses.</div>`
-        : html`<div class="note">What a short press does is the machine's setting — available when it is on.</div>`}
+        <label class="frow"><span>Hold to force off</span><input type="number" min="0.1" max="65" step="0.1" disabled=${ro} defaultValue=${fmtS(t.hold)} onInput=${e => num('hold', e.target.value)} onBlur=${fit('hold', 0.1, 65.535)} /><small>s while on</small></label>
+        ${S.pcfg && route !== 'receiver' ? html`<div class="swrow"><span>Short press shuts down</span><${Switch} on=${cmd !== null} disabled=${ro} change=${on => set({ shortPress: on ? (orig.shortPress || 'systemctl poweroff') : null })} /></div>
+          <div class="note">${cmd !== null ? html`Runs <code>${cmd}</code>. ` : 'A short press is ignored. '}The same setting the phone's Shut down uses.</div>`
+        : html`<div class="note">What a short press does is the host's setting — available when on.</div>`}
       </div>
       ${wires.length > 0 && html`<div class="card"><h2>Wiring<span class="r">set when flashing</span></h2>
         <div class="facts">${wires.map(([k, g]) => html`<span key=${k} class="k">${NAMES[k]}</span><span key=${k + 'v'}>GPIO${g}</span>`)}</div>
       </div>`}
-      <div class="note">${route === 'daemon' ? 'Saved into the machine\u2019s config and pushed to the receiver.'
-        : route === 'readonly' ? 'Settings are read-only right now: the machine\u2019s config can\u2019t be written.'
-        : 'Saved on the receiver. When the machine boots, its config takes over again — put the same values there to keep them.'}</div>
-      <${Note} k="p" />
+      <div class="note">${route === 'daemon' ? 'Saved into the config and pushed to the receiver.'
+        : route === 'readonly' ? 'Settings are read-only right now: the config can\u2019t be written.'
+        : 'Saved on the receiver. At the next boot the config takes over again — put the same values there to keep them.'}</div>
       <div class="btns two"><button class="minor" onClick=${back}>Cancel</button>
         <button class="primary" disabled=${saving || ro} onClick=${() => B.savePower({ ...t, shortPress: t.shortPress === orig.shortPress ? undefined : t.shortPress })}>Save</button></div>
     </div>`;
 }
 
 function PowerSheet() {
-  const name = S.device ? B.label(S.device.id) : 'The machine';
+  const name = S.device ? B.label(S.device.id) : 'The host';
   const off = op => { if (op === B.OP_HARD_OFF && !confirm(`Force ${name} off? Unsaved work on it is lost.`)) return; B.power(op); back(); };
   return html`<div class="scrim" onClick=${e => { if (e.target === e.currentTarget) back(); }}>
     <div class="sheet">
@@ -242,30 +246,30 @@ function PowerSheet() {
       <div class="sname">${name} is ${S.psu === 1 ? 'booting' : 'on'}</div>
       ${S.fans && html`<div class="ssub">Uptime ${fmtUptime(S.fans.uptime)}</div>`}
       ${S.psu === 2 && html`<button class="danger" disabled=${S.busy} onClick=${() => off(B.OP_SHUTDOWN)}>Shut down</button>
-        <div class="note">Asks the machine to shut down cleanly. It takes a moment.</div>`}
+        <div class="note">A clean shutdown. It takes a moment.</div>`}
       ${S.psu >= 1 && html`<button class="hard" disabled=${S.busy} onClick=${() => off(B.OP_HARD_OFF)}>Force off</button>
-        <div class="note">Cuts the power like holding the button. For a wedged machine only — unsaved work is lost.</div>`}
+        <div class="note">Cuts the power like holding the button. Only for a host that is wedged — unsaved work is lost.</div>`}
       <button class="minor" onClick=${back}>Cancel</button>
     </div></div>`;
 }
 
 // ---- Fans ----
-// what a row says under its name about the source
+// what a row says under its name: the source, then what the header runs on
+// right now — the source's reading when the source is in force, otherwise
+// the thing the receiver runs instead (the chip names the same state). "no
+// reading" is only for a source that is in force and has none.
 function describe(slot, h, f) {
-  if (!h) return f && f.wired ? 'Not set up on the machine' : '';
-  const now = B.inputOf(slot, h);
-  const reading = now === null ? ' · no reading' : ` · ${fmtIn(h, now)}`;
-  switch (h.kind) {
-    case 'fallback': return 'Fixed speed';
-    case 'gpio': return `PWM input on GPIO${h.gpio}${reading}`;
-    case 'host': return `Machine’s curve${reading}`;
-    case 'temp': return `CPU temperature${reading}`;
-    case 'hwmon': return `${h.spec}${reading}`;
-    case 'pwm': return `Board fan header ${h.spec}${reading}`;
-    case 'cpu_load': return `CPU load${reading}`;
-    case 'gpu_load': return `GPU load${reading}`;
+  if (!h) return f && f.wired ? 'Not in the config' : '';
+  const what = { fallback: 'Fixed speed', gpio: `PWM input on GPIO${h.gpio}`, host: 'Host curve', temp: 'CPU temperature',
+                 hwmon: h.spec, pwm: `Board fan header ${h.spec}`, cpu_load: 'CPU load', gpu_load: 'GPU load' }[h.kind] ?? h.src;
+  if (h.kind === 'fallback') return what;
+  const chip = chipOf(h, f);
+  if (chip) {
+    const state = { hold: 'held at the last speed', boost: 'power-on boost', fallback: 'fallback speed' };
+    return `${what} · ${state[chip[0]]}`;
   }
-  return h.src;
+  const now = B.inputOf(slot, h);
+  return `${what} · ${now === null ? 'no reading' : fmtIn(h, now)}`;
 }
 
 // the exception chip: only when the header is not doing what it is set up for
@@ -296,7 +300,6 @@ function FanRow({ slot, open, toggle }) {
       <div class="bar ${barCls}"><i style=${`width: ${duty === null ? 0 : duty}%`}></i></div>
     </div>
     ${open && hasCurve && html`<${Curve} h=${c} now=${B.inputOf(slot, c)} />`}
-    <${Note} k=${slot} />
   </div>`;
 }
 
@@ -307,11 +310,10 @@ function FansScreen() {
   if (!B.connected() || !S.fansChr)
     return html`<div class="empty">${B.connected() ? 'This receiver has no fan control.' : 'Not connected.'}</div>`;
   return html`<div class="list">
-    ${!slots.length && html`<div class="empty">${S.fans && !S.fans.active ? 'No fan headers wired on this receiver.' : 'No fan settings from the machine yet.'}</div>`}
+    ${!slots.length && html`<div class="empty">${S.fans && !S.fans.active ? 'No fan headers wired on this receiver.' : 'No fan settings yet.'}</div>`}
     ${slots.map(slot => html`<${FanRow} key=${slot} slot=${slot} open=${open.has(slot)} toggle=${() => toggle(slot)} />`)}
     ${S.cfg && html`<button class="rowlink" disabled=${!S.cfg.editable} onClick=${() => go({ editor: 'g' })}><span>Fan behaviour</span><${Icon} d=${I.right} size=${18} /></button>`}
     ${S.cfg && !S.cfg.editable && html`<div class="empty">Settings are read-only right now.</div>`}
-    <${Note} k="g" />
   </div>`;
 }
 
@@ -428,7 +430,7 @@ function pickerRows(h, kinds, slot) {
                 on: typedFile, value: typedFile ? fmtReading('hwmon', B.sensorReading(h.spec)) : '' });
   for (const k of ['hwmon', 'pwm']) if (kinds.includes(k) && needOther(k))
     rows.push({ id: 'other-' + k, kind: k, other: true, label: `Other ${k === 'pwm' ? 'board fan header' : 'sensor'}…`,
-                hint: (k === 'hwmon' && S.sensMore ? `${S.sensMore} more on the machine than fit here — ` : '') + B.SRC_KINDS[k].hint,
+                hint: (k === 'hwmon' && S.sensMore ? `${S.sensMore} more than fit here — ` : '') + B.SRC_KINDS[k].hint,
                 on: h.kind === k && !inCat, value: h.kind === k && !inCat ? fmtReading(k, B.sensorReading(h.spec)) : '' });
   return rows;
 }
@@ -517,14 +519,13 @@ function FanEditor({ slot }) {
       ${h.fallback !== null && h.fallback !== undefined && html`<div class="card">
         <h2>Fallback speed</h2>
         <${Slider} value=${h.fallback} live=${v => set({ fallback: v })} done=${v => set({ fallback: v })} label=${v => `${v} %`} />
-        <div class="note">What this header runs when nothing is driving it: the machine off, or before it has connected.</div>
+        <div class="note">What this header runs when nothing drives it: off, or before the host connects.</div>
       </div>`}
       ${daemon && html`<div class="card"><h2>Power-on boost</h2>
         <label class="frow"><span class="grow">Speed for the first ${S.cfg ? S.cfg.boostSecs : ''} s after power-on</span>
           <input type="number" min="0" max="100" step="1" placeholder="—" value=${h.boost === B.NONE ? '' : h.boost}
             onInput=${e => set({ boost: e.target.value === '' ? B.NONE : clamp(Math.round(+e.target.value), 0, 100) })} /><small>%</small></label>
       </div>`}
-      <${Note} k=${slot} />
       <div class="btns two"><button class="minor" onClick=${back}>Cancel</button>
         <button class="primary" disabled=${saving} onClick=${() => B.saveHeader(slot, h)}>Save</button></div>
     </div>`;
@@ -543,7 +544,6 @@ function GlobalsEditor() {
       <label class="frow"><span>Ramp down</span><input type="number" min="0" max="100" step="0.5" value=${g.ramp} onInput=${e => num('ramp', e.target.value, 0, 100)} /><small>%/s, 0 = at once</small></label>
       <label class="frow"><span>Boost</span><input type="number" min="0" max="255" step="1" value=${g.boostSecs} onInput=${e => num('boostSecs', e.target.value, 0, 255, true)} /><small>s after power-on</small></label>
     </div>
-    <${Note} k="g" />
     <div class="btns two"><button class="minor" onClick=${back}>Cancel</button>
       <button class="primary" disabled=${S.saving !== null} onClick=${() => B.saveGlobals(g)}>Save</button></div></div>`;
 }
@@ -559,7 +559,7 @@ const whiteSwatch = wb => '#' + wb.map(v => B.hex2(Math.round(255 * Math.pow(v /
 function LedsScreen() {
   const sc = S.scfg;
   if (!B.connected()) return html`<div class="empty">Not connected.</div>`;
-  if (!sc) return html`<div class="empty">${S.psu === 2 ? 'No LED settings from the machine yet.' : 'Available when the machine is on.'}</div>`;
+  if (!sc) return html`<div class="empty">${S.psu === 2 ? 'No LED settings yet.' : 'Available when on.'}</div>`;
   const ro = !sc.editable;
   const pend = B.pendingStrip();
   const wb = 'white_balance' in pend ? [0, 2, 4].map(i => parseInt(pend.white_balance.substr(i, 2), 16)) : sc.wb;
@@ -571,7 +571,7 @@ function LedsScreen() {
   const writeWb = (i, v) => { const n = [...wb]; n[i] = v; B.writeStrip({ white_balance: n.map(B.hex2).join('') }); };
   const writeGamma = (i, v) => {
     const n = [...gamma]; n[i] = Math.round(v * 100) / 100; // the slider's 0.05 steps, free of float dust
-    if (n.some(x => !(x >= 0.5 && x <= 5))) { B.note('strip', 'gamma is 0.5–5 per channel', 'err'); return; }
+    if (n.some(x => !(x >= 0.5 && x <= 5))) { B.note('gamma is 0.5–5 per channel', 'err'); return; }
     B.writeStrip({ gamma: n.every(x => x === n[0]) ? String(n[0]) : n.join(' ') });
   };
   const fmtGamma = v => String(Math.round(v * 100) / 100);
@@ -604,7 +604,6 @@ function LedsScreen() {
       <div class="swrow"><span>Reversed</span><${Switch} on=${rev} disabled=${ro} change=${v => B.writeStrip({ reverse: v })} /></div>
     <//>
     ${ro && html`<div class="empty">Settings are read-only right now.</div>`}
-    <${Note} k="strip" />
     <div class="foot">${sc.leds} LEDs</div>
   </div>`;
 }
@@ -623,7 +622,7 @@ function ReceiverScreen() {
   if (S.fans) {
     rows.push(['Uptime', fmtUptime(S.fans.uptime)]);
     rows.push(['Fan headers', S.fans.active ? `${S.fans.h.filter(h => h.wired).length} wired` : 'none']);
-    rows.push(['Host link', S.fans.host ? (S.fans.telem ? 'connected' : 'connected, machine quiet') : 'absent']);
+    rows.push(['Host link', S.fans.host ? (S.fans.telem ? 'connected' : 'connected, no telemetry') : 'absent']);
   }
   return html`<div class="list">
     ${hasBt() && html`<${Card} title="Receivers">

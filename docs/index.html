@@ -11,7 +11,7 @@
        this    — the shell and the stylesheet.
 
      Four tabs: Power (the ring — its color is the PSU state, its label the
-     one action a tap performs; tapping it while the machine is on opens the
+     one action a tap performs; tapping it while the host is on opens the
      shutdown sheet; a cog opens the switch's settings: the sense wire's
      thresholds against its live reading, the boot timeout, the hold time,
      the short-press switch), Fans (one row per header: source and its reading, the
@@ -19,14 +19,15 @@
      a cog opens that header's editor), LEDs (scenes, brightness, white
      balance and gamma with a preview of the resulting light, direction —
      each applies on release, no Save) and Receiver (the boards this phone
-     knows, the token, the board's facts). Tabs, editors and the sheet are
+     knows, the token, the board's facts). Whatever is saving reports in one
+     status pill under the header, over the content. Tabs, editors and the sheet are
      history entries, so the phone's back gesture works as in a native app.
 
      Web Bluetooth needs Chrome or Edge — on Android or desktop — and HTTPS
      (GitHub Pages qualifies); on iOS, the Bluefy or WebBLE browser apps.
      Installed from Chrome's "Add to Home screen", the service worker (sw.js)
      makes it work fully offline. ?demo shows the dashboard on sample data
-     without a receiver (?demo&nodaemon: the same board with the machine
+     without a receiver (?demo&nodaemon: the same board with the host
      off). -->
 <html lang="en">
 <head>
@@ -83,6 +84,13 @@
   /* one line under the header: errors, or capability hints */
   .msg { font-size: .85rem; color: var(--danger); padding: .5rem 1rem 0; }
   .msg.hint { color: var(--muted); }
+  /* the status pill: what a save is doing, floated under the sticky header
+     so the content beneath never moves when it comes and goes */
+  .status { position: absolute; top: calc(100% - .5rem); left: 50%; transform: translateX(-50%); z-index: 3;
+            max-width: calc(100% - 2rem); padding: .4rem .9rem; border-radius: 999px; font-size: .82rem; line-height: 1.35;
+            color: var(--muted); background: var(--panel); border: 1px solid var(--border); box-shadow: 0 6px 18px rgba(0, 0, 0, .45); }
+  .status.ok { color: var(--on); border-color: color-mix(in srgb, var(--on) 40%, var(--border)); }
+  .status.err { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }
 
   /* ---- cards ---- */
   .list { display: flex; flex-direction: column; gap: .6rem; padding: .75rem 1rem 1rem; }
