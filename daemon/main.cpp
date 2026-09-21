@@ -331,8 +331,9 @@ int main(int argc, char** argv)
     stripcfg::Remote stripRemote;
     stripRemote.load(cfg, &cfgWriter);
 
-    // and the power switch's (daemon/power_remote.hpp): its tunings, which
-    // the receiver runs but this file owns, and the short-press command
+    // and the power switch's (daemon/power_remote.hpp): its tunings and the
+    // wake pin, which the receiver runs but this file owns, and the
+    // short-press command
     pwrcfg::Remote pwrRemote;
     pwrRemote.load(cfg, &cfgWriter);
 
@@ -357,7 +358,7 @@ int main(int argc, char** argv)
     // standalone settings
     recordAndUpload(cfg, strip, sinks);
     fanCtl.pushStandalone(sinks);
-    pwrRemote.pushTuning(sinks);
+    pwrRemote.pushSettings(sinks);
     fanCtl.pushConfig(sinks); // for the BLE dashboard (daemon/fans.hpp)
     stripRemote.pushConfig(sinks); // ...and its strip card (daemon/strip_remote.hpp)
     pwrRemote.pushConfig(sinks);   // ...and its power settings (daemon/power_remote.hpp)
@@ -616,7 +617,7 @@ int main(int argc, char** argv)
         stripRemote.load(cfg, &cfgWriter);
         stripRemote.pushConfig(sinks);
         pwrRemote.load(cfg, &cfgWriter);
-        pwrRemote.pushTuning(sinks);
+        pwrRemote.pushSettings(sinks);
         pwrRemote.applyShortPress(sinks);
         pwrRemote.pushConfig(sinks);
 

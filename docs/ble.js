@@ -14,11 +14,14 @@
 //                          op 0x20=set the power switch's tunings, args
 //                          hold_ms(2) boot_timeout_ms(2) sense_low_mv(2)
 //                          sense_high_mv(2), LE — the receiver's own
+//                          op 0x21=set the power switch's wake input pin,
+//                          args pin(1), 0xFF = none — the receiver's own
 //   status  a5f20003-... : read/notify  1 byte  0=off 1=booting 2=on
 //   fans    a5f20004-... : read/notify  the receiver's own fan view (parseFans)
 //   fancfg  a5f20005-... : read/notify  the daemon's fan config, JSON text;
 //                          write  token(16) + a partial edit, same shape
-//   info    a5f20006-... : read  firmware version + heap + usable input pins
+//   info    a5f20006-... : read  firmware version + heap + the free input
+//                          pins (a gpio:N fan source, the wake input)
 //   telem   a5f20007-... : read/notify  the daemon's readings, JSON text
 //   stripcfg a5f20008-...: read/notify  the daemon's strip view, JSON text;
 //                          write  token(16) + a partial edit, same shape
@@ -68,6 +71,7 @@ const PWRCFG = 'a5f2000c-8f11-4e0e-9b3a-0bc250e0c001';
 export const OP_ON = 0x01, OP_SHUTDOWN = 0x02, OP_HARD_OFF = 0x03;
 export const OP_FAN_HEADER = 0x10;   // + slot(1) + the header's record (SA_HEADER_LEN, encodeRecord)
 export const OP_PWR_TUNING = 0x20;   // + hold_ms(2) boot_ms(2) low_mv(2) high_mv(2)
+export const OP_PWR_WAKE = 0x21;     // + pin(1), 0xFF = no wake input
 export const TOKEN_LEN = 16;
 export const DEFAULT_NAME = 'BC250'; // what the firmware advertises without a ble_remote.name
 
@@ -85,7 +89,7 @@ export const HAS_BT = 'bluetooth' in navigator;
 export const S = {
   device: null, ctrl: null, stat: null,   // the selected receiver + its live GATT
   fansChr: null, cfgChr: null, telemChr: null, stripChr: null, saChr: null, sensChr: null,
-  pwrChr: null, pcfgChr: null,
+  pwrChr: null, pcfgChr: null, infoChr: null,
   psu: -1,         // last status byte seen, -1 = unknown
   busy: false,     // a user-initiated connect or write in flight
   attempt: null,   // the device an auto-reconnect (watch or connect) is live for
@@ -671,13 +675,17 @@ export function parsePwr(dv) {
            low: dv.getUint16(9, true), high: dv.getUint16(11, true), pins };
 }
 
-// the daemon's view (daemon/power_remote.hpp), keys as the config spells them
+// the daemon's view (daemon/power_remote.hpp), keys as the config spells
+// them. `wake` is the config's pins.wake (a GPIO or null); undefined when the
+// daemon doesn't say — one from before the key, or a config whose value it
+// couldn't use — and the pin is then the receiver's business alone
 export function parsePwrCfg(text) {
   let j;
   try { j = JSON.parse(text); } catch { return null; }
   if (!j || typeof j !== 'object' || j.present === false) return null; // no block: the daemon has no say
   return { editable: !!j.editable, hold: +j.hold_seconds || 2, boot: +j.boot_timeout_seconds || 10,
            low: +j.sense_low_mv || 0, high: +j.sense_high_mv || 0,
+           wake: !('wake' in j) ? undefined : j.wake === null ? null : Number.isInteger(j.wake) ? j.wake : undefined,
            shortPress: typeof j.short_press === 'string' && j.short_press ? j.short_press : null };
 }
 
@@ -692,17 +700,40 @@ export function powerRoute() {
   if (S.pcfg && hostUp) return S.pcfg.editable ? 'daemon' : 'readonly';
   return 'receiver';
 }
-// the tunings an editor starts from: the daemon's view when it decides, else
-// what the receiver runs — in seconds and millivolts either way
+// where the wake pin's edit goes: the daemon's route when the daemon speaks
+// the key (it writes pins.wake into the config and pushes the receiver),
+// the receiver alone otherwise — a daemon from before the key never pushes
+// a wake pin, so a pick stored on the receiver is safe from it
+export function wakeRoute() {
+  const r = powerRoute();
+  if (r !== 'receiver' && S.pcfg && S.pcfg.wake !== undefined) return r;
+  return 'receiver';
+}
+// the settings an editor starts from: the daemon's view when it decides,
+// else what the receiver runs — in seconds and millivolts either way; the
+// wake pin by its own route (wakeRoute), a GPIO or null
 export function powerTuning() {
   const r = powerRoute();
-  if (r !== 'receiver' && S.pcfg) return { hold: S.pcfg.hold, boot: S.pcfg.boot, low: S.pcfg.low, high: S.pcfg.high, shortPress: S.pcfg.shortPress };
-  if (S.pwr) return { hold: S.pwr.hold / 1000, boot: S.pwr.boot / 1000, low: S.pwr.low, high: S.pwr.high, shortPress: S.pcfg ? S.pcfg.shortPress : null };
+  const wake = wakeRoute() !== 'receiver' ? S.pcfg.wake : S.pwr ? S.pwr.pins.wake : null;
+  if (r !== 'receiver' && S.pcfg) return { hold: S.pcfg.hold, boot: S.pcfg.boot, low: S.pcfg.low, high: S.pcfg.high, wake, shortPress: S.pcfg.shortPress };
+  if (S.pwr) return { hold: S.pwr.hold / 1000, boot: S.pwr.boot / 1000, low: S.pwr.low, high: S.pwr.high, wake, shortPress: S.pcfg ? S.pcfg.shortPress : null };
   return null;
+}
+// the pins the wake input may be moved to: the receiver's free input pins
+// (parseInfo) with the pin in force kept in the list, less the pins fan
+// headers read their PWM on (the receiver refuses those). null when the
+// receiver doesn't list its pins (firmware before the info's ver 2)
+export function wakePinOptions(current) {
+  const pins = S.info && S.info.pins;
+  if (!pins) return null;
+  const taken = new Set(S.sa ? S.sa.h.filter(h => h.kind === 'gpio' && h.gpio !== NONE).map(h => h.gpio) : []);
+  const opts = pins.filter(g => !taken.has(g));
+  if (current !== null && current !== undefined && !opts.includes(current)) opts.push(current);
+  return opts.sort((a, b) => a - b);
 }
 
 function dashReset() {
-  S.fansChr = S.cfgChr = S.telemChr = S.stripChr = S.saChr = S.sensChr = S.pwrChr = S.pcfgChr = null;
+  S.fansChr = S.cfgChr = S.telemChr = S.stripChr = S.saChr = S.sensChr = S.pwrChr = S.pcfgChr = S.infoChr = null;
   S.fans = S.sa = S.cfg = S.telem = S.info = S.sens = S.pwr = S.pcfg = null; S.sensMore = 0;
   S.saving = null; S.note = null;
   clearTimeout(saveTimer);
@@ -761,8 +792,18 @@ const onSensEvent = jsonNotifier(() => S.sensChr, dv => {
 });
 const onPwrEvent = notifier(() => S.pwrChr, dv => dv.byteLength >= PWR_LEN, dv => {
   const v = parsePwr(dv);
-  if (v) { S.pwr = v; emit(); }
+  if (!v) return;
+  const moved = S.pwr && S.pwr.pins.wake !== v.pins.wake; // the one thing that changes the free-pin list
+  S.pwr = v; emit();
+  if (moved) refreshInfo();
 });
+// re-read the receiver's build facts — its free input pins, after the wake
+// pin moved (the info value is read-only and never notifies)
+async function refreshInfo() {
+  const chr = S.infoChr;
+  if (!chr) return;
+  try { const v = parseInfo(await gattRead(chr)); if (chr === S.infoChr && v) { S.info = v; emit(); } } catch {}
+}
 const onPcfgEvent = jsonNotifier(() => S.pcfgChr, onPcfg);
 
 // an answer landed for the save in flight: that edit is done
@@ -813,7 +854,7 @@ async function dashOpen(svc) {
   try { se = await svc.getCharacteristic(SENSORS); } catch { se = null; }  // firmware before the catalogue
   try { pw = await svc.getCharacteristic(PWR); pc = await svc.getCharacteristic(PWRCFG); } catch { pw = pc = null; } // firmware before the power settings
   if (!connected()) return;
-  S.fansChr = f; S.cfgChr = c; S.telemChr = t; S.saChr = s; S.sensChr = se; S.pwrChr = pw; S.pcfgChr = pc;
+  S.fansChr = f; S.cfgChr = c; S.telemChr = t; S.saChr = s; S.sensChr = se; S.pwrChr = pw; S.pcfgChr = pc; S.infoChr = i;
   f.addEventListener('characteristicvaluechanged', onFansEvent);
   c.addEventListener('characteristicvaluechanged', onCfgEvent);
   t.addEventListener('characteristicvaluechanged', onTelemEvent);
@@ -955,20 +996,52 @@ export function checkPower(t) {
   return '';
 }
 
-// the editor's Save: `t` = { hold, boot (seconds), low, high (mV), shortPress
-// (a command, null, or undefined = unchanged) }, routed by powerRoute()
-export function savePower(t) {
+// the editor's Save: `t` = { hold, boot (seconds), low, high (mV), wake (a
+// GPIO, null, or undefined = unchanged), shortPress (a command, null, or
+// undefined = unchanged) }, routed by powerRoute() — except the wake pin,
+// which goes by wakeRoute(): straight to the receiver first when the daemon
+// can't carry it, then the rest as usual
+export async function savePower(t) {
   const bad = checkPower(t);
   if (bad) { note(bad, 'err'); return; }
   const route = powerRoute();
   if (route === 'readonly') { note('settings are read-only right now', 'err'); return; }
+  const wakeHere = t.wake !== undefined && wakeRoute() === 'receiver';
+  if (wakeHere && !(await writeWake(t.wake))) return; // it said why
   if (route === 'daemon') {
     const e = { hold_seconds: t.hold, boot_timeout_seconds: t.boot, sense_low_mv: t.low, sense_high_mv: t.high };
+    if (t.wake !== undefined && !wakeHere) { e.wake = t.wake; setTimeout(checkWakeLanded, WAKE_LANDED_MS); }
     if (t.shortPress !== undefined) e.short_press = t.shortPress;
     writeCfg('p', e, S.pcfgChr);
     return;
   }
   writeTuning(t);
+}
+
+// a wake pin routed through the daemon is written into the config and pushed
+// before the receiver has had its say; a pin the receiver refuses stays in
+// the config while the receiver keeps its old one. The receiver's view
+// (notified within a second) is the truth — compare once the dust settles
+const WAKE_LANDED_MS = 3000;
+function checkWakeLanded() {
+  if (!connected() || !S.pwr || !S.pcfg || S.pcfg.wake === undefined || S.pwr.pins.wake === S.pcfg.wake) return;
+  const had = S.pwr.pins.wake === null ? 'no wake input' : `GPIO${S.pwr.pins.wake}`;
+  note(`the receiver kept ${had} — it can’t use GPIO${S.pcfg.wake} for the wake input; the config now says ${S.pcfg.wake}`, 'err');
+}
+
+// the wake pin straight to the receiver: it checks the pin itself (a
+// refusal comes back as a write error) and applies it within a poll; the
+// pwr value's next notification shows it, and the free-pin list follows.
+// True when the write went through.
+async function writeWake(pin) {
+  if (!S.ctrl || S.saving !== null) return false;
+  try {
+    await writeOp(OP_PWR_WAKE, pin === null ? NONE : pin);
+    return true;
+  } catch {
+    note('refused by the receiver — a pin it can’t use for the wake input', 'err'); // writeOp said more
+    return false;
+  }
 }
 
 // straight to the receiver: it validates the set itself (a refusal comes back
@@ -1163,7 +1236,9 @@ export function demo() {
   setPwr(2000, 10000, 800, 2000);
   pwrBytes.set([3, 1, 0xFF, 2, 8, 0xFF], 13);
   S.pwr = parsePwr(pdv);
-  S.pcfg = parsePwrCfg(JSON.stringify({ editable: true, hold_seconds: 2, boot_timeout_seconds: 10, sense_low_mv: 800, sense_high_mv: 2000, short_press: 'systemctl poweroff' }));
+  S.pcfg = parsePwrCfg(JSON.stringify({ editable: true, hold_seconds: 2, boot_timeout_seconds: 10, sense_low_mv: 800, sense_high_mv: 2000, wake: null, short_press: 'systemctl poweroff' }));
+  // the wake pin moving is what the free-pin list follows: the pin taken leaves it, the old one returns
+  const setWake = pin => { pwrBytes[18] = pin === null ? 0xFF : pin; S.pwr = parsePwr(pdv); S.info = { ...S.info, pins: [0, 20, 21].filter(g => g !== pin) }; };
   if (location.search.includes('nodaemon')) S.pcfg = null;
   // the wire drifts a little, as a real reading does
   setInterval(() => { if (!S.pwr || !S.pwr.sense) return; pwrBytes[2] = S.psu; pdv.setUint16(3, S.psu === 2 ? 2890 + Math.round(Math.random() * 40) : 5 + Math.round(Math.random() * 12), true); S.pwr = parsePwr(pdv); emit(); }, 1000);
@@ -1178,9 +1253,11 @@ export function demo() {
     const edit = JSON.parse(utf8.decode(buf.subarray(TOKEN_LEN))), c = S.pcfg;
     const out = { editable: true, hold_seconds: edit.hold_seconds ?? c.hold, boot_timeout_seconds: edit.boot_timeout_seconds ?? c.boot,
                   sense_low_mv: edit.sense_low_mv ?? c.low, sense_high_mv: edit.sense_high_mv ?? c.high,
+                  wake: 'wake' in edit ? edit.wake : c.wake,
                   short_press: 'short_press' in edit ? edit.short_press : c.shortPress };
     setPwr(Math.round(out.hold_seconds * 1000), Math.round(out.boot_timeout_seconds * 1000), out.sense_low_mv, out.sense_high_mv);
     S.pwr = parsePwr(pdv);
+    if ('wake' in edit) setWake(edit.wake); // the receiver, pushed
     setTimeout(() => onPcfg(new DataView(new TextEncoder().encode(JSON.stringify(out)).buffer)), 600); } };
   S.ctrl = { writeValueWithResponse: async buf => {
     const op = buf[TOKEN_LEN], slot = buf[TOKEN_LEN + 1], h = S.fans.h[slot], st = S.sa.h[slot];
@@ -1190,6 +1267,11 @@ export function demo() {
       const a = new DataView(buf.buffer, buf.byteOffset + TOKEN_LEN + 1), v = [0, 2, 4, 6].map(o => a.getUint16(o, true));
       if (v[0] < 100 || v[1] < 1000 || v[2] >= v[3]) throw new Error('GATT operation failed'); // what the receiver refuses
       setPwr(...v); S.pwr = parsePwr(pdv); return;
+    }
+    if (op === OP_PWR_WAKE) {
+      const pin = buf[TOKEN_LEN + 1];
+      if (pin !== NONE && ![0, 20, 21].includes(pin)) throw new Error('GATT operation failed'); // a pin the receiver refuses
+      setWake(pin === NONE ? null : pin); emit(); return;
     }
     if (op === OP_FAN_HEADER) {
       const rec = buf.subarray(TOKEN_LEN + 2, TOKEN_LEN + 2 + SA_HEADER_LEN), r = decodeRecord(new DataView(rec.buffer, rec.byteOffset), 0);

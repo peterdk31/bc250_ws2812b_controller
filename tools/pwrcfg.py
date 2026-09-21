@@ -16,12 +16,13 @@ The settings come from the daemon config's "power_switch" block (--config):
 
 A pin of null is "not wired" (button_gnd: the button goes to a real GND;
 sense: no sense wire; led: no feedback LED; wake: no wake input — the
-active-high power-on pulse from e.g. an OpenPuck). The pins and "enabled"
-are flash-time only; the four tunings (hold_seconds, boot_timeout_seconds,
-sense_low_mv, sense_high_mv) written here are DEFAULTS — the daemon pushes
-the config's current values at startup and the phone can dial them, and the
-receiver keeps those in NVS layered over this blob until it is re-flashed
-with different tunings (README "Power switch"). With NO block at all this exits
+active-high power-on pulse from e.g. an OpenPuck). The other pins and
+"enabled" are flash-time only; the four tunings (hold_seconds,
+boot_timeout_seconds, sense_low_mv, sense_high_mv) and the wake pin written
+here are DEFAULTS — the daemon pushes the config's current values at startup
+and the phone can dial them (the wake pin from the receiver's free pins), and
+the receiver keeps those in NVS layered over this blob until it is re-flashed
+with different values (README "Power switch"). With NO block at all this exits
 3 and writes nothing — the Makefile then leaves whatever is on the chip
 alone. That is deliberately not the fans' rule (no block = written off):
 writing the power switch off releases PS_ON# once the receiver reboots, i.e.

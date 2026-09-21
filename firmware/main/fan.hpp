@@ -44,6 +44,14 @@
 // "the host is shutting down" — and that is their whole acquaintance.
 namespace fan
 {
+// read the `fancfg` partition — this feature's pins — without bringing the
+// feature up. Called from app_main BEFORE pwr::start(): the power switch
+// checks a saved wake pin against inputPinFree() there, and that answer has
+// to know where the fan outputs are before the pwr task's first poll (which
+// runs the moment its task exists, ahead of anything app_main does next).
+// start() runs on what this read; calling it again is a no-op.
+void readConfig();
+
 // bring the feature up and start its task. Called from app_main after
 // pwr::start() — it reads pwr::senseState(), whose ADC is set up there — and
 // before the slower filesystem mount, so the fans reach their duty early.
@@ -72,11 +80,25 @@ void setLive(const uint8_t* payload, uint16_t len);
 // of ours): nothing is applied then.
 bool setHeader(uint8_t slot, const uint8_t* rec, uint16_t len, const char** why);
 
-// the GPIOs a gpio:N source may read on this board right now, bit N set:
-// exactly the pins setSource() would accept, derived from the same check.
-// The phone lists these instead of asking for a number. Fixed for a
-// connection's lifetime (the owners of the other pins are flash-time
-// features and the strip, which is up before a phone can connect).
+// can this board read an input on GPIO g — a gpio:N source's PWM, or the
+// power switch's wake pulse? The check behind setHeader's pin refusal and
+// inputPins(): not another feature's pin (the power switch's, via
+// pwr::usesPin; the strip's), not one of this feature's PWM outputs, not a
+// flash pad, the host link or a boot strap. A fan header's own INPUT in use
+// is not excluded (two headers may read one PWM) — readsPin() says that.
+// *why names the reason when false.
+bool inputPinFree(int g, const char** why);
+
+// is GPIO g a PWM input some header reads right now?
+bool readsPin(int g);
+
+// the GPIOs a gpio:N source (or the wake input) may read on this board right
+// now, bit N set: exactly the pins inputPinFree() accepts. The phone lists
+// these instead of asking for a number. Known once readConfig() has run,
+// whether or not the fan feature is on; it changes only when the power
+// switch's wake pin moves (the other owners are flash-time features and the
+// strip, which is up before a phone can connect), and the page re-reads it
+// then.
 uint64_t inputPins();
 
 // the host sent CMD_SHUTDOWN flagged as a power-off: hold the live duties

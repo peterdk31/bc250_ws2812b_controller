@@ -21,19 +21,24 @@
 // are pushed to the receiver at runtime (proto::CMD_PWR_TUNING) at startup,
 // on a live reload and after an edit, the way the fans' standalone settings
 // are — the receiver applies them at once and persists them, and this file
-// stays the source of truth on a running machine. `short_press` is this
-// daemon's own (the command a short press runs, daemon/output/serial_sink.hpp)
-// and is applied to the link at once.
+// stays the source of truth on a running machine. One pin goes the same
+// way: `pins.wake`, the wake input (README "Waking from an OpenPuck"), which
+// can do nothing but power the machine on (proto::CMD_PWR_WAKE; the receiver
+// checks the pin against its own facts and keeps the one it has when it
+// refuses). `short_press` is this daemon's own (the command a short press
+// runs, daemon/output/serial_sink.hpp) and is applied to the link at once.
 //
 // Like the fans and the strip this is JSON text the receiver relays unread;
 // the view goes out as CMD_PWR_CONFIG, an edit comes back as MSG_PWR_CONFIG,
 // is validated here against the same ranges tools/pwrcfg.py enforces at
 // flash time, written into the block through config_edit.hpp, pushed, and
-// answered with the new view. The shape, all keys as the config spells them:
+// answered with the new view. The shape, all keys as the config spells them
+// (`wake` is `pins.wake`, flattened):
 //
 //     { "editable": true,                 // config writable and has the block
 //       "hold_seconds": 2, "boot_timeout_seconds": 10,
 //       "sense_low_mv": 800, "sense_high_mv": 2000,
+//       "wake": 20,                              // a GPIO, or null = no wake input
 //       "short_press": "systemctl poweroff" }   // or null
 //
 // An edit is a partial object of the same keys (not "editable"). A config
@@ -77,6 +82,28 @@ public:
             if (sp->isString())
                 shortPress_ = sp->text;
 
+        // pins.wake: a GPIO or null. Anything else (or no pins object) is a
+        // block the flasher would refuse — not pushed, and the phone's pick
+        // then goes to the receiver alone
+        wake_ = -1;
+        wakeOk_ = false;
+        if (const json::Value* pins = block->find("pins"))
+            if (pins->isObject())
+                if (const json::Value* w = pins->find("wake"))
+                {
+                    if (w->type == json::Value::Type::Null)
+                        wakeOk_ = true;
+                    else if (w->isNumber() && w->number == floor(w->number) && w->number >= 0 &&
+                             w->number <= WAKE_MAX)
+                    {
+                        wake_ = (int)w->number;
+                        wakeOk_ = true;
+                    }
+                }
+        if (!wakeOk_)
+            fprintf(stderr, "power_switch.pins.wake: expected a GPIO number or null — not pushed "
+                            "to the receiver, and the dashboard can't set it\n");
+
         // the four are the receiver's to run; a block pwrcfg.py refused at
         // flash time can still be hand-edited into nonsense afterwards, and
         // that must not be pushed (the receiver would refuse it anyway, but
@@ -91,23 +118,33 @@ public:
     bool writable() const { return hasBlock_ && tuningOk_ && writer_ && writer_->writable(); }
     const std::string& shortPress() const { return shortPress_; }
 
-    // the tunings, for the receiver to run (see the header comment). Not
+    // the runtime settings, for the receiver to run (see the header comment):
+    // the tunings and the wake pin, each when its config value is sound. Not
     // sent for a block with "enabled": false — the chip was flashed with the
     // switch off and would only log a refusal at every daemon start.
-    void pushTuning(std::vector<std::unique_ptr<Sink>>& sinks)
+    void pushSettings(std::vector<std::unique_ptr<Sink>>& sinks)
     {
-        if (!hasBlock_ || !tuningOk_ || !enabled_)
+        if (!hasBlock_ || !enabled_)
             return;
-        uint8_t p[proto::PWR_TUNING_LEN];
-        const uint16_t v[4] = {(uint16_t)lround(hold_ * 1000), (uint16_t)lround(boot_ * 1000),
-                               (uint16_t)low_, (uint16_t)high_};
-        for (int i = 0; i < 4; i++)
+        if (tuningOk_)
         {
-            p[2 * i] = (uint8_t)v[i];
-            p[2 * i + 1] = (uint8_t)(v[i] >> 8);
+            uint8_t p[proto::PWR_TUNING_LEN];
+            const uint16_t v[4] = {(uint16_t)lround(hold_ * 1000), (uint16_t)lround(boot_ * 1000),
+                                   (uint16_t)low_, (uint16_t)high_};
+            for (int i = 0; i < 4; i++)
+            {
+                p[2 * i] = (uint8_t)v[i];
+                p[2 * i + 1] = (uint8_t)(v[i] >> 8);
+            }
+            for (auto& s : sinks)
+                s->sendCommand(proto::CMD_PWR_TUNING, p, sizeof p);
         }
-        for (auto& s : sinks)
-            s->sendCommand(proto::CMD_PWR_TUNING, p, sizeof p);
+        if (wakeOk_)
+        {
+            uint8_t w = wake_ < 0 ? proto::FAN_NONE : (uint8_t)wake_;
+            for (auto& s : sinks)
+                s->sendCommand(proto::CMD_PWR_WAKE, &w, 1);
+        }
     }
 
     // the view, for the receiver to serve over GATT. Sent with no block too
@@ -155,11 +192,16 @@ public:
     {
         if (!hasBlock_)
             return "{\"present\":false,\"editable\":false}";
-        char buf[200];
+        // `wake` is left out when the config's value is unusable: the page
+        // then takes the pin the receiver reports and sends a pick to the
+        // receiver alone, as it does with a daemon from before this key
+        char buf[220], wake[24] = "";
+        if (wakeOk_)
+            snprintf(wake, sizeof wake, wake_ < 0 ? "\"wake\":null," : "\"wake\":%d,", wake_);
         snprintf(buf, sizeof buf,
                  "{\"editable\":%s,\"hold_seconds\":%g,\"boot_timeout_seconds\":%g,"
-                 "\"sense_low_mv\":%d,\"sense_high_mv\":%d,\"short_press\":",
-                 writable() ? "true" : "false", hold_, boot_, low_, high_);
+                 "\"sense_low_mv\":%d,\"sense_high_mv\":%d,%s\"short_press\":",
+                 writable() ? "true" : "false", hold_, boot_, low_, high_, wake);
         std::string j = buf;
         j += shortPress_.empty() ? "null" : "\"" + cfgedit::escape(shortPress_) + "\"";
         return j + "}";
@@ -189,6 +231,7 @@ public:
 
 private:
     static const int WIRE_MAX = 256; // the receiver's slot for CMD_PWR_CONFIG (protocol.hpp)
+    static const int WAKE_MAX = 63;  // the info value's pin mask is 64 bits; no ESP32 has more
 
     bool bad(const std::string& where, const std::string& what)
     {
@@ -216,9 +259,9 @@ private:
             return bad(where, "not a JSON object: " + err);
 
         double hold = hold_, boot = boot_;
-        int low = low_, high = high_;
+        int low = low_, high = high_, wake = wake_;
         std::string shortPress = shortPress_;
-        bool tuningEdit = false, pressEdit = false;
+        bool tuningEdit = false, pressEdit = false, wakeEdit = false;
 
         for (auto& m : root.members)
         {
@@ -240,6 +283,23 @@ private:
                 (k == "sense_low_mv" ? low : high) = (int)v.number;
                 tuningEdit = true;
             }
+            else if (k == "wake")
+            {
+                // the pin's real check is the receiver's (it knows its chip and
+                // its other features' pins, and keeps the old pin when it
+                // refuses); here only what the config could never hold
+                if (!wakeOk_)
+                    return bad(where + ".wake", "the config's pins.wake is not a GPIO or null — fix "
+                                                "the file first");
+                if (v.type == json::Value::Type::Null)
+                    wake = -1;
+                else if (v.isNumber() && v.number == floor(v.number) && v.number >= 0 &&
+                         v.number <= WAKE_MAX)
+                    wake = (int)v.number;
+                else
+                    return bad(where + ".wake", "expected a GPIO number, or null for no wake input");
+                wakeEdit = true;
+            }
             else if (k == "short_press")
             {
                 if (v.type == json::Value::Type::Null)
@@ -255,7 +315,7 @@ private:
                 return bad(where + "." + k, "unknown key");
         }
 
-        if (!tuningEdit && !pressEdit)
+        if (!tuningEdit && !pressEdit && !wakeEdit)
             return bad(where, "nothing to change");
 
         std::string why;
@@ -268,6 +328,7 @@ private:
         boot_ = boot;
         low_ = low;
         high_ = high;
+        wake_ = wake;
         shortPress_ = shortPress;
 
         json::Value& block = cfgedit::member(cfg_->root(), BLOCK);
@@ -275,14 +336,22 @@ private:
         cfgedit::member(block, "boot_timeout_seconds") = cfgedit::number(boot_);
         cfgedit::member(block, "sense_low_mv") = cfgedit::number(low_);
         cfgedit::member(block, "sense_high_mv") = cfgedit::number(high_);
+        if (wakeEdit)
+            cfgedit::member(cfgedit::member(block, "pins"), "wake") =
+                wake_ < 0 ? json::Value() : cfgedit::number(wake_);
         cfgedit::member(block, "short_press") =
             shortPress_.empty() ? json::Value() : cfgedit::string(shortPress_);
+        char wakeText[32];
+        if (wake_ < 0)
+            snprintf(wakeText, sizeof wakeText, "none");
+        else
+            snprintf(wakeText, sizeof wakeText, "GPIO%d", wake_);
         fprintf(stderr, "power_switch: live edit applied from the dashboard (hold %g s, boot "
-                        "timeout %g s, sense %d..%d mV, short press %s%s%s)\n",
-                hold_, boot_, low_, high_, shortPress_.empty() ? "ignored" : "\"",
+                        "timeout %g s, sense %d..%d mV, wake %s, short press %s%s%s)\n",
+                hold_, boot_, low_, high_, wakeText, shortPress_.empty() ? "ignored" : "\"",
                 shortPress_.c_str(), shortPress_.empty() ? "" : "\"");
 
-        pushTuning(sinks);
+        pushSettings(sinks);
         applyShortPress(sinks);
 
         // a write that fails is said by the writer (and turns it read-only);
@@ -300,6 +369,8 @@ private:
 
     double hold_ = 2, boot_ = 10;
     int low_ = 800, high_ = 2000;
+    int wake_ = -1;          // pins.wake, -1 = null (no wake input)
+    bool wakeOk_ = false;    // ...and it is a GPIO or null, so it travels
     std::string shortPress_; // "" = null: a short press is ignored
 };
 } // namespace pwrcfg

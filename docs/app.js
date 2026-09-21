@@ -179,8 +179,11 @@ function PowerScreen() {
 // The four tunings the receiver runs, plus the daemon's short-press command.
 // Where Save goes depends on who can hear it (B.powerRoute): the daemon
 // while the host is up (into the config, pushed to the receiver), the
-// receiver alone otherwise. The pins are shown, never edited: they are
-// flash-time, and a pin the host's power hangs on is nothing for a phone.
+// receiver alone otherwise. Of the pins only the wake input is edited — an
+// input that can do nothing but power on, picked from the receiver's free
+// pins (B.wakePinOptions) and routed by B.wakeRoute; the rest are shown,
+// never edited: they are flash-time, and a pin the host's power hangs on is
+// nothing for a phone.
 const fmtS = v => (Math.round(v * 10) / 10).toString();
 function PowerEditor() {
   const origRef = useRef(null);
@@ -190,11 +193,18 @@ function PowerEditor() {
   useEffect(() => { if (!t && orig) setT({ ...orig }); }, [!!orig]);
   const dirty = () => JSON.stringify(t) !== JSON.stringify(orig);
   useEffect(() => { leaveGuard = () => !dirty() || confirm('Leave without saving?'); return () => { leaveGuard = null; }; });
+  const set = patch => setT(x => ({ ...x, ...patch }));
+  // the wake pin's picker, built once per distinct option list (see useSteadySelect)
+  const wakeRoute = B.wakeRoute(), wakeRo = wakeRoute === 'readonly';
+  const wake = t ? t.wake : null;
+  const wakeOpts = B.wakePinOptions(wake);
+  const wakeSelect = useSteadySelect(wakeOpts ? `${wakeOpts.join()}=${wake}${wakeRo ? '!' : ''}` : '', () => wakeOpts && html`
+          <select value=${wake === null ? '' : wake} disabled=${wakeRo} onChange=${e => set({ wake: e.target.value === '' ? null : +e.target.value })}>
+            <option value="">None</option>${wakeOpts.map(g => html`<option key=${g} value=${g}>GPIO${g}</option>`)}</select>`);
   const p = S.pwr;
   if (!B.connected() || !p || !t) return html`<${Header} back="Power" title="Power switch" /><div class="empty">${B.connected() ? 'No power switch on this receiver.' : 'Not connected.'}</div>`;
   const route = B.powerRoute();
   const ro = route === 'readonly';
-  const set = patch => setT(x => ({ ...x, ...patch }));
   // the two number fields are uncontrolled and land as typed (a controlled
   // value clamped on every keystroke would turn a "0" on its way to "0.5"
   // into the floor and eat the dot); the range is applied on blur, and
@@ -204,8 +214,8 @@ function PowerEditor() {
   const saving = S.saving !== null;
   // the wire as the current thresholds would read it
   const mv = p.mv, level = mv === null ? null : mv > t.high ? 'up' : mv < t.low ? 'down' : 'between';
-  const wires = B.PIN_KEYS.map(k => [k, p.pins[k]]).filter(([, g]) => g !== null);
-  const NAMES = { ps_on: 'PS_ON#', button: 'Button', button_gnd: 'Button ground', sense: 'Sense', led: 'LED', wake: 'Wake' };
+  const wires = B.PIN_KEYS.filter(k => k !== 'wake').map(k => [k, p.pins[k]]).filter(([, g]) => g !== null); // the wake pin has its own card
+  const NAMES = { ps_on: 'PS_ON#', button: 'Button', button_gnd: 'Button ground', sense: 'Sense', led: 'LED' };
   const cmd = t.shortPress ?? null;
   return html`<${Header} back="Power" title="Power switch" />
     <div class="list">
@@ -226,6 +236,14 @@ function PowerEditor() {
           <div class="note">${cmd !== null ? html`Runs <code>${cmd}</code>. ` : 'A short press is ignored. '}The same setting the phone's Shut down uses.</div>`
         : html`<div class="note">What a short press does is the host's setting — available when on.</div>`}
       </div>
+      <div class="card">
+        <h2>Wake input${route !== 'receiver' && wakeRoute === 'receiver' && html`<span class="r">receiver only</span>`}</h2>
+        ${wakeOpts
+          ? html`<label class="frow"><span>Pin</span>${wakeSelect}</label>`
+          : html`<label class="frow"><span>Pin</span><input type="number" min="0" max="63" step="1" placeholder="none" disabled=${wakeRo} value=${wake === null ? '' : wake}
+              onInput=${e => set({ wake: e.target.value === '' ? null : clamp(parseInt(e.target.value, 10) || 0, 0, 63) })} /><small>a free receiver pin, blank = none</small></label>`}
+        <div class="note">A 3.3 V pulse on this pin powers the host on and can do nothing else — an OpenPuck's ColdBoot output, for one (GPIO20 on the carrier's J11, with the puck's ground beside it). ${wakeOpts ? 'The list is the receiver\u2019s free pins.' : 'This receiver doesn\u2019t list its free pins; it refuses one it can\u2019t use.'}${route !== 'receiver' && wakeRoute === 'receiver' ? ' The host\u2019s daemon predates this setting, so the pin is kept on the receiver alone.' : ''}</div>
+      </div>
       ${wires.length > 0 && html`<div class="card"><h2>Wiring<span class="r">set when flashing</span></h2>
         <div class="facts">${wires.map(([k, g]) => html`<span key=${k} class="k">${NAMES[k]}</span><span key=${k + 'v'}>GPIO${g}</span>`)}</div>
       </div>`}
@@ -233,7 +251,7 @@ function PowerEditor() {
         : route === 'readonly' ? 'Settings are read-only right now: the config can\u2019t be written.'
         : 'Saved on the receiver. At the next boot the config takes over again — put the same values there to keep them.'}</div>
       <div class="btns two"><button class="minor" onClick=${back}>Cancel</button>
-        <button class="primary" disabled=${saving || ro} onClick=${() => B.savePower({ ...t, shortPress: t.shortPress === orig.shortPress ? undefined : t.shortPress })}>Save</button></div>
+        <button class="primary" disabled=${saving || ro} onClick=${() => B.savePower({ ...t, wake: t.wake === orig.wake ? undefined : t.wake, shortPress: t.shortPress === orig.shortPress ? undefined : t.shortPress })}>Save</button></div>
     </div>`;
 }
 

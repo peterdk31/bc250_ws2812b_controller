@@ -192,7 +192,8 @@ struct Config
     }
 };
 
-static Config g_cfg; // loaded once in start(), read-only after
+static Config g_cfg; // loaded once in readConfig(), read-only after
+static bool g_cfgLoaded = false, g_cfgRead = false, g_partitionFound = false;
 
 // loadConfig returns false only when the partition itself is missing — the
 // one case worth a log line, since it means the chip's partition table
@@ -311,13 +312,14 @@ static const char* fmtDuties(const uint8_t* d, char* buf, size_t n,
 
 // ---- the gpio sources ----
 
-// can this board read a PWM on GPIO g? The flasher checks a configured pin
-// against the same facts (tools/fancfg.py, pincheck.py); this is the check
-// for a pin that arrives at runtime — a daemon push, a phone edit — and the
-// one place the phone's edit can be refused with a reason. Pins that would
-// hurt: another feature's, one of our own outputs, the flash pads, the host
-// link, and the boot straps (a PWM at 0 % is a pin held low at reset).
-static bool inputPinFree(int g, const char** why)
+// can this board read an input on GPIO g (fan.hpp)? The flasher checks a
+// configured pin against the same facts (tools/fancfg.py, pincheck.py); this
+// is the check for a pin that arrives at runtime — a daemon push, a phone
+// edit, the power switch's wake pin — and the one place the phone's edit can
+// be refused with a reason. Pins that would hurt: another feature's, one of
+// our own outputs, the flash pads, the host link, and the boot straps (a PWM
+// at 0 % is a pin held low at reset).
+bool inputPinFree(int g, const char** why)
 {
     const char* r = nullptr;
     if (g < 0 || g >= GPIO_NUM_MAX || !GPIO_IS_VALID_GPIO(g))
@@ -326,7 +328,7 @@ static bool inputPinFree(int g, const char** why)
         r = "the power switch's pin";
     else if (render::up() && render::pin() == g)
         r = "the strip's data pin"; // known once the strip device exists
-    else
+    else if (g_cfg.enabled)
     {
         for (int i = 0; i < MAX_FANS; i++)
             if (g_cfg.pin[i] == g)
@@ -827,11 +829,19 @@ bool setHeader(uint8_t slot, const uint8_t* rec, uint16_t len, const char** why)
     return true;
 }
 
+bool readsPin(int g)
+{
+    if (!g_started || g < 0)
+        return false;
+    for (int i = 0; i < MAX_FANS; i++)
+        if (g_inPin[i] == g)
+            return true;
+    return false;
+}
+
 uint64_t inputPins()
 {
     uint64_t m = 0;
-    if (!g_started)
-        return 0;
     for (int g = 0; g < GPIO_NUM_MAX && g < 64; g++)
         if (inputPinFree(g, nullptr))
             m |= 1ULL << g;
@@ -903,10 +913,18 @@ uint16_t standalone(uint8_t* out, uint16_t max, uint32_t* seq)
     return Standalone::WIRE_LEN;
 }
 
+void readConfig()
+{
+    if (g_cfgRead)
+        return;
+    g_cfgRead = true;
+    g_cfgLoaded = loadConfig(g_cfg, g_partitionFound);
+}
+
 void start()
 {
-    bool partitionFound = false;
-    bool loaded = loadConfig(g_cfg, partitionFound);
+    readConfig();
+    bool partitionFound = g_partitionFound, loaded = g_cfgLoaded;
 
     if (!partitionFound)
     {

@@ -27,8 +27,11 @@
 // sense thresholds) start from the same partition but move at runtime: the
 // daemon pushes the config's values (CMD_PWR_TUNING), the phone dials them
 // (BLE control op 0x20), and they persist here in NVS layered over the
-// partition's (cfgstore.hpp) — the pins never do, since re-pinning a line the
-// machine's power hangs on is not a thing to do from a phone.
+// partition's (cfgstore.hpp). Of the pins only the WAKE input moves the same
+// way (CMD_PWR_WAKE, op 0x21): it is an input that can do nothing but power
+// on, so a wrong pick costs a puck that doesn't wake the machine and never
+// more. The other five stay flash-time — re-pinning a line the machine's
+// power hangs on is not a thing to do from a phone.
 namespace pwr
 {
 // the tunings: everything about the switch that isn't a wire. Read by the
@@ -60,8 +63,21 @@ struct Tuning
 // Callable from any task.
 bool setTuning(const uint8_t* payload, uint16_t len, const char** why = nullptr);
 
-// counts applied tuning changes (a poller notifies the phone on them)
-uint32_t tuningSeq();
+// the wake input's pin: a CMD_PWR_WAKE payload from the host, or the phone's
+// op (ble.cpp). gpio -1 (0xFF on the wire) = no wake input. Checked against
+// what this board can read an input on — fan::inputPinFree's facts (another
+// feature's pin, a flash, strap or link pin, one of our outputs) plus a fan
+// header's PWM input in use and, on the plain ESP32, the input-only pads
+// that have no pull-down — applied by the pwr task within one poll (the old
+// pin let go, the new one set up and re-armed), then persisted beside the
+// partition's value (cfgstore.hpp). False, with the reason in *why, when the
+// feature is off or the pin is refused: the pin in force stays. Callable
+// from any task.
+bool setWakePin(int gpio, const char** why = nullptr);
+
+// counts applied changes to the runtime settings — the tunings and the wake
+// pin (a poller notifies the phone on them)
+uint32_t settingsSeq();
 
 // ---- the BLE dashboard's view (ble.cpp) ----
 // this board's side of the power switch — what it is wired to, what it is
@@ -75,7 +91,7 @@ struct Snapshot
     int8_t buttonGndPin = -1;
     int8_t sensePin = -1;    // -1 also when the pin isn't ADC-capable (no sense)
     int8_t ledPin = -1;
-    int8_t wakePin = -1;
+    int8_t wakePin = -1;     // in force (a runtime pick, or the partition's)
     uint8_t psu = 0;         // 0 off, 1 booting, 2 on
     uint16_t senseMv = 0xFFFF; // the last sense reading, 0xFFFF = none (no
                                // sense, or nothing sampled yet)
@@ -108,8 +124,9 @@ int senseState();
 uint32_t powerOnSeq();
 
 // does the power switch use this GPIO (button, PS_ON#, button ground, sense,
-// LED, wake)? For sibling features choosing a pin at runtime — the fan controller
-// refuses a PWM input on one of ours. False while the feature is off.
+// LED, the wake pin in force)? For sibling features choosing a pin at
+// runtime — the fan controller refuses a PWM input on one of ours. False
+// while the feature is off.
 bool usesPin(int gpio);
 
 // coarse PSU state for sibling features (the BLE remote's status

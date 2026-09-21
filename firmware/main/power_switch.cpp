@@ -1,5 +1,7 @@
 #include "power_switch.hpp"
 
+#include "fan.hpp"
+
 #include <cstdint>
 #include <cstring>
 
@@ -143,7 +145,8 @@ static const int SENSE_OVERSAMPLE = 16; // ADC reads averaged per sample: TPMS1 
 // APPENDED: a blob written before led_pin existed reads 0xFF (erased flash)
 // there, i.e. not wired — both directions stay compatible. The four u16s in
 // the middle are Tuning's wire form, byte for byte: they are this feature's
-// flash-time DEFAULTS, and the values in force are g_tune below.
+// flash-time DEFAULTS, and the values in force are g_tune below; wake_pin is
+// a default the same way, with g_wake the pin in force.
 
 static const uint16_t WIRE_LEN = 15;
 
@@ -155,7 +158,8 @@ struct Config
     int8_t buttonGndPin = -1;
     int8_t sensePin = -1;
     int8_t ledPin = -1;             // feedback LED: blinks while the button reads pressed
-    int8_t wakePin = -1;            // wake input: active-HIGH pulse = power on (only)
+    int8_t wakePin = -1;            // wake input: active-HIGH pulse = power on (only) —
+                                    // the flash-time default, g_wake is in force
     Tuning tune;                    // the flash-time defaults for the tunings
 
     bool decode(const uint8_t* p, uint16_t len)
@@ -247,6 +251,15 @@ static volatile uint32_t g_tuneSeq = 1; // bumps when g_tune changes
 static portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t g_pendTune[proto::PWR_TUNING_LEN];
 static volatile bool g_pendTuneSet = false;
+
+// the wake input's pin in force: the partition's until a saved pick or a
+// push says otherwise (the same layering as g_tune). Written only by the pwr
+// task (start(), drainWake()); read there every poll and, as one aligned
+// byte, by snapshot() and usesPin() from other tasks. A pick staged by
+// setWakePin() (any task) sits in g_pendWake until the task consumes it —
+// a single byte, so no critical section: -2 = nothing staged.
+static int8_t g_wake = -1;
+static volatile int8_t g_pendWake = -2;
 
 // ---- state ----
 
@@ -553,11 +566,101 @@ static void drainTuning()
          g_tune.bootTimeoutMs, g_tune.senseLowMv, g_tune.senseHighMv);
 }
 
+// ---- the wake input's pin ----
+
+// the wire byte for a pin (the partition's, NVS's and CMD_PWR_WAKE's form)
+static uint8_t wakeByte(int8_t pin) { return pin < 0 ? 0xFF : (uint8_t)pin; }
+
+// (re)configure `pin` as the wake input — pull-down, so it reads idle with
+// nothing (or an unpowered puck) on it — and start its debounce over, NOT
+// armed: loop() waits for WAKE_ARM_MS of idle first, so a level already high
+// here is never a press. A pin of -1 configures nothing.
+static void wakeSetup(int8_t pin)
+{
+    wakeStable = wakeLastRaw = wakeArmed = false;
+    wakeLastChange = millis();
+    if (pin < 0)
+        return;
+
+    gpio_config_t io = {};
+    io.pin_bit_mask = 1ULL << pin;
+    io.mode = GPIO_MODE_INPUT;
+    io.pull_up_en = GPIO_PULLUP_DISABLE;
+    io.pull_down_en = GPIO_PULLDOWN_ENABLE;
+    gpio_config(&io);
+    wakeLastRaw = gpio_get_level((gpio_num_t)pin) == 1;
+    if (wakeLastRaw)
+        PLOG("wake: gpio%d already high -> waiting for it to settle idle", pin);
+}
+
+// let a pin the wake input no longer reads go: a plain floating input, the
+// pad's reset state, so a sibling feature picking it up later starts clean
+static void wakeRelease(int8_t pin)
+{
+    if (pin < 0)
+        return;
+    gpio_config_t io = {};
+    io.pin_bit_mask = 1ULL << pin;
+    io.mode = GPIO_MODE_INPUT;
+    gpio_config(&io);
+}
+
+// can the wake input read on GPIO g? The flasher checks the configured pin
+// against the chip's facts (tools/pwrcfg.py); this is the check for a pin
+// that arrives at runtime, and the one place a phone's pick is refused with
+// a reason. The fan controller's input check already knows everything that
+// hurts an input here too (its own PWM outputs, the strip, the flash pads,
+// the host link, the boot straps — and our pins, via usesPin, which is why
+// the pin in force is accepted before asking). On top: a pin a fan header
+// reads its PWM on, and the plain ESP32's input-only pads, which have no
+// pull-down to make an unplugged puck read idle.
+static bool wakePinOk(int g, const char** why)
+{
+    const char* r = nullptr;
+    if (g < 0 || g == g_wake)
+        r = nullptr;
+    else if (!fan::inputPinFree(g, &r))
+        ; // r says which
+    else if (fan::readsPin(g))
+        r = "a fan header's PWM input";
+#if CONFIG_IDF_TARGET_ESP32
+    else if (g >= 34)
+        r = "an input-only pad with no pull-down";
+#endif
+    if (why)
+        *why = r;
+    return r == nullptr;
+}
+
+// a wake pin staged by setWakePin(): checked there, so applying is the pin
+// swap — and a persist when it is a change
+static void drainWake()
+{
+    int8_t pin = g_pendWake;
+    if (pin == -2)
+        return;
+    g_pendWake = -2;
+    if (pin == g_wake)
+        return;
+
+    wakeRelease(g_wake);
+    g_wake = pin;
+    wakeSetup(g_wake);
+    g_tuneSeq = g_tuneSeq + 1;
+    uint8_t v = wakeByte(g_wake), base = wakeByte(g_cfg.wakePin);
+    cfgstore::save(g_nvs, "wake", "wakebase", &v, &base, 1);
+    if (g_wake < 0)
+        PLOG("wake input off");
+    else
+        PLOG("wake input on gpio%d", g_wake);
+}
+
 static void loop()
 {
     uint32_t now = millis();
 
     drainTuning();
+    drainWake();
 
     // a staged remote request first: the same two gestures as the button,
     // minus the hold/failsafe semantics (those belong to a finger on the real
@@ -587,11 +690,11 @@ static void loop()
                  stateName(g_state));
     }
 
-    if (g_cfg.wakePin >= 0)
+    if (g_wake >= 0)
     {
         // active HIGH — OpenPuck's PWR_SWITCH_ACTIVE default; the pull-down
         // makes "nothing connected" read idle
-        bool raw = gpio_get_level((gpio_num_t)g_cfg.wakePin) == 1;
+        bool raw = gpio_get_level((gpio_num_t)g_wake) == 1;
 
         if (raw != wakeLastRaw)
         {
@@ -865,7 +968,27 @@ bool usesPin(int gpio)
     if (!g_cfg.enabled || gpio < 0)
         return false;
     return gpio == g_cfg.buttonPin || gpio == g_cfg.psOnPin || gpio == g_cfg.buttonGndPin ||
-           gpio == g_cfg.sensePin || gpio == g_cfg.ledPin || gpio == g_cfg.wakePin;
+           gpio == g_cfg.sensePin || gpio == g_cfg.ledPin || gpio == g_wake;
+}
+
+bool setWakePin(int gpio, const char** why)
+{
+    const char* r = nullptr;
+    if (gpio == 0xFF)
+        gpio = -1; // the wire's "none"
+    if (!g_active)
+        r = "power switch is off";
+    else if (gpio >= GPIO_NUM_MAX)
+        r = "not a GPIO on this chip";
+    else
+        wakePinOk(gpio, &r);
+    if (why)
+        *why = r;
+    if (r)
+        return false;
+
+    g_pendWake = (int8_t)gpio;
+    return true;
 }
 
 bool setTuning(const uint8_t* payload, uint16_t len, const char** why)
@@ -893,7 +1016,7 @@ bool setTuning(const uint8_t* payload, uint16_t len, const char** why)
     return true;
 }
 
-uint32_t tuningSeq() { return g_tuneSeq; }
+uint32_t settingsSeq() { return g_tuneSeq; }
 
 void snapshot(Snapshot& s)
 {
@@ -908,7 +1031,7 @@ void snapshot(Snapshot& s)
     s.buttonGndPin = g_cfg.buttonGndPin;
     s.sensePin = g_adc ? g_cfg.sensePin : -1;
     s.ledPin = g_cfg.ledPin;
-    s.wakePin = g_cfg.wakePin;
+    s.wakePin = g_wake;
     s.psu = g_state == OFF ? 0 : g_state == BOOTING ? 1 : 2;
     s.senseMv = g_adc ? g_lastMv : 0xFFFF;
     s.tuning = g_tune;
@@ -935,6 +1058,23 @@ void start()
                 g_tune = t;
         }
     }
+    // the wake pin the same way. A saved pick this build can't read on
+    // (the fan headers or the strip moved onto it since) falls back to the
+    // partition's, and the debug log says so
+    g_wake = g_cfg.wakePin;
+    {
+        uint8_t base = wakeByte(g_cfg.wakePin), saved;
+        if (cfgstore::load(g_nvs, "wake", "wakebase", &base, 1, &saved))
+        {
+            int pin = saved == 0xFF ? -1 : saved;
+            const char* why = nullptr;
+            if (pin < GPIO_NUM_MAX && wakePinOk(pin, &why))
+                g_wake = (int8_t)pin;
+            else
+                PLOG("saved wake pin gpio%d refused — %s; running the partition's", pin,
+                     why ? why : "not a GPIO on this chip");
+        }
+    }
 
     if (!loaded || !g_cfg.enabled || g_cfg.psOnPin < 0)
     {
@@ -954,9 +1094,10 @@ void start()
         return;
     }
 
-    PLOG("cfg button=%d gnd=%d ps_on=%d sense=%d led=%d wake=%d hold=%u boottmo=%u%s",
+    PLOG("cfg button=%d gnd=%d ps_on=%d sense=%d led=%d wake=%d%s hold=%u boottmo=%u%s",
          g_cfg.buttonPin, g_cfg.buttonGndPin, g_cfg.psOnPin, g_cfg.sensePin,
-         g_cfg.ledPin, g_cfg.wakePin, g_tune.holdMs, g_tune.bootTimeoutMs,
+         g_cfg.ledPin, g_wake, g_wake == g_cfg.wakePin ? "" : " (from NVS, over the partition's)",
+         g_tune.holdMs, g_tune.bootTimeoutMs,
          g_tune == g_cfg.tune ? "" : " (tuning from NVS, over the partition's)");
     bool held = psOnHeld();
     PLOG("start: reset=%d savedOn=%d held=%d", (int)esp_reset_reason(),
@@ -1019,22 +1160,7 @@ void start()
         gpio_set_level((gpio_num_t)g_cfg.buttonGndPin, 0);
     }
 
-    if (g_cfg.wakePin >= 0)
-    {
-        // the wake input: pull-down, so it reads idle with nothing (or an
-        // unpowered puck) on it. Not armed yet — loop() waits for WAKE_ARM_MS
-        // of idle first, so a level already high here is never a press.
-        gpio_config_t io = {};
-        io.pin_bit_mask = 1ULL << g_cfg.wakePin;
-        io.mode = GPIO_MODE_INPUT;
-        io.pull_up_en = GPIO_PULLUP_DISABLE;
-        io.pull_down_en = GPIO_PULLDOWN_ENABLE;
-        gpio_config(&io);
-        wakeLastChange = millis();
-        wakeLastRaw = gpio_get_level((gpio_num_t)g_cfg.wakePin) == 1;
-        if (wakeLastRaw)
-            PLOG("start: wake input already high -> waiting for it to settle idle");
-    }
+    wakeSetup(g_wake); // the wake input, if any (see wakeSetup)
 
     if (g_cfg.ledPin >= 0)
     {

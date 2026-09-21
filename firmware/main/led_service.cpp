@@ -323,6 +323,14 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
         if (!pwr::setTuning(payload, len, &why) && why)
             dbglog::line("led: host's power tuning rejected — %s", why);
     }
+    else if (cmd == proto::CMD_PWR_WAKE)
+    {
+        // and the wake input's pin (pins.wake), the one wire that moves at
+        // runtime — same hand-off, same silence when the feature is off
+        const char* why = nullptr;
+        if (len >= 1 && !pwr::setWakePin(payload[0], &why) && why)
+            dbglog::line("led: host's wake pin gpio%u rejected — %s", payload[0], why);
+    }
     else if (cmd == proto::CMD_PWR_CONFIG)
     {
         // and the daemon's view of that block for the BLE dashboard, same as

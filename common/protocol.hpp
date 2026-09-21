@@ -249,7 +249,10 @@ static const uint8_t CMD_FAN_SENSORS = 0x0D;
 // fans' standalone settings: the daemon pushes the config's power_switch
 // block at startup, on a live reload and after a phone edit, and the receiver
 // applies them at once and persists them in NVS, layered over pwrcfg's (which
-// win again when re-flashed with different values — the fans' rule).
+// win again when re-flashed with different values — the fans' rule). One
+// WIRE moves the same way: the wake input (pins.wake), an input that can
+// only ever power the machine on, so re-pinning it from a phone risks
+// nothing — unlike the other five, which stay flash-time.
 
 // CMD_PWR_TUNING: hold_ms(2) boot_timeout_ms(2) sense_low_mv(2)
 // sense_high_mv(2), little-endian, PWR_TUNING_LEN bytes — the same ranges
@@ -260,9 +263,19 @@ static const uint8_t CMD_FAN_SENSORS = 0x0D;
 static const uint8_t CMD_PWR_TUNING = 0x0E;
 static const uint16_t PWR_TUNING_LEN = 8;
 
+// CMD_PWR_WAKE: wake_pin(1) — the GPIO the wake input reads (README "Waking
+// from an OpenPuck"), FAN_NONE (0xFF) = no wake input. The receiver checks
+// the pin against the same facts a gpio:N fan source is checked against
+// (fan::inputPinFree: not another feature's, not a flash, strap or link pin)
+// and refuses one it can't read on, keeping the pin it has; applied within
+// one poll and persisted like the tunings. Unknown to older firmware, which
+// ignores it. The same byte is the BLE control op 0x21's argument.
+static const uint8_t CMD_PWR_WAKE = 0x10;
+
 // CMD_PWR_CONFIG: the power switch's dashboard view — the config's
 // power_switch block as the daemon runs it: the four tunings in the config's
-// units, the short_press command (or null) and whether edits are accepted.
+// units, the wake pin (or null), the short_press command (or null) and
+// whether edits are accepted.
 // JSON text in the shape daemon/power_remote.hpp documents, at most 256
 // bytes. Sent once at startup, on a reload, and after every applied edit (the
 // answer to a MSG_PWR_CONFIG). The receiver relays it unread.
@@ -293,10 +306,11 @@ static const uint8_t MSG_FAN_WATCH = 0x02;
 static const uint8_t MSG_STRIP_CONFIG = 0x03;
 
 // MSG_PWR_CONFIG (msg frame): a phone's edit of the power switch view — a
-// partial object of CMD_PWR_CONFIG's shape (any of the four tunings, and/or
-// short_press as a command string or null). Validated like the config,
-// written into the config's power_switch block, pushed to the receiver as
-// CMD_PWR_TUNING, answered with CMD_PWR_CONFIG; refused like a fan edit.
+// partial object of CMD_PWR_CONFIG's shape (any of the four tunings, the
+// wake pin as a GPIO number or null, and/or short_press as a command string
+// or null). Validated like the config, written into the config's
+// power_switch block, pushed to the receiver as CMD_PWR_TUNING / CMD_PWR_WAKE,
+// answered with CMD_PWR_CONFIG; refused like a fan edit.
 static const uint8_t MSG_PWR_CONFIG = 0x04;
 
 // REQ_HOST_SHUTDOWN: "power yourself down, gracefully." The receiver's power

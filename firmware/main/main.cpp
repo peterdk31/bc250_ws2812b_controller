@@ -61,7 +61,10 @@ extern "C" void app_main(void)
 
     // the power switch first, before the (slower) filesystem mount: if this is
     // a reset that interrupted an asserted PS_ON#, the board's power is
-    // floating on the PSU's pull-up until start() re-asserts it
+    // floating on the PSU's pull-up until start() re-asserts it. The fan
+    // partition is read ahead of it (a 4 KB read, not the bring-up): the
+    // switch checks a saved wake pin against the fan outputs in start()
+    fan::readConfig();
     pwr::start();
 
     // then the fans (after pwr — the boost reads its sense line; before the

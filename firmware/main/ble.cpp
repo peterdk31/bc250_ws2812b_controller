@@ -65,6 +65,13 @@
 //                           whole (VALUE_ERR) — for a receiver with no
 //                           daemon to route the edit through; a running
 //                           daemon's config wins again at its next start.
+//                           op 0x21 = set the power switch's wake input
+//                           pin, args pin(1) (a GPIO, 0xFF = none), the
+//                           byte of proto::CMD_PWR_WAKE: applied and
+//                           persisted by the power switch (pwr::setWakePin),
+//                           which refuses a pin this board can't read on
+//                           (VALUE_ERR, reason in the debug log) — the info
+//                           value lists the ones it can.
 //                           A wrong token is rejected with "write not
 //                           permitted" (TOKEN_ERR, below); a right power op
 //                           stages the request with the pwr task and
@@ -107,7 +114,8 @@
 //                           relayed as MSG_STRIP_CONFIG, answered by the
 //                           daemon's next CMD_STRIP_CONFIG.
 //   info (read):            build facts: firmware version string, free heap,
-//                           and the GPIOs a gpio:N fan source may read.
+//                           and the GPIOs a gpio:N fan source or the wake
+//                           input may read on.
 //   sensors (read + notify):the daemon's sensor catalogue — the last
 //                           CMD_FAN_SENSORS verbatim (JSON text; empty until
 //                           one arrives): every hwmon temperature and pwm
@@ -188,6 +196,7 @@ static const uint8_t OP_SHUTDOWN = 0x02;
 static const uint8_t OP_HARD_OFF = 0x03;
 static const uint8_t OP_FAN_HEADER = 0x10; // + slot(1) + one header's record (FAN_HEADER_LEN)
 static const uint8_t OP_PWR_TUNING = 0x20; // + the CMD_PWR_TUNING payload (8)
+static const uint8_t OP_PWR_WAKE = 0x21;   // + the CMD_PWR_WAKE payload (1)
 static const uint16_t OP_FAN_HEADER_ARGS = 1 + proto::FAN_HEADER_LEN; // the longest args
 
 // dashboard cadence: the fans and pwr values are notified this often while
@@ -465,6 +474,24 @@ static int ctrlAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
         return 0;
     }
 
+    if (op == OP_PWR_WAKE)
+    {
+        if (args != 1)
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        uint8_t pin = buf[TOKEN_LEN + 1];
+        const char* why = nullptr;
+        if (!pwr::setWakePin(pin, &why))
+        {
+            BLOG("wake pin gpio%u rejected — %s", pin, why ? why : "?");
+            return VALUE_ERR;
+        }
+        if (pin == 0xFF)
+            BLOG("wake input switched off from the phone");
+        else
+            BLOG("wake input set to gpio%u from the phone", pin);
+        return 0;
+    }
+
     if (args != 0)
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     if (op == OP_POWER_ON)
@@ -576,8 +603,10 @@ static int editAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void* arg)
 
 // ver(1) = 2, version(32, NUL-padded; the app image's PROJECT_VER — the git
 // describe of the build), freeHeap(4), minFreeHeap(4), then since ver 2
-// inputPins(8): the GPIOs a gpio:N fan source may read (fan::inputPins),
-// little-endian, bit N = GPIO N. A ver-1 page stops at the heap.
+// inputPins(8): the GPIOs a gpio:N fan source or the wake input may read on
+// (fan::inputPins), little-endian, bit N = GPIO N. A ver-1 page stops at the
+// heap. The page re-reads this after moving the wake pin, the one thing that
+// changes it while a phone is connected.
 static int infoAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
 {
     if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR)
@@ -754,7 +783,7 @@ static void dashboard(uint32_t now)
 
     fan::standalone(nullptr, 0, &seq);
     notifyOnChange(g_chr[C_FANSA], seq);
-    notifyOnChange(g_chr[C_PWR], pwr::tuningSeq());
+    notifyOnChange(g_chr[C_PWR], pwr::settingsSeq());
 }
 
 // owns the advertising pace: quick while the PSU is off, slow while it is on

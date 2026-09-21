@@ -607,7 +607,7 @@ Wiring (the shipped `power_switch.pins`, for the ESP32-C3; `null` = not wired):
 | `button_gnd`: `null` when the switch is wired to a real GND (the carrier board), else e.g. GPIO21 | switch terminal B — driven low as a local ground, so the button needs no run to a real GND. (GPIO21 is U0TXD: free while the host link is USB) |
 | GPIO2 (`sense`, `null` = not wired) | optional board-power sense, e.g. BC-250 TPMS1 pin 9, which is the board's main **3.3 V rail**. Emphatically *not* pin 15 (`3VSB`): that stays up whenever PS_ON# is held, so it reads like a working sense wire and then never fires follow-down or the boot timeout. Read as an averaged ADC voltage with hysteresis (`sense_low_mv` / `sense_high_mv`); the ADC saturates near 3.1 V, so a healthy rail logs ~2.9–3.1 V |
 | GPIO8 (`led`, `null` = none) | optional feedback: the board's own little LED *blinks* while the button reads pressed (and through a wake pulse), so the wiring can be eyeballed without a PSU. GPIO8 is the plain onboard LED on common C3 dev boards; a blink shows regardless of the LED's polarity |
-| `wake` (`null` = not wired; GPIO20 on the carrier's J11) | optional **wake input**: a 3.3 V active-high pulse from another device that wants the machine on — see *Waking from an OpenPuck* below. Internal pull-down; a rising edge while OFF powers on, and a pulse in any other state is dropped, so it can never shut anything down |
+| `wake` (`null` = not wired; GPIO20 on the carrier's J11) | optional **wake input**: a 3.3 V active-high pulse from another device that wants the machine on — see *Waking from an OpenPuck* below. Internal pull-down; a rising edge while OFF powers on, and a pulse in any other state is dropped, so it can never shut anything down. Because it can do nothing else, this is the one pin that also **moves at runtime**, like the tunings: the daemon pushes `pins.wake` at startup and on a reload, and the phone's power settings pick it from the receiver's free pins (see [The dashboard](#the-dashboard)) |
 | 5VSB + GND | PSU standby rail, so the receiver runs while the machine is off — **read the warning below before also plugging in USB** |
 
 > ⚠️ **Critical — 5VSB and USB at the same time.** In this role the receiver
@@ -1228,13 +1228,23 @@ temperature (the top-level `sensors` pick), CPU load and GPU load.
   the machine on and off, put the values well apart between the two), the
   boot timeout, the hold-to-force-off time, and — while the machine is on —
   the **short press** switch (whether a press asks the machine to shut
-  down; the same `short_press` setting the sheet's Shut down uses). The
-  wiring is listed, read-only: pins are set when flashing. **Save** goes to
-  the daemon while the machine is up (into the config's `power_switch`
-  block, then pushed to the receiver — `saved` means the config came back)
-  and straight to the receiver otherwise, where it is stored until a daemon
-  next connects and the config wins again; the editor says which. A
-  receiver on firmware from before the settings shows no cog.
+  down; the same `short_press` setting the sheet's Shut down uses), and the
+  **wake input**: the pin an OpenPuck's power-on pulse arrives on, picked
+  from the receiver's free input pins (the same list a `gpio:N` fan source
+  offers, less the pins fan headers read on) or set to none — the one pin a
+  phone may move, since a pulse there can only ever power the machine on.
+  The rest of the wiring is listed, read-only: those pins are set when
+  flashing. **Save** goes to the daemon while the machine is up (into the
+  config's `power_switch` block — the wake pin into `pins.wake` — then
+  pushed to the receiver — `saved` means the config came back) and straight
+  to the receiver otherwise, where it is stored until a daemon next connects
+  and the config wins again; the editor says which. The receiver checks a
+  wake pin against its own facts (another feature's pin, a flash, strap or
+  link pin) and refuses one it can't use, keeping the pin it had — the page
+  compares the two views a few seconds after a routed save and says so; a
+  daemon from before the setting never pushes a wake pin, so the card then
+  says the pin is kept on the receiver alone. A receiver on firmware from before the
+  settings shows no cog.
 - **Fans** — one row per header: its name, what it follows and that
   source's current reading (`CPU temperature · 58.3 °C`, `PWM input on
   GPIO0 · 65 %`), and the duty the receiver is actually applying. A chip
@@ -1410,9 +1420,10 @@ switch's tunings and short-press command as the daemon runs them). All of
 these payloads are small JSON texts in the shapes `daemon/fans.hpp`,
 `daemon/strip_remote.hpp` and `daemon/power_remote.hpp` document — the
 receiver relays them to the phone without parsing them. The fans' standalone
-settings (`0x08`) and the power switch's tunings (`0x0E`: hold, boot timeout
-and the two sense thresholds, four little-endian u16s) are binary, because
-the receiver does read those: they are what it runs on its own.
+settings (`0x08`), the power switch's tunings (`0x0E`: hold, boot timeout
+and the two sense thresholds, four little-endian u16s) and its wake pin
+(`0x10`: one GPIO byte, `0xFF` = none) are binary, because the receiver does
+read those: they are what it runs on its own.
 
 Byte values and payload formats live in `common/protocol.hpp`, shared by host
 and firmware. The receiver drops bad-checksum frames and rescans for sync, so a

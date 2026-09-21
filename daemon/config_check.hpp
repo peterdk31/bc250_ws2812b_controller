@@ -127,7 +127,7 @@ static const Field POWER_SWITCH[] = {
     {"boot_timeout_seconds", Kind::Num, "seconds for the rail to come up"},
     {"sense_low_mv", Kind::Int, "the rail-off threshold in mV"},
     {"sense_high_mv", Kind::Int, "the rail-on threshold in mV"},
-    {"pins", Kind::Obj, "{ ps_on, button, button_gnd, sense, led, wake }, each a GPIO or null (flash-time)"},
+    {"pins", Kind::Obj, "{ ps_on, button, button_gnd, sense, led, wake }, each a GPIO or null (flash-time; wake also moves at runtime)"},
     {"short_press", Kind::StrOrNull, "the command a short press runs, or null to ignore it"},
 };
 
