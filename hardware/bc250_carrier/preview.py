@@ -64,6 +64,8 @@ def main():
             lay = g.find(c, 'layer')
             if lay is None or lay[1] not in ('F.CrtYd', 'F.Fab', 'F.SilkS'):
                 continue
+            if ref in g.NO_STOCK_SILK and lay[1] == 'F.SilkS':
+                continue                      # the board drops it and draws g.SILK_RECTS instead
             color = {'F.CrtYd': (255, 255, 255, 90), 'F.Fab': (200, 200, 120, 160), 'F.SilkS': (230, 230, 230, 220)}[lay[1]]
             if c[0] == 'fp_line':
                 s, e = g.find(c, 'start'), g.find(c, 'end')
@@ -101,7 +103,10 @@ def main():
         r = g.VIA_DRILL / 2 * SCALE
         dr.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(30, 30, 30))
 
-    # silkscreen legends
+    # silkscreen rectangles (fan header bodies + ramps, module ghost on F.Fab) and legends
+    for x0, y0, x1, y1, layer in g.SILK_RECTS:
+        dr.rectangle([P(x0, y0), P(x1, y1)], outline=(230, 230, 230, 220) if layer == 'F.SilkS' else (200, 200, 120, 160),
+                     width=1)
     for text, x, y, rot, just, size, layer in g.SILK:
         if layer != 'F.SilkS':
             continue

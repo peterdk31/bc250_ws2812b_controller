@@ -23,7 +23,7 @@
         )
       )
     )
-    (property "Footprint" "bc250_carrier:ESP32-C3_SuperMini"
+    (property "Footprint" ""
       (at 0 0 0)
       (effects
         (font
@@ -41,7 +41,7 @@
         hide
       )
     )
-    (property "ki_description" "ESP32-C3 Super Mini dev board, soldered flat"
+    (property "ki_description" "ESP32-C3 Super Mini dev board, plugs into the J12/J13 sockets"
       (at 0 0 0)
       (effects
         (font

@@ -160,10 +160,14 @@ def symbol_pins(sym):
 SM_ROW = 15.24          # pin row spacing — verify against the real module
 SM_PITCH = 2.54
 SM_W, SM_L = 18.0, 22.52
-# Pin names by column, top to bottom, for the module lying COMPONENT SIDE UP
-# with its USB-C at the top (the labels printed on the module's underside read
+# Pin names by column, top to bottom, for the module COMPONENT SIDE UP with
+# its USB-C at the top (the labels printed on the module's underside read
 # mirrored to this). Swap the two lists if a module differs; the nets follow
 # the names, but the tracks are laid out for this arrangement.
+#
+# The module is not soldered: it plugs, male pins down, into two 1x8 female
+# headers J12 (left column) and J13 (right column), 5.7 mm low-profile.  U1
+# exists in the schematic only; on the board the sockets carry its nets.
 SM_LEFT = ['GPIO5', 'GPIO6', 'GPIO7', 'GPIO8', 'GPIO9', 'GPIO10', 'GPIO20', 'GPIO21']
 SM_RIGHT = ['5V', 'GND', '3V3', 'GPIO4', 'GPIO3', 'GPIO2', 'GPIO1', 'GPIO0']
 
@@ -176,10 +180,10 @@ def supermini_symbol():
     sym += [
         S('property', Q('Reference'), Q('U'), S('at', 0, 14.605, 0), S('effects', S('font', S('size', 1.27, 1.27)))),
         S('property', Q('Value'), Q(name), S('at', 0, -14.605, 0), S('effects', S('font', S('size', 1.27, 1.27)))),
-        S('property', Q('Footprint'), Q(f'{PROJECT}:{name}'), S('at', 0, 0, 0),
+        S('property', Q('Footprint'), Q(''), S('at', 0, 0, 0),
           S('effects', S('font', S('size', 1.27, 1.27)), 'hide')),
         S('property', Q('Datasheet'), Q('~'), S('at', 0, 0, 0), S('effects', S('font', S('size', 1.27, 1.27)), 'hide')),
-        S('property', Q('ki_description'), Q('ESP32-C3 Super Mini dev board, soldered flat'), S('at', 0, 0, 0),
+        S('property', Q('ki_description'), Q('ESP32-C3 Super Mini dev board, plugs into the J12/J13 sockets'), S('at', 0, 0, 0),
           S('effects', S('font', S('size', 1.27, 1.27)), 'hide')),
     ]
     g = S('symbol', Q(name + '_0_1'),
@@ -202,52 +206,6 @@ def supermini_symbol():
                       S('number', Q(str(i + 9)), S('effects', S('font', S('size', 1.27, 1.27))))))
     sym += [g, pins]
     return sym
-
-
-def supermini_footprint():
-    """2x8 through-hole footprint, origin at the module centre, USB-C end up
-    (-y). Pin names on the silkscreen sit outside the module outline so they
-    stay readable after it is soldered on."""
-    name = 'ESP32-C3_SuperMini'
-    fp = S('footprint', Q(name), S('version', 20221018), S('generator', 'generate.py'), S('layer', Q('F.Cu')),
-           S('descr', Q('ESP32-C3 Super Mini dev board, 2x8 2.54 mm through-hole, soldered flat; USB-C at the top edge')),
-           S('tags', Q('ESP32-C3 SuperMini')), S('attr', 'through_hole'))
-    fp.append(S('fp_text', 'reference', Q('REF**'), S('at', -6.5, -SM_L / 2 - 0.9), S('layer', Q('F.SilkS')),
-                S('effects', S('font', S('size', 1, 1), S('thickness', 0.15)))))
-    fp.append(S('fp_text', 'value', Q(name), S('at', 0, SM_L / 2 + 1.5), S('layer', Q('F.Fab')),
-                S('effects', S('font', S('size', 1, 1), S('thickness', 0.15)))))
-    hw, hl = SM_W / 2, SM_L / 2
-    for layer, off in (('F.SilkS', 0.15), ('F.Fab', 0.0)):
-        w = 0.12 if layer == 'F.SilkS' else 0.1
-        fp.append(S('fp_rect', S('start', -hw - off, -hl - off), S('end', hw + off, hl + off),
-                    S('stroke', S('width', w), S('type', 'default')), S('fill', 'none'), S('layer', Q(layer))))
-    fp.append(S('fp_rect', S('start', -hw - 0.5, -hl - 0.5), S('end', hw + 0.5, hl + 0.5),
-                S('stroke', S('width', 0.05), S('type', 'default')), S('fill', 'none'), S('layer', Q('F.CrtYd'))))
-    # USB-C marker and the antenna zone, on the fab layer and the silkscreen
-    fp.append(S('fp_rect', S('start', -4.5, -hl - 1.2), S('end', 4.5, -hl + 1.5),
-                S('stroke', S('width', 0.1), S('type', 'default')), S('fill', 'none'), S('layer', Q('F.Fab'))))
-    fp.append(S('fp_text', 'user', Q('USB-C'), S('at', 0, -hl + 3.2), S('layer', Q('F.Fab')),
-                S('effects', S('font', S('size', 0.8, 0.8), S('thickness', 0.12)))))
-    fp.append(S('fp_text', 'user', Q('antenna'), S('at', 0, hl - 2.2), S('layer', Q('F.Fab')),
-                S('effects', S('font', S('size', 0.8, 0.8), S('thickness', 0.12)))))
-    fp.append(S('fp_text', 'user', Q('USB'), S('at', 0, -hl - 0.9), S('layer', Q('F.SilkS')),
-                S('effects', S('font', S('size', 0.8, 0.8), S('thickness', 0.12)))))
-    y0 = -SM_PITCH * 3.5
-    for i, nm in enumerate(SM_LEFT):
-        y = y0 + SM_PITCH * i
-        shape = 'rect' if i == 0 else 'circle'
-        fp.append(S('pad', Q(str(i + 1)), 'thru_hole', shape, S('at', -SM_ROW / 2, y), S('size', 1.7, 1.7),
-                    S('drill', 1.0), S('layers', Q('*.Cu'), Q('*.Mask'))))
-        # no silk names on this side: the optional headers J11/J12 sit in the strip
-        # beside these pads (the right column's names orient the module)
-    for i, nm in enumerate(SM_RIGHT):
-        y = y0 + SM_PITCH * i
-        fp.append(S('pad', Q(str(i + 9)), 'thru_hole', 'circle', S('at', SM_ROW / 2, y), S('size', 1.7, 1.7),
-                    S('drill', 1.0), S('layers', Q('*.Cu'), Q('*.Mask'))))
-        fp.append(S('fp_text', 'user', Q(nm), S('at', SM_ROW / 2 + SM_LABEL_DX, y), S('layer', Q('F.SilkS')),
-                    S('effects', S('font', S('size', SM_LABEL_SIZE, SM_LABEL_SIZE), S('thickness', 0.1)),
-                      S('justify', 'left'))))
-    return fp
 
 
 # ------------------------------------------------------------------ the design
@@ -279,7 +237,9 @@ SM_Y0 = SM_CY - SM_PITCH * 3.5          # y of the first pin row
 SML = SM_CX - SM_ROW / 2                # left pin column x  (GPIO5..GPIO21)
 SMR = SM_CX + SM_ROW / 2                # right pin column x (5V..GPIO0)
 SM_BOT = SM_CY + SM_L / 2               # module bottom edge (antenna end)
-SM_LABEL_DX, SM_LABEL_SIZE = 1.6, 0.7   # stops short of J1's outline  # pin-name silk (right column): offset from the pad, text size
+SM_LABEL_DX, SM_LABEL_SIZE = 1.6, 0.7   # pin-name silk (right column): offset from the pad, text size; stops short of J1's outline
+# the two sockets the module plugs into: ref -> (pin 1 x, pin names top to bottom); pin 1 is the top row
+SM_SOCKET = {'J12': (SML, SM_LEFT), 'J13': (SMR, SM_RIGHT)}
 
 
 def sm_y(i):
@@ -328,14 +288,18 @@ VH_X = [VH_X0 + VH_P * k for k in range(3)]
 # header and pin 1 (GND) the right one: PWM comes from the module on the
 # left, 12 V and GND from the PSU header below-right.  FAN1 FAN2 in the top
 # row, FAN3 FAN4 below; left to right, top to bottom = GPIO5, 6, 7, 10 =
-# the firmware's FAN_PINS order.  The part is a KF2510 4-pin straight header
-# (Ckmtw W-2510S04P): pads as the KiCad KK-254 footprint, but its body is
-# 12.7 x 5.8 mm, the same as a PC fan plug, so the columns are 13.2 mm apart
-# and the rows 9.6 (3.8 mm between bodies for the plugs' latches).  The
-# stock footprint's 10.2 mm silk outline is dropped and the real body drawn.
+# the firmware's FAN_PINS order.  The part is the Molex 47053-1000, the KK 254
+# 4-circuit header the 4-wire PC fan spec names: friction-lock ramp over
+# circuits 1-3 only, so a fan plug's latch wall clears it and a 3-pin fan
+# fits too.  (A KF2510 header with the ramp over all four positions, like
+# the Ckmtw W-2510S04P, has to be cut down before a PC fan plug goes on.)
+# Pads are the KiCad KK-254 footprint's.  The PC fan PLUG body is 12.7 x 5.8
+# mm, so the columns are 13.2 mm apart and the rows 9.6 (3.8 mm between the
+# plugs).  The stock silk (ramp across all four) is dropped and the 47053's
+# body and 3-position ramp drawn instead (see SILK_RECTS for the side).
 FAN_P = 2.54
-FAN_BODY_L, FAN_BODY_D = 12.7, 5.8
-FAN_X1 = [COLC_X + FAN_BODY_L / 2 + 3.81, COLC_X + FAN_BODY_L * 1.5 + 0.5 + 3.81]   # pin 1 (GND) x of the two columns
+FAN_PLUG_L = 12.7                                # a PC fan plug's body length, sets the spacing
+FAN_X1 = [COLC_X + FAN_PLUG_L / 2 + 3.81, COLC_X + FAN_PLUG_L * 1.5 + 0.5 + 3.81]   # pin 1 (GND) x of the two columns
 FAN_Y = [114.4, 124.0]                          # pin y of the two rows
 FAN_ORDER = ['GPIO5', 'GPIO6', 'GPIO7', 'GPIO10']
 FAN_POS = [(FAN_X1[k % 2], FAN_Y[k // 2]) for k in range(4)]   # (pin 1 x, y) for FAN1..FAN4
@@ -414,27 +378,27 @@ def net(name, *pads):
         NETS[p] = name
 
 
-sm_pad = {nm: str(i + 1) for i, nm in enumerate(SM_LEFT)}
-sm_pad.update({nm: str(i + 9) for i, nm in enumerate(SM_RIGHT)})
+# module pin name -> (socket ref, socket pin)
+sm_pad = {nm: (ref, str(i + 1)) for ref, (x, names) in SM_SOCKET.items() for i, nm in enumerate(names)}
 
 for pin, n in MF_NET.items():
     net(n, ('J1', str(pin)))
-net('5VSB', ('U1', sm_pad['5V']))
-net('GND', ('U1', sm_pad['GND']), ('J9', '2'), ('J9', '4'), ('Q1', '1'), ('R1', '2'),
+net('5VSB', sm_pad['5V'])
+net('GND', sm_pad['GND'], ('J9', '2'), ('J9', '4'), ('Q1', '1'), ('R1', '2'),
     ('J3', '3'), ('J5', '1'), ('J6', '1'), ('J7', '1'), ('J8', '1'))
 net('PS_ON#', ('Q1', '3'))
-net('GATE', ('U1', sm_pad['GPIO3']), ('Q1', '2'), ('R1', '1'))
-net('SENSE', ('J10', '1'), ('U1', sm_pad['GPIO2']))
-net('BTN', ('J9', '3'), ('U1', sm_pad['GPIO1']))
-net('DIN', ('U1', sm_pad['GPIO4']), ('J3', '2'))
+net('GATE', sm_pad['GPIO3'], ('Q1', '2'), ('R1', '1'))
+net('SENSE', ('J10', '1'), sm_pad['GPIO2'])
+net('BTN', ('J9', '3'), sm_pad['GPIO1'])
+net('DIN', sm_pad['GPIO4'], ('J3', '2'))
 net('3.3V', ('J3', '1'))
 net('12V', ('J5', '2'), ('J6', '2'), ('J7', '2'), ('J8', '2'), ('J9', '1'))
 for k, gp in enumerate(FAN_ORDER):
-    net(f'FAN_{gp}', ('U1', sm_pad[gp]), (f'J{5 + k}', '4'))
+    net(f'FAN_{gp}', sm_pad[gp], (f'J{5 + k}', '4'))
 for k, n in enumerate(J11_INNER):
     if n.startswith('GPIO'):
         NETS[('J11', str(2 * k + 1))] = 'GND'
-        net(n, ('U1', sm_pad[n]), ('J11', str(2 * k + 2)))
+        net(n, sm_pad[n], ('J11', str(2 * k + 2)))
     else:                                   # a rail: both pins of the row
         NETS[('J11', str(2 * k + 1))] = n
         NETS[('J11', str(2 * k + 2))] = n
@@ -444,9 +408,14 @@ NET_NAMES = ['GND', '5VSB', 'PS_ON#', 'GATE', 'SENSE', 'BTN', 'DIN', '3.3V', '12
 NET_ID = {n: i + 1 for i, n in enumerate(NET_NAMES)}
 
 # Parts: ref -> (symbol lib, symbol, footprint lib, footprint, value, board (x, y, rot))
+# Schematic-only parts (no footprint, not in the BOM): the module, drawn wired
+# to the nets its socket pins carry.
+SCH_ONLY = {'U1': ('bc250_carrier', 'ESP32-C3_SuperMini', 'ESP32-C3 Super Mini: plugs into J12 + J13')}
 PARTS = {
-    'U1': ('bc250_carrier', 'ESP32-C3_SuperMini', PROJECT, 'ESP32-C3_SuperMini', 'ESP32-C3 Super Mini',
-           (SM_CX, SM_CY, 0)),
+    'J12': ('Connector_Generic', 'Conn_01x08', 'Connector_PinSocket_2.54mm', 'PinSocket_1x08_P2.54mm_Vertical',
+            'U1 socket L', (SML, SM_Y0, 0)),
+    'J13': ('Connector_Generic', 'Conn_01x08', 'Connector_PinSocket_2.54mm', 'PinSocket_1x08_P2.54mm_Vertical',
+            'U1 socket R', (SMR, SM_Y0, 0)),
     'J1': ('Connector_Generic', 'Conn_01x10', 'Connector_Molex', 'Molex_Mini-Fit_Jr_5569-10A2_2x05_P4.20mm_Horizontal',
            'PSU Mini-Fit Jr 2x5 R/A', (MF_X0, MF_YF, 0)),
     'J3': ('Connector_Generic', 'Conn_01x03', 'Connector_JST', 'JST_VH_B3P-VH_1x03_P3.96mm_Vertical', 'STRIP',
@@ -620,10 +589,14 @@ for k, gp in enumerate(FAN_ORDER):
     trk(f'FAN_{gp}', B, W_SIG, *pts)
 
 # ---------------------------------------------------------- parts to order
-# Everything except the Super Mini, as LCSC stock numbers (LCSC ships together
-# with a JLCPCB board order).  (refs, LCSC #, manufacturer part, description,
-# per-board qty, LCSC minimum order).  Every number, name and minimum order
-# checked against LCSC's product API on Sep 8 2026.
+# Everything on the board, as LCSC stock numbers (LCSC ships together
+# with a JLCPCB board order, and fab.py turns the board parts into each fab's
+# assembly BOM).  (refs, LCSC #, "manufacturer part" (one space between the
+# two), description, per-board qty, LCSC minimum order).  Every number, name
+# and minimum order checked against LCSC's product API on Sep 8 2026; Sep 18
+# 2026: J10 and J11 re-picked as one-piece parts an assembly line can fit,
+# the fan headers swapped for the Molex part, the module sockets added (all
+# lines are in JLCPCB's assembly library, with stock, that day).
 ORDER = [
     (['Q1'], 'C9114', 'JSCJ 2N7000', 'N-MOSFET TO-92, 60 V 200 mA (S G D)', 1, 10),
     (['R1'], 'C120103', 'CCO CF1/4W-100K 5%', '100 k axial 1/4 W carbon film, 2.3 x 6.5 mm body', 1, 100),
@@ -631,10 +604,14 @@ ORDER = [
      'Mini-Fit Jr 2x5 4.2 mm RIGHT-ANGLE header with snap-in pegs, 9 A (Molex 5569-10A2 clone)', 1, 5),
     (['J3'], 'C160316', 'JST B3P-VH(LF)(SN)', 'VH 3.96 mm 3-pin vertical header, 10 A', 1, 5),
     (['J9'], 'C594232', 'JST B4B-XH-A-G', 'XH 2.5 mm 4-pin vertical header (gold flash)', 1, 5),
-    (['J10'], 'C2337', 'BOOMELE 2.54-1*40P', '2.54 mm 1x40 pin header strip: break off 1 pin for J10', 1, 5),
+    (['J10'], 'C81276', 'BOOMELE 2.54-1*1P', '2.54 mm single pin header (1x1)', 1, 50),
     # NOT C41927 (BOOMELE 2.54-4AS): that is a fully shrouded 2.54 mm wafer, a fan plug cannot enter it
-    (['J5', 'J6', 'J7', 'J8'], 'C140769', 'Ckmtw W-2510S04P-0000',
-     'KF2510 2.54 mm 4-pin straight header with friction-lock ramp, 12.7 x 5.8 mm body (PC fan plug mates)', 4, 10),
+    # NOT C140769 (Ckmtw W-2510S04P): its ramp spans all four positions and a PC fan
+    # plug's latch wall lands on it -- the Sep 2026 boards needed it cut down
+    (['J5', 'J6', 'J7', 'J8'], 'C240840', 'MOLEX 47053-1000',
+     'KK 254 2.54 mm 4-circuit fan header, friction-lock ramp over circuits 1-3 (the 4-wire PC fan header; 3- and 4-pin fan plugs mate)', 4, 5),
+    (['J12', 'J13'], 'C55218878', 'ShouHan PM2.54-1x8PZZ-H5.7',
+     '2.54 mm 1x8 female header, 5.7 mm low profile: the Super Mini plugs into the pair, pins down', 2, 5),
     # mating plugs: strip, button and sense.  J1 mates with the PSU's own plug,
     # the fan headers with the fans' plugs.  Contacts counted with spares.
     (['J3 plug'], 'C157899', 'JST VHR-3N', 'VH 3-way housing', 1, 10),
@@ -643,7 +620,7 @@ ORDER = [
     (['J9 plug'], 'C140573', 'JST SXH-001T-P0.6', 'XH crimp contact, 22-28 AWG (4 used)', 6, 100),
 ]
 ORDER_OPTIONAL = [
-    (['J11'], 'C124382', 'Ckmtw B-2100S32P-B110', '2.54 mm 2x16 pin header: cut to 2x8 for the optional rails + GPIO/GND breakout', 1, 5),
+    (['J11'], 'C68234', 'BOOMELE 2.54-2*8P', '2.54 mm 2x8 pin header: the optional rails + GPIO/GND breakout', 1, 5),
 ]
 
 
@@ -711,10 +688,32 @@ for k, (x1, y) in enumerate(FAN_POS):
 for x1 in FAN_X1:
     SILK.append(_lab('PWM  T  12V  G', x1 - 3.81, FAN_Y[1] + 5.3, None, 0.8))
 
-# Silkscreen rectangles: (x0, y0, x1, y1, layer) — the fan headers' real bodies
-SILK_RECTS = [(x1 - 3.81 - FAN_BODY_L / 2, y - FAN_BODY_D / 2, x1 - 3.81 + FAN_BODY_L / 2, y + FAN_BODY_D / 2, 'F.SilkS')
-              for x1, y in FAN_POS]
-NO_STOCK_SILK = {f'J{5 + k}' for k in range(4)}    # their stock outline is the smaller KK-254 body
+# Silkscreen rectangles: (x0, y0, x1, y1, layer).  The fan headers' bodies
+# and 3-position ramps, in KK-254 footprint coordinates (pin 1 at the
+# origin, pins along +x, body x -1.38..9.0, y -3.03..2.99) turned 180 degrees
+# about pin 1, as the headers sit.  KiCad's KK-254 generator draws the
+# friction-lock ramp on the footprint's +y edge (the chamfered inner wall,
+# 1.53 mm deep; the small rectangles on the -y edge are not the ramp), so on
+# this board the ramp faces -y: UP the board, toward J3.  Rotation 180 was
+# confirmed by the fan plugs fitting the first rev C boards.
+SILK_RECTS = []
+for x1, y in FAN_POS:
+    SILK_RECTS.append((x1 - 9.0, y - 2.99, x1 + 1.38, y + 3.03, 'F.SilkS'))                 # body
+    SILK_RECTS.append((x1 - FAN_P * 2.5, y - 2.99, x1 + 1.38, y - 1.46, 'F.SilkS'))         # ramp: pins 1-3
+NO_STOCK_SILK = {f'J{5 + k}' for k in range(4)}    # the stock outline draws the ramp across all four pins
+# the module: a ghost of its outline on the fab layer, what it is and which
+# way in on the silk between the sockets, and its right column's pin names
+# beside J13 (the left column's sit against J11, see there).
+SILK_RECTS.append((SM_CX - SM_W / 2, SM_CY - SM_L / 2, SM_CX + SM_W / 2, SM_CY + SM_L / 2, 'F.Fab'))
+SILK += [
+    _lab('USB', SM_CX, SM_CY - SM_L / 2 - 0.9, None, 0.8),
+    _lab('U1 ESP32-C3', SM_CX, SM_CY - 6.6, None, 0.8),
+    _lab('Super Mini', SM_CX, SM_CY - 5.1, None, 0.8),
+    _lab('plugs in here', SM_CX, SM_CY - 3.3, None, 0.7),
+    _lab('pins down, USB-C ^', SM_CX, SM_CY - 1.9, None, 0.7),
+    _lab('antenna v', SM_CX, SM_BOT - 5.2, None, 0.7),
+]
+SILK += [_lab(nm, SMR + SM_LABEL_DX, sm_y(i), 'left', SM_LABEL_SIZE) for i, nm in enumerate(SM_RIGHT)]
 
 
 # ------------------------------------------------------------ pad geometry
@@ -744,8 +743,6 @@ def footprint_pads(fp):
 
 def load_part_footprint(ref):
     slib, sname, flib, fname, value, place = PARTS[ref]
-    if flib == PROJECT:
-        return supermini_footprint()
     return load_footprint(flib, fname)
 
 
@@ -877,7 +874,10 @@ def write_sch():
     libsyms = S('lib_symbols')
     seen = set()
     symnodes = {}
-    for ref, (slib, sname, flib, fname, value, place) in PARTS.items():
+    # every part plus the schematic-only ones (no footprint: flib/fname/place None)
+    allparts = dict(PARTS)
+    allparts.update({ref: (slib, sname, None, None, value, None) for ref, (slib, sname, value) in SCH_ONLY.items()})
+    for ref, (slib, sname, flib, fname, value, place) in allparts.items():
         key = f'{slib}:{sname}'
         if key in seen:
             continue
@@ -887,10 +887,16 @@ def write_sch():
         symnodes[key] = node
         libsyms.append(node)
     sch.append(libsyms)
+    # U1's pins carry whatever the socket pin they plug into carries
+    sch_nets = dict(NETS)
+    for i, nm in enumerate(SM_LEFT):
+        sch_nets[('U1', str(i + 1))] = NETS.get(sm_pad[nm])
+    for i, nm in enumerate(SM_RIGHT):
+        sch_nets[('U1', str(i + 9))] = NETS.get(sm_pad[nm])
 
     # schematic placement (sheet mm)
     SPOS = {
-        'U1': (148.59, 96.52),
+        'U1': (148.59, 96.52), 'J12': (105.41, 96.52), 'J13': (200.66, 96.52),
         'J1': (60.96, 60.96), 'J3': (60.96, 91.44), 'J9': (60.96, 111.76), 'J10': (60.96, 129.54),
         'J11': (27.94, 111.76),
         'Q1': (88.9, 147.32), 'R1': (71.12, 147.32),
@@ -899,11 +905,12 @@ def write_sch():
     }
     STUB = 5.08
     items = []
-    for ref, (slib, sname, flib, fname, value, place) in PARTS.items():
+    for ref, (slib, sname, flib, fname, value, place) in allparts.items():
         key = f'{slib}:{sname}'
         sx, sy = SPOS[ref]
-        node = S('symbol', S('lib_id', Q(key)), S('at', sx, sy, 0), S('unit', 1), S('in_bom', 'yes'),
-                 S('on_board', 'yes'), S('dnp', 'no'), S('uuid', Q(U())))
+        yn = 'no' if place is None else 'yes'
+        node = S('symbol', S('lib_id', Q(key)), S('at', sx, sy, 0), S('unit', 1), S('in_bom', yn),
+                 S('on_board', yn), S('dnp', 'no'), S('uuid', Q(U())))
         pins = symbol_pins(symnodes[key])
         # reference/value text just above and below the body
         ymin = min([p[2] for p in pins] + [0]) if pins else 0
@@ -922,7 +929,7 @@ def write_sch():
                       S('effects', S('font', S('size', 1.27, 1.27)))))
         node.append(S('property', Q('Value'), Q(value), S('at', vpos[0], vpos[1], 0),
                       S('effects', S('font', S('size', 1.27, 1.27)))))
-        node.append(S('property', Q('Footprint'), Q(f'{flib}:{fname}'), S('at', sx, sy, 0),
+        node.append(S('property', Q('Footprint'), Q(f'{flib}:{fname}' if flib else ''), S('at', sx, sy, 0),
                       S('effects', S('font', S('size', 1.27, 1.27)), 'hide')))
         node.append(S('property', Q('Datasheet'), Q('~'), S('at', sx, sy, 0),
                       S('effects', S('font', S('size', 1.27, 1.27)), 'hide')))
@@ -936,7 +943,7 @@ def write_sch():
             x, y = sx + px, sy - py
             ang = int(round(ang)) % 360
             d = {0: (-1, 0), 180: (1, 0), 90: (0, 1), 270: (0, -1)}[ang]
-            netname = NETS.get((ref, num))
+            netname = sch_nets.get((ref, num))
             if netname is None:
                 items.append(S('no_connect', S('at', x, y), S('uuid', Q(U()))))
                 continue
@@ -957,6 +964,7 @@ def write_sch():
     notes = [
         (20.32, 20.32, 'ESP32-C3 Super Mini carrier for the BC-250 (serial_led_controller).'),
         (20.32, 24.13, 'The Super Mini brings its own USB-C, 3.3 V regulator, BOOT/RESET buttons and GPIO8 LED.'),
+        (20.32, 46.99, 'U1 is not soldered: it plugs, pins down, into the 1x8 sockets J12 (left column) and J13 (right), USB-C at the board edge.'),
         (20.32, 27.94, 'Its USB VBUS is tied to the 5V pin: cut the red wire in the USB cable (README, Power switch).'),
         (20.32, 31.75, 'The switch common (J9 pin 4) is a real GND: power_switch.pins.button_gnd is null in the config.'),
         (20.32, 35.56, 'Fan header pin 1 = GND, 2 = +12 V, 3 = tach (unused), 4 = PWM. FAN1..4 = GPIO 5, 6, 7, 10 = fans.header1..4.'),
@@ -1024,16 +1032,9 @@ def write_project():
         f.write('(sym_lib_table\n  (version 7)\n'
                 f'  (lib (name "bc250_carrier")(type "KiCad")(uri "${{KIPRJMOD}}/{PROJECT}.kicad_sym")'
                 '(options "")(descr "Project symbols"))\n)\n')
-    with open(os.path.join(HERE, 'fp-lib-table'), 'w') as f:
-        f.write('(fp_lib_table\n  (version 7)\n'
-                f'  (lib (name "{PROJECT}")(type "KiCad")(uri "${{KIPRJMOD}}/{PROJECT}.pretty")'
-                '(options "")(descr "Project footprints"))\n)\n')
     lib = S('kicad_symbol_lib', S('version', 20211014), S('generator', 'generate.py'), supermini_symbol())
     with open(os.path.join(HERE, PROJECT + '.kicad_sym'), 'w') as f:
         f.write(dump(lib) + '\n')
-    os.makedirs(os.path.join(HERE, PROJECT + '.pretty'), exist_ok=True)
-    with open(os.path.join(HERE, PROJECT + '.pretty', 'ESP32-C3_SuperMini.kicad_mod'), 'w') as f:
-        f.write(dump(supermini_footprint()) + '\n')
 
 
 def design():

@@ -121,6 +121,8 @@ def main():
             lay = g.find(c, 'layer')
             if lay is None or lay[1] not in ('F.CrtYd', 'F.Fab', 'F.SilkS'):
                 continue
+            if ref in g.NO_STOCK_SILK and lay[1] == 'F.SilkS':
+                continue                      # the board drops it and draws g.SILK_RECTS instead
             color = {'F.CrtYd': (255, 255, 255, 60), 'F.Fab': (200, 200, 120, 140),
                      'F.SilkS': (235, 235, 235, 230)}[lay[1]]
             if c[0] == 'fp_line':
@@ -165,7 +167,7 @@ def main():
 
     # U1: a dark wash over the module body so its pin labels read, short pin
     # names beside the pads, the full roles in the table below the board
-    sml, smr = pad('U1', 1)[0], pad('U1', 9)[0]
+    sml, smr = pad('J12', 1)[0], pad('J13', 1)[0]
     top, bot = g.SM_CY - g.SM_L / 2, g.SM_BOT
     dr.rectangle([P(sml + 1.3, top), P(smr - 1.3, bot)], fill=(0, 0, 0, 120))
     short_left = {'GPIO5': 'IO5  FAN1', 'GPIO6': 'IO6  FAN2', 'GPIO7': 'IO7  FAN3', 'GPIO8': 'IO8  J11',
@@ -173,13 +175,13 @@ def main():
     short_right = {'5V': '5VSB', 'GND': 'GND', '3V3': 'n/c 3V3', 'GPIO4': 'DIN  IO4', 'GPIO3': 'GATE IO3',
                    'GPIO2': 'SNS  IO2', 'GPIO1': 'BTN  IO1', 'GPIO0': 'J11  IO0'}
     for i, nm in enumerate(g.SM_LEFT):
-        x, y = pad('U1', i + 1)
-        text(x + 1.5, y, short_left[nm], 0.72, net_color(g.NETS.get(('U1', str(i + 1)))), 'lm', True)
+        x, y = pad('J12', i + 1)
+        text(x + 1.5, y, short_left[nm], 0.72, net_color(g.NETS.get(('J12', str(i + 1)))), 'lm', True)
     for i, nm in enumerate(g.SM_RIGHT):
-        x, y = pad('U1', i + 9)
-        text(x - 1.5, y, short_right[nm], 0.72, net_color(g.NETS.get(('U1', str(i + 9)))), 'rm', True)
+        x, y = pad('J13', i + 1)
+        text(x - 1.5, y, short_right[nm], 0.72, net_color(g.NETS.get(('J13', str(i + 1)))), 'rm', True)
     text(g.SM_CX, (top + bot) / 2, 'U1', 1.4, C_TXT, 'mm', True)
-    text(g.SM_CX, top - 0.9, 'U1 ESP32-C3 Super Mini · USB-C end ↑ · pin names on its underside', 0.68, C_TXT)
+    text(g.SM_CX, top - 0.9, 'U1 Super Mini plugs into J12 | J13 · pins down · USB-C ↑', 0.68, C_TXT)
     text(g.SM_CX, bot - 1.0, 'antenna end ↓  keepout', 0.65, (225, 130, 225))
 
     # the module's roles, tabulated under the board's left end
@@ -193,8 +195,8 @@ def main():
                   'GPIO4 → DIN, strip data (J3)', 'GPIO3 → GATE of Q1 → PS_ON#',
                   'GPIO2 ← SENSE, TPMS1 pin 9 (J10)', 'GPIO1 ← button NO (J9 pin 3)', 'GPIO0 → J11 p16']
     for i in range(8):
-        cl = net_color(g.NETS.get(('U1', str(i + 1))))
-        cr = net_color(g.NETS.get(('U1', str(i + 9))))
+        cl = net_color(g.NETS.get(('J12', str(i + 1))))
+        cr = net_color(g.NETS.get(('J13', str(i + 1))))
         text(bx0 - ML + 1.0, ty + 1.6 + i * 1.45, role_left[i], 0.8, cl, 'lm', stroke=False)
         text(bx0 - ML + 23.5, ty + 1.6 + i * 1.45, role_right[i], 0.8, cr, 'lm', stroke=False)
 
@@ -233,6 +235,11 @@ def main():
     text(cx, g.MF_YF - 6.3, 'J1  PSU in — FSP500-30AS 10-pin Mini-Fit Jr', 0.8, C_TXT, 'mm', True)
     text(cx, g.MF_YF - 5.3, 'right-angle: the plug lies flat over the zone above', 0.68, C_DIM)
     text(cx, g.MF_YF - 4.5, 'front row 1–5 here · rear row 6–10 at the edge = LATCH side', 0.68, C_DIM)
+
+    # the board's own silk rectangles: the fan headers' bodies and 3-pin ramps, the module ghost
+    for x0, y0, x1, y1, layer in g.SILK_RECTS:
+        dr.rectangle([P(x0, y0), P(x1, y1)], outline=(235, 235, 235, 230) if layer == 'F.SilkS' else (200, 200, 120, 140),
+                     width=2)
 
     # J3: strip
     for pin, lab in ((1, '3.3V'), (2, 'DIN (GPIO4)'), (3, 'GND')):
@@ -291,7 +298,7 @@ def main():
         "The C3 module's USB VBUS is tied to its 5V pin, so cut the red wire in the MODULE's USB cable (README, "
         "Power switch). The puck's cable stays whole.",
         'Q1: flat face per the silkscreen outline, pins D G S left to right; R1 is its 100 kΩ gate pull-down.',
-        'Fan headers J5–J8: lock ramp toward the BOTTOM edge, pin 1 (G) is the RIGHT pin, tach unconnected.',
+        'Fan headers J5–J8: lock ramp (over G · 12V · T) toward the TOP edge, pin 1 (G) is the RIGHT pin, tach unconnected.',
         'config.json  power_switch.pins: ps_on 3 · button 1 · button_gnd null · sense 2 · led 8 · wake 20 (null '
         'without a puck).  fans.header1..4 = FAN1..4.  strip.pin 4.',
     ]

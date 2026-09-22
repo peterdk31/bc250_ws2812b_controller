@@ -3,7 +3,8 @@
 #   make            generate + check + export
 #   make check      geometry check only (KiCad 7's kicad-cli has no DRC)
 #   make drc        KiCad's own DRC through the pcbnew Python module (out/drc.txt)
-#   make export     gerbers (+ zip for JLCPCB), drill, PDFs, position file, netlist, BOM xml into out/
+#   make export     gerbers, drill, PDFs, position file, netlist, BOM xml into out/, then fab.py:
+#                   an order-ready folder per fab under out/fab/ (jlcpcb, pcbway): gerber zip + BOM + CPL
 #   make preview    quick PNG render of the layout (out/preview.png, Pillow only, no KiCad needed)
 #   make pinout     the annotated wiring/pinout image (pinout.png, tracked — shown in the README)
 #   BOARDS=3 make   size the LCSC parts list (out/lcsc_parts.csv) for 3 boards (default 10)
@@ -48,7 +49,7 @@ export:
 	$(CLI) sch export netlist --output $(OUT)/netlist.net $(SCH)
 	$(CLI) sch export python-bom --output $(OUT)/bom.xml $(SCH)
 	python3 -c "import zoom; zoom.crop('$(OUT)/board-top.pdf', '$(OUT)/zoom-top.pdf', False); zoom.crop('$(OUT)/board-bottom.pdf', '$(OUT)/zoom-bottom.pdf', True)"
-	python3 -c "import shutil; shutil.make_archive('$(OUT)/bc250_carrier-gerbers', 'zip', '$(OUT)/gerbers')"
+	python3 fab.py
 
 clean:
 	rm -rf $(OUT)

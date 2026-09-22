@@ -27,7 +27,9 @@ capacitors or series resistors — the wired-up prototype works without them.
 KiCad's own DRC through its Python module), renders `out/preview.png` and
 exports the board to `out/zoom-top.pdf` / `out/zoom-bottom.pdf`, the
 schematic to `out/schematic.pdf`, the BOM to `out/bom.xml`; gerbers and
-drill files land in `out/gerbers/` with a JLCPCB-ready zip beside them.
+drill files land in `out/gerbers/`, and `fab.py` turns them plus the parts
+list into one order-ready folder per fab under `out/fab/` (JLCPCB, PCBWay:
+gerber zip, BOM, pick-and-place; see Ordering).
 
 ## Layout
 
@@ -45,11 +47,12 @@ Three columns, left to right:
   than the solder mask, because the plug body rides about 1.3 mm above the
   board and the wires drape over the rest. Keep it that way if you edit.
 - **The strip VH** at the top right, the four fan headers as a 2 × 2 block
-  under it, the MOSFET and its resistor along the bottom edge. The fan
-  headers are KF2510 parts with a 12.7 × 5.8 mm body, the same size as a PC
-  fan plug, so the block is spaced for the plugs: columns 13.2 mm apart, rows
-  9.6 mm apart (3.8 mm between the bodies for the plugs' latches, which face
-  down the board on all four).
+  under it, the MOSFET and its resistor along the bottom edge. A PC fan plug
+  body is 12.7 × 5.8 mm (the Molex header itself is 10.4 × 6.0), so the block
+  is spaced for the plugs: columns 13.2 mm apart, rows 9.6 mm apart (3.8 mm
+  between the plugs). The headers' friction ramps face up the board, toward
+  the strip connector, on all four; the silkscreen draws each ramp over its
+  three pins (G, 12V, T) so the plug's latch side is obvious.
 
 Rev B was 80 × 55 mm with a vertical PSU header on the right edge; rev C is
 37 % smaller in area and the PSU cable no longer sticks out of the side.
@@ -103,15 +106,16 @@ measured. If it turns out mirrored, the fix is one line in `MF_NET`.
 
 | ref | part | footprint |
 |---|---|---|
-| U1 | ESP32-C3 Super Mini | 2 × 8 through-hole, 2.54 mm pitch, 15.24 mm row spacing |
+| U1 | ESP32-C3 Super Mini | not soldered: plugs into J12 + J13, pins down, USB-C at the board edge |
+| J12, J13 | Super Mini sockets, left and right column | 1 × 8 female header, 2.54 mm, 5.7 mm low profile (ShouHan PM2.54-1x8PZZ-H5.7), 15.24 mm apart |
 | Q1 | 2N7000 N-MOSFET | TO-92 |
 | R1 | 100 kΩ | axial, 7.62 mm pitch |
 | J1 | PSU in: 3.3V, 5VSB, PS_ON#, +12 V, GND | Molex Mini-Fit Jr 5569-10A2, 2 × 5 right-angle header with pegs (takes the PSU's 10-pin plug) |
 | J3 | strip out: 3.3V, DIN, GND | JST-VH B3P-VH, 3.96 mm, 10 A contacts |
 | J9 | power button: 12V, GND (ring LED), NO, C (switch) | JST-XH 4-pin (B4B-XH-A) |
 | J10 | sense: TPMS1 pin 9 | one 2.54 mm pin (or solder the wire in) |
-| J11 | optional: 3.3V, 5VSB, 12V (two pins each), then GPIO8, GPIO9, GPIO20, GPIO21, GPIO0 each with a GND beside it | 2 × 8 2.54 mm pin header, normally left off |
-| J5–J8 | four 4-pin PWM fan headers | KF2510 4-pin straight header with friction-lock ramp (Ckmtw W-2510S04P-0000; pads are KiCad's Molex KK-254 footprint, so a Molex 47053-1000 fits too) |
+| J11 | optional: 3.3V, 5VSB, 12V (two pins each), then GPIO8, GPIO9, GPIO20, GPIO21, GPIO0 each with a GND beside it | 2 × 8 2.54 mm pin header; fitted on an assembled board, your choice when soldering yourself |
+| J5–J8 | four 4-pin PWM fan headers | Molex 47053-1000, the KK 254 4-circuit header the 4-wire PC fan spec names: friction-lock ramp over circuits 1–3 only, so the fan plug's latch wall clears it (KiCad's Molex KK-254 footprint) |
 | H1–H4 | M3 mounting holes | 3.2 mm, 73.6 × 28.1 mm spacing |
 
 Matching housings: VHR-3N with SVH-21T-P1.1 crimps for the strip (20 AWG
@@ -159,11 +163,61 @@ header to the module is 1.5 mm, since everything J11 draws flows through it.
 
 ## Ordering
 
-Two orders, one shipment: JLCPCB makes the board, LCSC (its sister shop)
-supplies every part except the Super Mini, and LCSC's checkout offers to
-combine the parcel with a JLCPCB order.
+Three ways, from most to least finished. `make` writes an order folder per
+fab under `out/fab/`: `bc250_carrier-gerbers.zip` (gerbers and drill files,
+what the fab's PCB upload takes), `bom.csv` (the parts to fit, in that fab's
+own column layout) and `cpl.csv` (where they go). Everything on the board is
+through-hole. The parts are the LCSC numbers in the table below; `fab.py`
+holds the per-fab layouts (a `PROVIDERS` table, one entry per fab). Whichever
+route, the strip and button **plugs** (JST housings and crimp contacts, the
+last four lines of the table) are not board parts: order them from LCSC
+separately, or from anyone carrying JST VH and XH.
 
-1. **Board.** `make` leaves `out/bc250_carrier-gerbers.zip`; upload it at
+The Super Mini is not soldered. It plugs into two 1 × 8 low-profile sockets
+(J12, J13), which are ordinary stocked parts, so an assembled board from
+either fab is complete: buy any ESP32-C3 Super Mini **with the pins
+soldered** (AliExpress lists them that way; pins point down, away from the
+components) and push it in, USB-C at the board edge as the silkscreen
+between the sockets says. It comes out again for reflashing or replacement.
+
+### Assembled by PCBWay
+
+1. pcbway.com → PCB Instant Quote → upload `out/fab/pcbway/bc250_carrier-gerbers.zip`
+   (it also carries `assembly-top.pdf` / `assembly-bottom.pdf` as the assembly
+   drawing). 2 layers, 1.6 mm, 1 oz, any colour. Add **Assembly service**:
+   turnkey (PCBWay sources the parts), through-hole, top side, from 1 board.
+2. Upload `out/fab/pcbway/bom.csv` and `cpl.csv` (PCBWay's own template
+   columns). Every line has the manufacturer part number and, in the notes,
+   its LCSC number and link, so sourcing is a lookup. Drop the J11 line if
+   you do not want the breakout header.
+3. PCBWay reviews by hand and quotes after that (parts, a per-order assembly
+   setup and per-joint labour). Answer their orientation questions from the
+   silkscreen and `pinout.png`: the fan headers' lock ramp, the VH/XH housing
+   walls, Q1's flat face and J1's mating face are all drawn.
+
+### Assembled by JLCPCB
+
+1. jlcpcb.com → upload `out/fab/jlcpcb/bc250_carrier-gerbers.zip`. PCB
+   defaults; turn on **PCB Assembly**, *Standard* (through-hole parts need
+   it, *Economic* is SMD-only), top side, minimum 2 assembled boards.
+2. Upload `out/fab/jlcpcb/bom.csv` and `cpl.csv`. All nine lines are
+   "extended" parts (a small per-part loading fee each) and were in JLCPCB's
+   library with stock on 18 Sep 2026. Drop the J11 line if you do not want
+   the breakout header.
+3. Check the placement preview. JLCPCB's part-orientation data does not
+   always agree with KiCad's rotation for through-hole connectors; the fan
+   headers' lock ramp, the VH/XH housing walls, Q1's flat face and J1's
+   mating face must match the silkscreen. Rotate a part in the preview if not.
+4. Note the order number and buy the plugs at lcsc.com (below) shipped
+   together with it.
+
+### Bare board, everything soldered by you
+
+Two orders, one shipment: JLCPCB makes the board, LCSC (its sister shop)
+supplies every part (the Super Mini itself comes from wherever you like),
+and LCSC's checkout offers to combine the parcel with a JLCPCB order.
+
+1. **Board.** Upload `out/fab/jlcpcb/bc250_carrier-gerbers.zip` at
    jlcpcb.com. Defaults are fine: 2 layers, 1.6 mm, 1 oz, any colour, no
    assembly. Note the JLCPCB order number.
 2. **Parts.** `out/lcsc_parts.csv` is the shopping list, one line per LCSC
@@ -181,19 +235,25 @@ combine the parcel with a JLCPCB order.
 | C22365658 | DLL-5569-10AW, Mini-Fit Jr 2×5 4.2 mm **right-angle** header (Molex 5569-10A2 clone, no pegs) | J1 | 1 | 5 |
 | C160316 | JST B3P-VH(LF)(SN), 3.96 mm 3-pin, 10 A | J3 | 1 | 5 |
 | C594232 | JST B4B-XH-A-G, 2.5 mm 4-pin (gold flash) | J9 | 1 | 5 |
-| C2337 | BOOMELE 2.54-1*40P, 1×40 pin header strip (break off 1 pin for J10) | J10 | 1 | 5 |
-| C124382 | Ckmtw B-2100S32P-B110, 2×16 pin header (cut to 2×8), optional | J11 | 1 | 5 |
-| C140769 | Ckmtw W-2510S04P-0000, KF2510 4-pin straight header with lock ramp | J5–J8 | 4 | 10 |
+| C81276 | BOOMELE 2.54-1*1P, single 2.54 mm pin | J10 | 1 | 50 |
+| C68234 | BOOMELE 2.54-2*8P, 2×8 pin header, optional | J11 | 1 | 5 |
+| C240840 | Molex 47053-1000, KK 254 4-circuit fan header, ramp over circuits 1–3 | J5–J8 | 4 | 5 |
+| C55218878 | ShouHan PM2.54-1x8PZZ-H5.7, 1×8 female header, 5.7 mm low profile (Super Mini socket) | J12, J13 | 2 | 5 |
 | C157899 | JST VHR-3N housing | strip plug | 1 | 10 |
 | C160349 | JST SVH-21T-P1.1 crimp contact, 18–22 AWG | strip plug (3 + spares) | 5 | 100 |
 | C144403 | JST XHP-4 housing | button plug | 1 | 20 |
 | C140573 | JST SXH-001T-P0.6 crimp contact, 22–28 AWG | button plug (4 + spares) | 6 | 100 |
 
 Every number, name, stock and minimum order above was checked against
-LCSC's product data on 8 Sep 2026, and the J1 and fan-header datasheets
-were read against the footprints. Do **not** substitute BOOMELE 2.54-4AS
-(C41927) for the fan headers: despite its listing it is a fully shrouded
-2.54 mm wafer (CJT A2541 style) that a PC fan plug cannot enter.
+LCSC's product data on 8 Sep 2026 (18 Sep 2026: the two pin headers
+re-picked as one-piece parts, the fan headers swapped for the Molex part, the
+module sockets added, and every line confirmed in JLCPCB's assembly
+library), and the J1 datasheet was read against the footprint. Two fan
+header substitutes **not** to make: BOOMELE 2.54-4AS (C41927) is, despite
+its listing, a fully shrouded 2.54 mm wafer (CJT A2541 style) that a PC fan
+plug cannot enter; Ckmtw W-2510S04P (C140769, the rev C first-order part)
+mates, but its friction ramp runs the full four positions and a PC fan
+plug's latch wall lands on it, so it had to be cut down.
 
 The whole list is a few dollars; the minimum orders are what set the
 quantities (the two crimp contacts come in bags of 100). The PSU header mates with the PSU's own plug and the fan headers
@@ -204,11 +264,14 @@ squeeze the insulation tabs with pliers. Use 20 AWG for the strip wires.
 
 Two things to check when the parts arrive, before soldering:
 
-- **Fan headers.** A PC fan plug is a KF2510-family housing, so it mates
-  with the W-2510S04P; the header's lock ramp sets which way round the plug
-  goes. Before powering a fan, put a meter on the header and confirm the
-  fan's black wire lands on the pad marked `G` and yellow/red on `12V`. If
-  the plug only fits the other way round, change the fan headers' rotation
+- **Fan headers.** The Molex 47053-1000 is the header the 4-wire PC fan
+  spec names: its friction-lock ramp covers circuits 1–3 and the fan plug's
+  latch hooks over it, with the plug's wall beside circuit 4. It is the same
+  KK 254 family as the KF2510 header the first rev C boards carried, ramp on
+  the same side, so the plugs go on the same way round, now without cutting
+  the ramp down. Before powering a fan, put a meter on the header and confirm
+  the fan's black wire lands on the pad marked `G` and yellow/red on `12V`.
+  If the plug only fits the other way round, change the fan headers' rotation
   from 180 to 0 in `generate.py` (`PARTS`, the `J5..J8` loop) and re-order,
   or re-pin the fan plug.
 - **The PSU header** orientation, as described above.
@@ -263,7 +326,7 @@ host-presence detection all still work.
 - **The PSU header** solders with its housing over the front pin row and its
   face pointing up the board; the two pegs snap into the 3 mm holes. Nothing
   may be placed in the plug zone in front of it.
-- **J11** is optional: leave it off unless you need a rail or a spare GPIO.
+- **J11** is optional when you solder yourself: leave it off unless you need a rail or a spare GPIO.
   It sits in the strip between the board's left edge and the module's left
   pin column, so that column has no pin names printed (the right column's
   names orient the module); the header's own pin names are printed on the
