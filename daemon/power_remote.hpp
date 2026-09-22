@@ -212,7 +212,7 @@ public:
     // of a file before the daemon runs on it
     static bool checkTuning(double hold, double boot, int low, int high, std::string& why)
     {
-        char buf[160];
+        char buf[200]; // the longest message below is 143 chars + two ints
         if (!(hold >= 0.1 && hold <= 65.535))
             snprintf(buf, sizeof buf, "hold_seconds %g is not 0.1..65.535", hold);
         else if (!(boot >= 1 && boot <= 65.535))
