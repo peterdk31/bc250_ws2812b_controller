@@ -299,6 +299,12 @@ int main(int argc, char** argv)
     if (!cfgcheck::retiredKeys(cfg))
         return 1;
 
+    // opt-in GDDR6 temperatures (daemon/sources/smu.hpp): the SMU is patched
+    // only when the config asks, and never otherwise — so this is the one
+    // switch, checked here and on every reload below
+    if (cfg.getBool(smu::CONFIG_KEY))
+        smu::Reader::get().enable();
+
     // the dashboards' way back into the config file (daemon/config_edit.hpp):
     // a phone edit of a fan curve or the strip's colors is written into the
     // file the daemon runs from, so it survives a restart like a hand edit
@@ -317,6 +323,16 @@ int main(int argc, char** argv)
     if (fanStatus)
     {
         fanCtl.dumpStatus(stdout);
+        // if VRAM temperatures were asked for, say whether the SMU took the
+        // patch and why not — the reason the poller would log to the journal,
+        // shown here for the one-shot where its thread may not outlive us
+        if (cfg.getBool(smu::CONFIG_KEY))
+        {
+            smu::Reader::get().present(); // waits (bounded) for the first attempt
+            std::string why = smu::Reader::get().status();
+            printf("  vram_temps: %s\n",
+                   why.empty() ? "SMU patched, reading the GDDR6 chips" : why.c_str());
+        }
         return 0;
     }
 
@@ -611,6 +627,11 @@ int main(int argc, char** argv)
         cfg = std::move(fresh);
         rules = std::move(freshRules);
         fanCtl = std::move(freshFans);
+
+        // a reload can only turn VRAM temperatures on (enable() is one-way; the
+        // in-memory SMU patch lives until reboot regardless)
+        if (cfg.getBool(smu::CONFIG_KEY))
+            smu::Reader::get().enable();
 
         fanCtl.pushStandalone(sinks);
         fanCtl.pushConfig(sinks);

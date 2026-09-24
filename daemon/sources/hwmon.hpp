@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "pmbus.hpp"
+#include "smu.hpp"
 
 // /sys/class/hwmon sensor discovery and reading, shared by the
 // load effect and the temp rule conditions
@@ -31,10 +32,14 @@ inline void listTempFiles(const char* dirPath, std::vector<Reading>& out);
 //                                  millidegrees
 //   pmbus:CPU VRM                  a rail of the BC-250's VRM controller,
 //                                  read over I2C by pmbus.hpp
+//   smu:VRAM hotspot               a GDDR6 chip temperature, read from the
+//                                  SMU by smu.hpp (off unless the config
+//                                  opts in; see smu::Reader)
 // The "chip" of a file spec is the word file and its label the path; a pmbus
-// spec's labels are pmbus::RAILS.
+// spec's labels are pmbus::RAILS, an smu spec's smu::SOURCES.
 inline const char* FILE_PREFIX = "file:";
 inline const char* PMBUS_PREFIX = "pmbus:";
+inline const char* SMU_PREFIX = "smu:";
 
 inline bool hasPrefix(const std::string& s, const char* prefix)
 {
@@ -92,6 +97,8 @@ inline bool fileExists(const std::string& path)
         return statExists(path.substr(strlen(FILE_PREFIX)));
     if (hasPrefix(path, PMBUS_PREFIX))
         return pmbus::Reader::get().present();
+    if (hasPrefix(path, SMU_PREFIX))
+        return smu::Reader::get().present();
     return statExists(path);
 }
 
@@ -105,6 +112,11 @@ inline std::string findSensor(const std::string& chip, const std::string& label)
     if (chip == "pmbus")
         return pmbus::railOf(label) >= 0 && pmbus::Reader::get().present()
                    ? PMBUS_PREFIX + label
+                   : "";
+
+    if (chip == "smu")
+        return smu::sourceOf(label) >= 0 && smu::Reader::get().present()
+                   ? SMU_PREFIX + label
                    : "";
 
     DIR* dir = opendir("/sys/class/hwmon");
@@ -440,6 +452,15 @@ inline std::vector<Reading> enumerate()
             out.push_back({"pmbus", pmbus::RAILS[i].label, false, v});
     }
 
+    // the GDDR6 chips, once the SMU is patched (only when the config opted in,
+    // so the enumerate is empty and the poller stays dark otherwise)
+    for (int i = 0; i < smu::SOURCE_COUNT; i++)
+    {
+        float v;
+        if (readTempOk(std::string(SMU_PREFIX) + smu::SOURCES[i].label, v))
+            out.push_back({"smu", smu::SOURCES[i].label, false, v});
+    }
+
     // temperatures other telemetry publishes as files: BC250-Telemetry
     // (github.com/onlinermm/BC250-Telemetry) writes its PMBus and GDDR6
     // readings as millidegree files under /run/bc250 — cpu_vrm_temp,
@@ -481,7 +502,8 @@ inline float readTemp(const std::string& path)
     if (path.empty())
         return 0;
 
-    if (hasPrefix(path, FILE_PREFIX) || hasPrefix(path, PMBUS_PREFIX))
+    if (hasPrefix(path, FILE_PREFIX) || hasPrefix(path, PMBUS_PREFIX) ||
+        hasPrefix(path, SMU_PREFIX))
     {
         float v;
         return readTempOk(path, v) ? v : 0;
@@ -514,6 +536,14 @@ inline bool readTempOk(const std::string& path, float& v)
     {
         int rail = pmbus::railOf(path.substr(strlen(PMBUS_PREFIX)));
         if (!pmbus::Reader::get().temp(rail, v))
+            return false;
+        return v > 0 && v <= TEMP_MAX;
+    }
+
+    if (hasPrefix(path, SMU_PREFIX))
+    {
+        int source = smu::sourceOf(path.substr(strlen(SMU_PREFIX)));
+        if (!smu::Reader::get().temp(source, v))
             return false;
         return v > 0 && v <= TEMP_MAX;
     }

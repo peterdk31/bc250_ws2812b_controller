@@ -497,7 +497,8 @@ private:
     static const char* SOURCE_HELP()
     {
         return "expected fallback, gpio:N, temp, cpu_load, gpu_load, a hwmon "
-               "chip:label / chip:pwmN, pmbus:CPU VRM / pmbus:GPU VRM, or file:/path";
+               "chip:label / chip:pwmN, pmbus:CPU VRM / pmbus:GPU VRM, "
+               "smu:VRAM hotspot / smu:VRAM chip 0..7, or file:/path";
     }
 
     // what a source string means: kind, and for gpio the pin, for hwmon
@@ -576,6 +577,9 @@ private:
                     rails += std::string(i ? " or pmbus:" : "pmbus:") + pmbus::RAILS[i].label;
                 return "the VRM controller's rails are " + rails;
             }
+            if (cchip == "smu" && smu::sourceOf(clabel) < 0)
+                return "smu names a GDDR6 reading: smu:VRAM hotspot, smu:VRAM average, "
+                       "or smu:VRAM chip 0..7 (and needs \"vram_temps\": true)";
             if (cchip == "file" && (clabel.empty() || clabel[0] != '/'))
                 return "file:/path names a file holding one temperature (millidegrees or degrees)";
         }

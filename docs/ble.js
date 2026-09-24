@@ -441,7 +441,7 @@ export const SRC_KINDS = {
   fallback: { label: 'Fixed speed', hint: 'runs at the fallback speed, always' },
   gpio:     { label: 'PWM input', hint: 'a fan wire on a receiver pin' },
   temp:     { label: 'CPU temperature' },
-  hwmon:    { label: 'Sensor', hint: 'chip:label, e.g. amdgpu:edge or pmbus:GPU VRM' },
+  hwmon:    { label: 'Sensor', hint: 'chip:label, e.g. amdgpu:edge, pmbus:GPU VRM or smu:VRAM hotspot' },
   pwm:      { label: 'Board fan header', hint: 'chip:pwmN, e.g. nct6686:pwm1' },
   cpu_load: { label: 'CPU load' },
   gpu_load: { label: 'GPU load' },

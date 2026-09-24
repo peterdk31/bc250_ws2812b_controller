@@ -884,7 +884,8 @@ so does *where the curve runs* — on whichever side can read the input:
 | `temp` | the top-level `sensors` pick | °C | daemon |
 | `chip:label` | any hwmon temperature, same syntax as `sensors` (`amdgpu:edge`, `nct6686:CPU`; a comma list of candidates works too). The phone's picker lists every labelled one the machine has, with its reading; so does `--fan-status` | °C | daemon |
 | `pmbus:CPU VRM` / `pmbus:GPU VRM` | the BC-250's two VRM rails, read from the board's PMBus controller over I2C by the daemon itself — see [VRM and GDDR6 temperatures](#vrm-and-gddr6-temperatures) for the two-wire mod that exposes the bus. Listed in the picker once the controller answers | °C | daemon |
-| `file:/path` | one temperature in a plain file, in millidegrees (the sysfs convention: 1000 and up) or degrees. For telemetry some other program publishes as files, such as GDDR6 temperatures (below). Files under `/run/bc250` named `*_temp` are listed in the picker; any other path goes in through its *Temperature file…* row | °C | daemon |
+| `smu:VRAM hotspot` / `smu:VRAM average` / `smu:VRAM chip 0`..`7` | the eight GDDR6 chips, read from the SMU by the daemon — the hottest, the mean, or a named chip. Off unless `"vram_temps": true` and the SMU has been unlocked by a patched BIOS; see [VRM and GDDR6 temperatures](#vrm-and-gddr6-temperatures). Code 80 saturates the sensor at 120 °C. Listed in the picker once patched | °C | daemon |
+| `file:/path` | one temperature in a plain file, in millidegrees (the sysfs convention: 1000 and up) or degrees. For telemetry some other program publishes as files. Files under `/run/bc250` named `*_temp` are listed in the picker; any other path goes in through its *Temperature file…* row | °C | daemon |
 | `chip:pwmN` | a hwmon pwm *output* — the board's own fan header, i.e. what its BIOS fan curve is asking for, read over the host instead of a wire. Outputs that read alike are one line in the phone's picker (`pwm 1–8`, following the first) until they differ | % (0..255 read as 0..100) | daemon |
 | `cpu_load` / `gpu_load` | the rule conditions' readings | % | daemon |
 
@@ -1032,19 +1033,54 @@ dropped and searched for again, the header on its `fallback` meanwhile like
 any lost sensor. If nothing answers on any bus, `--fan-status` shows the
 source as `(not found)` and the daemon keeps looking every 30 s.
 
-GDDR6 temperatures are a different matter: reading them means patching the
-SMU's firmware at runtime, which this daemon will not do. If you run
-[BC250-Telemetry](https://github.com/onlinermm/BC250-Telemetry)'s memory service
-for them, it publishes the readings as millidegree files that the `file:`
-source reads, and the picker lists them:
+The eight GDDR6 chips are a harder case. Nothing in the kernel reads them: the
+value lives behind the SMU (the GPU's management microcontroller), which has no
+stock command that returns it. The way around it — worked out by
+[pan-Rijovich/bc250-memory-temperature](https://github.com/pan-Rijovich/bc250-memory-temperature)
+and packaged by [BC250-Telemetry](https://github.com/onlinermm/BC250-Telemetry),
+both MIT — is to upload a small program into the SMU and point an unused command
+slot at it; that program then asks the memory controller for each chip. The
+daemon can do this itself, exposing the chips as `smu:` sources, but only under
+two conditions, because patching a live microcontroller is not something to do
+by accident:
 
 ```jsonc
-"source": "file:/run/bc250/memory_hotspot_temp"   // hottest of the eight chips
-"source": "file:/run/bc250/memory_avg_temp"
+"vram_temps": true      // top level: opt in. Absent or false, the SMU is never touched.
 ```
 
-The same files exist for its VRM readings (`cpu_vrm_temp`, `gpu_vrm_temp`),
-should you prefer that service's reads to the daemon's own.
+```jsonc
+"source": "smu:VRAM hotspot"    // the hottest chip
+"source": "smu:VRAM average"    // the mean of the eight
+"source": "smu:VRAM chip 3"     // one named chip, 0..7
+```
+
+1. **`"vram_temps": true`** must be set. Without it the daemon does not open the
+   SMU at all, and the sources are not listed.
+2. **The SMU's secure-access gate must already be open**, done by a patched BIOS
+   such as [RescueMei's DXEv3 build](https://github.com/RescueMei/BC250-DXEv3-BIOSMOD).
+   The daemon does **not** run the unlock itself — that is an exploit, the risky
+   half, and it belongs in firmware that runs once at boot. If the gate is
+   closed the daemon says so and offers no readings.
+
+The daemon also checks the board is a BC-250 on stock **P3.0** firmware (the
+build the uploaded program was compiled against) and reads its own upload back
+before trusting it. The patch lives in the SMU's RAM only and is gone on the
+next reboot; the daemon re-applies it when asked. Code 80 is the sensor's
+ceiling and reads as 120 °C, meaning "at least that" — set a VRAM curve's top
+below 120. `--fan-status` prints whether the patch took and, if not, why (a
+locked SMU, the wrong board or BIOS); the daemon logs the same to the journal.
+
+> **Risk.** The uploaded program waits on the memory controller with no timeout
+> of its own, and this integration has not been validated on hardware. A wedged
+> SMU may need a full power-off (standby included) to recover. Do not run a
+> concurrent SMU tool (an overclock service or governor) alongside it — the
+> daemon cannot coordinate mailbox access with one.
+
+If you would rather not have the daemon touch the SMU, BC250-Telemetry's own
+memory service publishes the same readings as millidegree files that the
+`file:` source reads (`file:/run/bc250/memory_hotspot_temp`,
+`memory_avg_temp`), and the picker lists any `/run/bc250/*_temp` file. The same
+files exist for its VRM readings (`cpu_vrm_temp`, `gpu_vrm_temp`).
 
 ### Getting the block onto the receiver
 

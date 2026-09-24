@@ -103,6 +103,7 @@ static const Field TOP[] = {
     {"crossfade_ms", Kind::Int, "the dissolve between effects, 0..65535 ms"},
     {"frame_ms", Kind::Int, "the default frame period every effect reads"},
     {"sensors", Kind::Any, "hwmon candidates: \"chip:label,...\" or an array of them"},
+    {smu::CONFIG_KEY, Kind::Bool, "true to patch the SMU for GDDR6 (VRAM) temperatures — BC-250, unlocked BIOS"},
     {"rules", Kind::Arr, "the rules, first match wins"},
 };
 
