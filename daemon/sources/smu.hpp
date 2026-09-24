@@ -134,10 +134,10 @@ struct Source
 };
 inline const Source SOURCES[] = {
     {"VRAM hotspot", Hotspot}, {"VRAM average", Average},
-    {"VRAM chip 0", Chip0 + 0}, {"VRAM chip 1", Chip0 + 1},
-    {"VRAM chip 2", Chip0 + 2}, {"VRAM chip 3", Chip0 + 3},
-    {"VRAM chip 4", Chip0 + 4}, {"VRAM chip 5", Chip0 + 5},
-    {"VRAM chip 6", Chip0 + 6}, {"VRAM chip 7", Chip0 + 7},
+    {"VRAM 0", Chip0 + 0}, {"VRAM 1", Chip0 + 1},
+    {"VRAM 2", Chip0 + 2}, {"VRAM 3", Chip0 + 3},
+    {"VRAM 4", Chip0 + 4}, {"VRAM 5", Chip0 + 5},
+    {"VRAM 6", Chip0 + 6}, {"VRAM 7", Chip0 + 7},
 };
 inline const int SOURCE_COUNT = (int)(sizeof(SOURCES) / sizeof(SOURCES[0]));
 

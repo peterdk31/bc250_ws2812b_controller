@@ -884,7 +884,7 @@ so does *where the curve runs* — on whichever side can read the input:
 | `temp` | the top-level `sensors` pick | °C | daemon |
 | `chip:label` | any hwmon temperature, same syntax as `sensors` (`amdgpu:edge`, `nct6686:CPU`; a comma list of candidates works too). The phone's picker lists every labelled one the machine has, with its reading; so does `--fan-status` | °C | daemon |
 | `pmbus:CPU VRM` / `pmbus:GPU VRM` | the BC-250's two VRM rails, read from the board's PMBus controller over I2C by the daemon itself — see [VRM and GDDR6 temperatures](#vrm-and-gddr6-temperatures) for the two-wire mod that exposes the bus. Listed in the picker once the controller answers | °C | daemon |
-| `smu:VRAM hotspot` / `smu:VRAM average` / `smu:VRAM chip 0`..`7` | the eight GDDR6 chips, read from the SMU by the daemon — the hottest, the mean, or a named chip. Off unless `"vram_temps": true` and the SMU has been unlocked by a patched BIOS; see [VRM and GDDR6 temperatures](#vrm-and-gddr6-temperatures). Code 80 saturates the sensor at 120 °C. Listed in the picker once patched | °C | daemon |
+| `smu:VRAM hotspot` / `smu:VRAM average` / `smu:VRAM 0`..`7` | the eight GDDR6 chips, read from the SMU by the daemon — the hottest, the mean, or a named chip. Off unless `"vram_temps": true` and the SMU has been unlocked by a patched BIOS; see [VRM and GDDR6 temperatures](#vrm-and-gddr6-temperatures). Code 80 saturates the sensor at 120 °C. Listed in the picker once patched | °C | daemon |
 | `file:/path` | one temperature in a plain file, in millidegrees (the sysfs convention: 1000 and up) or degrees. For telemetry some other program publishes as files. Files under `/run/bc250` named `*_temp` are listed in the picker; any other path goes in through its *Temperature file…* row | °C | daemon |
 | `chip:pwmN` | a hwmon pwm *output* — the board's own fan header, i.e. what its BIOS fan curve is asking for, read over the host instead of a wire. Outputs that read alike are one line in the phone's picker (`pwm 1–8`, following the first) until they differ | % (0..255 read as 0..100) | daemon |
 | `cpu_load` / `gpu_load` | the rule conditions' readings | % | daemon |
@@ -1051,7 +1051,7 @@ by accident:
 ```jsonc
 "source": "smu:VRAM hotspot"    // the hottest chip
 "source": "smu:VRAM average"    // the mean of the eight
-"source": "smu:VRAM chip 3"     // one named chip, 0..7
+"source": "smu:VRAM 3"          // one named chip, 0..7
 ```
 
 ```jsonc
