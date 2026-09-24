@@ -1054,6 +1054,10 @@ by accident:
 "source": "smu:VRAM chip 3"     // one named chip, 0..7
 ```
 
+```jsonc
+"vram_temps_interval_ms": 1000  // optional: how often to re-read (default 3000, floored at 250)
+```
+
 1. **`"vram_temps": true`** must be set. Without it the daemon does not open the
    SMU at all, and the sources are not listed.
 2. **The SMU's secure-access gate must already be open**, done by a patched BIOS
@@ -1070,11 +1074,23 @@ ceiling and reads as 120 °C, meaning "at least that" — set a VRAM curve's top
 below 120. `--fan-status` prints whether the patch took and, if not, why (a
 locked SMU, the wrong board or BIOS); the daemon logs the same to the journal.
 
+**Running alongside a GPU governor.** The SMU is reached through one shared
+register window (`0xB8`/`0xBC` on `00:00.0`), and an SMU GPU governor such as
+[filippor/cyan-skillfish-governor](https://github.com/filippor/cyan-skillfish-governor)
+(smu branch) drives the same window. That governor takes `flock` on the PCI
+config file around its accesses, and the daemon takes the **same** lock around
+each of its own, so the two coordinate rather than corrupt each other's
+transactions. This makes concurrent use safe in the ordinary case. It is not a
+hard guarantee — the governor locks per register access rather than per
+address+data pair, so a residual race on its own writes remains — so keep the
+read cadence modest (the 3 s default is fine; there is little reason to poll
+VRAM temperatures fast) and, if you can, run only one SMU tool. A reader that
+does **not** take the lock (BC250-Telemetry's own memory service) must not run
+with the governor at all.
+
 > **Risk.** The uploaded program waits on the memory controller with no timeout
 > of its own, and this integration has not been validated on hardware. A wedged
-> SMU may need a full power-off (standby included) to recover. Do not run a
-> concurrent SMU tool (an overclock service or governor) alongside it — the
-> daemon cannot coordinate mailbox access with one.
+> SMU may need a full power-off (standby included) to recover.
 
 If you would rather not have the daemon touch the SMU, BC250-Telemetry's own
 memory service publishes the same readings as millidegree files that the

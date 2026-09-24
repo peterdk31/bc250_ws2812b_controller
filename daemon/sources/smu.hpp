@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <sys/file.h> // flock
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -40,9 +41,11 @@
 // average are computed from the chips that read.
 namespace smu
 {
-// the top-level config key that opts in: the SMU is patched only when this is
-// true (README "VRAM temperatures"). The module owns the name.
+// the top-level config keys the module owns: the opt-in (the SMU is patched
+// only when this is true — README "VRAM temperatures") and an optional read
+// cadence in milliseconds (floored; default DEFAULT_INTERVAL_MS).
 inline const char* CONFIG_KEY = "vram_temps";
+inline const char* CONFIG_KEY_INTERVAL = "vram_temps_interval_ms";
 
 // the SMU is reached through the root complex's PCI config space: a register
 // address is written to one dword, the data read or written at the next
@@ -166,13 +169,24 @@ public:
     }
     ~Bus() { close(); }
 
+    // Each SMU register access is a two-step through the shared SMN window
+    // (address to 0xB8, data at 0xBC); it must be atomic against anything else
+    // poking the same window. The BC-250 GPU governor
+    // (github.com/filippor/cyan-skillfish-governor, smu branch) drives the very
+    // same window and takes flock(LOCK_EX) on this config file around its
+    // accesses, so we take the same lock across our address+data pair. That
+    // makes each of our accesses atomic and mutually exclusive with the
+    // governor's. The lock is held for two syscalls only (microseconds), never
+    // across the response-poll loop, so it cannot stall the governor.
     bool writeReg(uint32_t reg, uint32_t value)
     {
+        Lock lk(fd_);
         return dword(reg, PCI_REG) && dword(value, PCI_DATA);
     }
     // false on an I/O error; *value holds the dword otherwise
     bool readReg(uint32_t reg, uint32_t* value)
     {
+        Lock lk(fd_);
         if (!dword(reg, PCI_REG))
             return false;
         uint32_t v = 0;
@@ -183,6 +197,14 @@ public:
     }
 
 private:
+    // flock(LOCK_EX) held for one register access; released at scope exit. An
+    // uncontended flock is a cheap kernel call, so it is always taken.
+    struct Lock
+    {
+        int fd;
+        explicit Lock(int f) : fd(f) { flock(fd, LOCK_EX); }
+        ~Lock() { flock(fd, LOCK_UN); }
+    };
     bool dword(uint32_t v, off_t off) { return pwrite(fd_, &v, 4, off) == 4; }
     int fd_ = -1;
 };
@@ -201,6 +223,11 @@ public:
     // than idling until the next tick.
     void enable() { enabled_.store(true); }
     bool enabled() const { return enabled_.load(); }
+
+    // how often the eight chips are re-read, milliseconds. Floored so a typo
+    // can't hammer the SMU (and the GPU governor sharing its window). Live: a
+    // config reload can change it.
+    void setIntervalMs(int ms) { intervalMs_.store(ms < MIN_INTERVAL_MS ? MIN_INTERVAL_MS : ms); }
 
     // the latest temperature of a source (SOURCES index), false when it has
     // none — the feature is off, the patch never took, or that chip's code
@@ -234,9 +261,12 @@ public:
         return patched_ ? "" : status_;
     }
 
+public:
+    static constexpr int DEFAULT_INTERVAL_MS = 3000; // between chip sweeps
+    static constexpr int MIN_INTERVAL_MS = 250;      // the floor setIntervalMs clamps to
+
 private:
     static constexpr double WANT_S = 15;    // poll while asked within this long
-    static constexpr int POLL_MS = 3000;    // between chip sweeps
     static constexpr int RETRY_MS = 30000;  // between patch attempts while it fails
     static constexpr int MAILBOX_MS = 1000; // a command's own timeout — generous
                                             // (a healthy SMU answers in ms; this
@@ -307,7 +337,10 @@ private:
                 else
                     sweep();
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(POLL_MS));
+            // while patched, wake at the configured cadence to re-read; while
+            // not, the 30 s retry gate above means these wakeups just re-check
+            int ms = patched_ ? intervalMs_.load() : DEFAULT_INTERVAL_MS;
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
         }
     }
 
@@ -647,6 +680,7 @@ private:
     std::atomic<bool> enabled_{false};
     std::atomic<bool> started_{false};
     std::atomic<double> wantedAt_{0};
+    std::atomic<int> intervalMs_{DEFAULT_INTERVAL_MS};
     Bus bus_;                  // poller-only
     int fails_ = 0;            // poller-only
     std::string lastLogged_ = "\x01"; // poller-only; a sentinel so the first outcome always logs

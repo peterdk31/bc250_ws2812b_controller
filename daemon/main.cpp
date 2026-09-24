@@ -303,7 +303,11 @@ int main(int argc, char** argv)
     // only when the config asks, and never otherwise — so this is the one
     // switch, checked here and on every reload below
     if (cfg.getBool(smu::CONFIG_KEY))
+    {
+        smu::Reader::get().setIntervalMs(
+            (int)cfg.getInt(smu::CONFIG_KEY_INTERVAL, smu::Reader::DEFAULT_INTERVAL_MS));
         smu::Reader::get().enable();
+    }
 
     // the dashboards' way back into the config file (daemon/config_edit.hpp):
     // a phone edit of a fan curve or the strip's colors is written into the
@@ -629,9 +633,14 @@ int main(int argc, char** argv)
         fanCtl = std::move(freshFans);
 
         // a reload can only turn VRAM temperatures on (enable() is one-way; the
-        // in-memory SMU patch lives until reboot regardless)
+        // in-memory SMU patch lives until reboot regardless), but the read
+        // cadence can change live
         if (cfg.getBool(smu::CONFIG_KEY))
+        {
+            smu::Reader::get().setIntervalMs(
+                (int)cfg.getInt(smu::CONFIG_KEY_INTERVAL, smu::Reader::DEFAULT_INTERVAL_MS));
             smu::Reader::get().enable();
+        }
 
         fanCtl.pushStandalone(sinks);
         fanCtl.pushConfig(sinks);

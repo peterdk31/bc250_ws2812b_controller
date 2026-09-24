@@ -104,6 +104,7 @@ static const Field TOP[] = {
     {"frame_ms", Kind::Int, "the default frame period every effect reads"},
     {"sensors", Kind::Any, "hwmon candidates: \"chip:label,...\" or an array of them"},
     {smu::CONFIG_KEY, Kind::Bool, "true to patch the SMU for GDDR6 (VRAM) temperatures — BC-250, unlocked BIOS"},
+    {smu::CONFIG_KEY_INTERVAL, Kind::Int, "how often to re-read the VRAM chips, ms (default 3000, floored)"},
     {"rules", Kind::Arr, "the rules, first match wins"},
 };
 
