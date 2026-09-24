@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <sys/file.h> // flock
@@ -151,6 +152,20 @@ inline int sourceOf(const std::string& label)
 
 // the bus to the SMU: one open PCI config fd, register reads and writes
 // through its window. Not thread-safe on its own; the Reader serializes it.
+//
+// Every SMU register access is a two-step through one shared SMN window
+// (address to 0xB8, data at 0xBC), and the BC-250 GPU governor
+// (github.com/filippor/cyan-skillfish-governor, smu branch) drives the very
+// same window from another process, taking flock(LOCK_EX) on this config file
+// around its accesses. We take the same lock — but around a whole mailbox
+// command (Guard, held by message()), not each register. That makes each SMU
+// command atomic against the governor's window use, and because the lock is
+// acquired once per command rather than a dozen times, it minimises the one
+// race that stays: the governor locks per single dword, so its own
+// address→data pair can still be split by any other window user between its
+// two writes. In steady state that barely matters anyway — the governor sets
+// GPU clocks on queue 0 while we only read on queue 3, so the queues never
+// collide and only the window is shared.
 class Bus
 {
 public:
@@ -169,24 +184,35 @@ public:
     }
     ~Bus() { close(); }
 
-    // Each SMU register access is a two-step through the shared SMN window
-    // (address to 0xB8, data at 0xBC); it must be atomic against anything else
-    // poking the same window. The BC-250 GPU governor
-    // (github.com/filippor/cyan-skillfish-governor, smu branch) drives the very
-    // same window and takes flock(LOCK_EX) on this config file around its
-    // accesses, so we take the same lock across our address+data pair. That
-    // makes each of our accesses atomic and mutually exclusive with the
-    // governor's. The lock is held for two syscalls only (microseconds), never
-    // across the response-poll loop, so it cannot stall the governor.
+    // flock(LOCK_EX) for the span of one mailbox command, released at scope
+    // exit; EINTR-safe. An uncontended flock is a cheap kernel call.
+    struct Guard
+    {
+        int fd;
+        explicit Guard(int f) : fd(f)
+        {
+            while (flock(fd, LOCK_EX) != 0 && errno == EINTR)
+                ;
+        }
+        ~Guard()
+        {
+            while (flock(fd, LOCK_UN) != 0 && errno == EINTR)
+                ;
+        }
+        Guard(const Guard&) = delete; // one lock, one unlock (C++17 elides the return)
+        Guard& operator=(const Guard&) = delete;
+    };
+    Guard guard() { return Guard(fd_); }
+
+    // raw window accesses — no lock of their own; the caller holds a Guard for
+    // the command that spans them
     bool writeReg(uint32_t reg, uint32_t value)
     {
-        Lock lk(fd_);
         return dword(reg, PCI_REG) && dword(value, PCI_DATA);
     }
     // false on an I/O error; *value holds the dword otherwise
     bool readReg(uint32_t reg, uint32_t* value)
     {
-        Lock lk(fd_);
         if (!dword(reg, PCI_REG))
             return false;
         uint32_t v = 0;
@@ -197,14 +223,6 @@ public:
     }
 
 private:
-    // flock(LOCK_EX) held for one register access; released at scope exit. An
-    // uncontended flock is a cheap kernel call, so it is always taken.
-    struct Lock
-    {
-        int fd;
-        explicit Lock(int f) : fd(f) { flock(fd, LOCK_EX); }
-        ~Lock() { flock(fd, LOCK_UN); }
-    };
     bool dword(uint32_t v, off_t off) { return pwrite(fd_, &v, 4, off) == 4; }
     int fd_ = -1;
 };
@@ -502,6 +520,13 @@ private:
     // pass), which is why the payload readback is verified regardless
     std::string checkPlatform()
     {
+        // never drive the SMN window on a device that is not the AMD root
+        // complex we expect (the governor and the reference both gate on this)
+        std::string vendor = trim(readLine("/sys/bus/pci/devices/0000:00:00.0/vendor"));
+        if (vendor != "0x1022")
+            return "PCI 0000:00:00.0 is not an AMD root complex (vendor " +
+                   (vendor.empty() ? "absent" : vendor) + ") — VRAM temperatures are BC-250 only";
+
         std::string board = trim(readLine("/sys/class/dmi/id/board_name"));
         std::string bios = trim(readLine("/sys/class/dmi/id/bios_version"));
         std::string id = board;
@@ -522,12 +547,16 @@ private:
 
     // one mailbox command: write args, write the command, wait for a done
     // response. false on I/O error or timeout. *ret gets the response dword,
-    // *arg0 the first argument dword after completion (either may be null).
+    // *arg0 the first argument dword after completion (either may be null). The
+    // whole exchange is held under one bus lock so it is atomic against the GPU
+    // governor sharing the SMN window; a healthy SMU answers within a poll or
+    // two, so the lock is held about a millisecond.
     bool message(const Mailbox& mb, uint32_t msg, std::initializer_list<uint32_t> args,
                  uint32_t* ret, uint32_t* arg0)
     {
         if ((int)args.size() > mb.argCount)
             return false;
+        Bus::Guard lk = bus_.guard();
         if (!bus_.writeReg(mb.rsp, 0))
             return false;
         for (int i = 0; i < mb.argCount; i++)
