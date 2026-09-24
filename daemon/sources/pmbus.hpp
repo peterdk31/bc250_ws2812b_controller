@@ -236,8 +236,9 @@ private:
                     failures_ = 0;
                     if (w != 0xFFFF)
                     {
+                        // the believable range is hwmon::readTempOk's to judge
                         t = (float)(w & TEMP_MASK);
-                        ok = t > 0 && t <= 120;
+                        ok = t > 0;
                     }
                 }
                 else

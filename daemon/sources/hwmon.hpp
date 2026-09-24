@@ -375,7 +375,7 @@ struct Reading
 
 // every such reading, chips and entries in a stable order. Unlabelled
 // temperatures are skipped (the config can't name them), as are readings no
-// thermistor produces: at or below 0 °C, or above 120 (the NCT6686D's
+// thermistor produces: at or below 0 °C, or above TEMP_MAX (the NCT6686D's
 // unconnected inputs read 0). Fan tachometers, voltages and currents are not
 // sources and are not listed.
 // LED_HWMON_ROOT points enumerate() at a stand-in tree (tests on a machine
@@ -496,9 +496,15 @@ inline float readTemp(const std::string& path)
 
 // a temperature a fan may act on: false when the file is missing or
 // unreadable, and for a value no thermistor produces — at or below 0 °C
-// (an unplugged input, which the NCT6686D reports as 0) or above 120. A
+// (an unplugged input, which the NCT6686D reports as 0) or above TEMP_MAX. A
 // fan curve fed 0 would run to its floor with the part it cools unwatched,
 // so callers treat false as "no reading" and fall back.
+// TEMP_MAX only has to catch garbage, never a real reading: a loaded VRM
+// runs past 120 °C, and a hot part read as "no reading" drops its fan to
+// the fallback exactly when it needs the curve's top. Nothing survives
+// 200 °C, so a value above it is a misread.
+inline const float TEMP_MAX = 200;
+
 inline bool readTempOk(const std::string& path, float& v)
 {
     if (path.empty())
@@ -509,7 +515,7 @@ inline bool readTempOk(const std::string& path, float& v)
         int rail = pmbus::railOf(path.substr(strlen(PMBUS_PREFIX)));
         if (!pmbus::Reader::get().temp(rail, v))
             return false;
-        return v > 0 && v <= 120;
+        return v > 0 && v <= TEMP_MAX;
     }
 
     if (hasPrefix(path, FILE_PREFIX))
@@ -523,7 +529,7 @@ inline bool readTempOk(const std::string& path, float& v)
         if (d >= 1000 || d <= -1000)
             d /= 1000;
         v = (float)d;
-        return v > 0 && v <= 120;
+        return v > 0 && v <= TEMP_MAX;
     }
 
     std::ifstream f(path);
@@ -531,7 +537,7 @@ inline bool readTempOk(const std::string& path, float& v)
     if (!(f >> millideg))
         return false;
     v = millideg / 1000.0f;
-    return v > 0 && v <= 120;
+    return v > 0 && v <= TEMP_MAX;
 }
 
 } // namespace hwmon
