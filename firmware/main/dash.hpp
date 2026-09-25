@@ -17,17 +17,19 @@
 // daemon's readings on its phone.
 namespace dash
 {
+// each up to its protocol.hpp DASH_*_MAX — past a GATT attribute's 512 bytes
+// for the larger ones, which the phone reads in pages (ble.cpp)
 enum Slot
 {
-    FAN_CONFIG = 0,   // CMD_FAN_CONFIG, up to 512 bytes (a GATT attribute's ceiling)
-    FAN_TELEM = 1,    // CMD_FAN_TELEM, up to 384
-    STRIP_CONFIG = 2, // CMD_STRIP_CONFIG, up to 512
-    FAN_SENSORS = 3,  // CMD_FAN_SENSORS, up to 512: the sensor catalogue for the source picker
-    PWR_CONFIG = 4,   // CMD_PWR_CONFIG, up to 256: the power switch's tunings as the daemon runs them
+    FAN_CONFIG = 0,   // CMD_FAN_CONFIG: the fan list as the daemon runs it
+    FAN_TELEM = 1,    // CMD_FAN_TELEM: what the curves read and run
+    STRIP_CONFIG = 2, // CMD_STRIP_CONFIG: the strip's knobs and scenes
+    FAN_SENSORS = 3,  // CMD_FAN_SENSORS: the catalogue for the input and output pickers
+    PWR_CONFIG = 4,   // CMD_PWR_CONFIG: the power switch's tunings as the daemon runs them
     SLOTS = 5
 };
 
-static const uint16_t MAX_LEN = 512; // the largest slot; a read buffer this big fits any
+static const uint16_t MAX_LEN = 2048; // the largest slot; a read buffer this big fits any
 
 // a payload from the host. One this build can't hold is a newer daemon's
 // and is dropped rather than served truncated for the phone to misread.

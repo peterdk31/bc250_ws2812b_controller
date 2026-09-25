@@ -7,10 +7,9 @@
 //   service a5f20001-8f11-4e0e-9b3a-0bc250e0c001
 //   control a5f20002-... : write  token(16, NUL-padded) + op(1) [+ args]
 //                          op 0x01=on 0x02=graceful shutdown 0x03=hard off
-//                          op 0x10=set a fan header's fallback duty,
-//                          args slot(1) percent(1) — the receiver's own
-//                          op 0x11=set a header's standalone source,
-//                          args slot(1) kind(1) gpio(1) npts(1) pts(2*npts)
+//                          op 0x10=set a fan slot's standalone record, args
+//                          slot(1) + the record (encodeRecord) — the
+//                          receiver's own; a record with no output removes it
 //                          op 0x20=set the power switch's tunings, args
 //                          hold_ms(2) boot_timeout_ms(2) sense_low_mv(2)
 //                          sense_high_mv(2), LE — the receiver's own
@@ -18,10 +17,11 @@
 //                          args pin(1), 0xFF = none — the receiver's own
 //   status  a5f20003-... : read/notify  1 byte  0=off 1=booting 2=on
 //   fans    a5f20004-... : read/notify  the receiver's own fan view (parseFans)
-//   fancfg  a5f20005-... : read/notify  the daemon's fan config, JSON text;
-//                          write  token(16) + a partial edit, same shape
+//   fancfg  a5f20005-... : read/notify  the daemon's fan list, JSON text;
+//                          write  token(16) + one edit (fans.hpp's shapes)
 //   info    a5f20006-... : read  firmware version + heap + the free input
-//                          pins (a gpio:N fan source, the wake input)
+//                          pins (a gpio:N fan input, the wake input), the
+//                          board's header map, the free output pins
 //   telem   a5f20007-... : read/notify  the daemon's readings, JSON text
 //   stripcfg a5f20008-...: read/notify  the daemon's strip view, JSON text;
 //                          write  token(16) + a partial edit, same shape
@@ -33,6 +33,9 @@
 //                          wire's live reading — notified 1 Hz while subscribed
 //   pwrcfg  a5f2000c-... : read/notify  the daemon's power switch view, JSON text
 //                          (power_remote.hpp); write token(16) + a partial edit
+//   page    a5f2000d-... : write [slot][page], read the page — the daemon's
+//                          JSON values above past a GATT value's 512 bytes
+//                          (readPaged); a receiver without it is older firmware
 // A receiver on older firmware has only the first two; the dashboard then
 // stays hidden and the power remote works as before.
 //
@@ -68,8 +71,9 @@ const FANSA  = 'a5f20009-8f11-4e0e-9b3a-0bc250e0c001';
 const SENSORS = 'a5f2000a-8f11-4e0e-9b3a-0bc250e0c001';
 const PWR    = 'a5f2000b-8f11-4e0e-9b3a-0bc250e0c001';
 const PWRCFG = 'a5f2000c-8f11-4e0e-9b3a-0bc250e0c001';
+const PAGE   = 'a5f2000d-8f11-4e0e-9b3a-0bc250e0c001';
 export const OP_ON = 0x01, OP_SHUTDOWN = 0x02, OP_HARD_OFF = 0x03;
-export const OP_FAN_HEADER = 0x10;   // + slot(1) + the header's record (SA_HEADER_LEN, encodeRecord)
+export const OP_FAN_HEADER = 0x10;   // + slot(1) + the slot's record (SA_HEADER_LEN, encodeRecord)
 export const OP_PWR_TUNING = 0x20;   // + hold_ms(2) boot_ms(2) low_mv(2) high_mv(2)
 export const OP_PWR_WAKE = 0x21;     // + pin(1), 0xFF = no wake input
 export const TOKEN_LEN = 16;
@@ -89,7 +93,7 @@ export const HAS_BT = 'bluetooth' in navigator;
 export const S = {
   device: null, ctrl: null, stat: null,   // the selected receiver + its live GATT
   fansChr: null, cfgChr: null, telemChr: null, stripChr: null, saChr: null, sensChr: null,
-  pwrChr: null, pcfgChr: null, infoChr: null,
+  pwrChr: null, pcfgChr: null, infoChr: null, pageChr: null,
   psu: -1,         // last status byte seen, -1 = unknown
   busy: false,     // a user-initiated connect or write in flight
   attempt: null,   // the device an auto-reconnect (watch or connect) is live for
@@ -100,7 +104,8 @@ export const S = {
   pcfg: null,      // the daemon's power switch view (parsePwrCfg)
   sens: null,      // the sensor catalogue: [{ spec, chip, label, pwm, value }] (parseSensors)
   sensMore: 0,     // sensors the catalogue left out for size (its "_more")
-  saving: null,    // 'p' or a slot: a write waiting for its answer
+  outs: null,      // the host's pwm outputs: [{ spec, duty, rpm, writable }] (parseSensors)
+  saving: null,    // 'p' or a fan card's key: a write waiting for its answer
   note: null,      // the one status line: { text, cls } — a save's progress, or a refusal
   demo: false,
 };
@@ -195,7 +200,7 @@ function gattQueue(op) {
   gattChain = p.then(() => {}, () => {});
   return p;
 }
-const gattReset = () => { gattChain = Promise.resolve(); };
+const gattReset = () => { gattChain = pagedChain = Promise.resolve(); };
 const gattRead = c => gattQueue(() => c.readValue());
 // writeValueWithResponse is newer than the iOS polyfills' first releases —
 // the deprecated writeValue is the same thing where the new name is missing
@@ -435,8 +440,10 @@ export async function forget() {
 }
 
 // ---- the dashboard's data ----
-// a header's source: the config's string ("fallback", "gpio:0", "temp",
-// "amdgpu:edge", "nct6686:pwm1", "cpu_load", "gpu_load") → its kind and parts
+// A fan is an input read through a curve onto an output (daemon/fans.hpp).
+// Its input: the config's string ("fallback", "gpio:0", "temp",
+// "amdgpu:edge", "nct6686:pwm1", "cpu_load", "gpu_load" — or, on a host
+// output, "": the board drives it) → its kind and parts
 export const SRC_KINDS = {
   fallback: { label: 'Fixed speed', hint: 'runs at the fallback speed, always' },
   gpio:     { label: 'PWM input', hint: 'a fan wire on a receiver pin' },
@@ -445,39 +452,65 @@ export const SRC_KINDS = {
   pwm:      { label: 'Board fan header', hint: 'chip:pwmN, e.g. nct6686:pwm1' },
   cpu_load: { label: 'CPU load' },
   gpu_load: { label: 'GPU load' },
-  host:     { label: 'Host curve', hint: 'a source only the host reads' },
+  board:    { label: 'Board curve', hint: 'the board runs this output itself, not the host' },
+  host:     { label: 'Host curve', hint: 'an input only the host reads' },
 };
 export const HOST_KINDS = ['temp', 'hwmon', 'pwm', 'cpu_load', 'gpu_load']; // the daemon runs these
 export const FILE_PREFIX = 'file:'; // hwmon.hpp: a spec naming a file holding one temperature
-export function srcInfo(s) {
+export function srcInfo(s, output = '') {
   s = String(s || '');
+  if (!s && outInfo(output).kind === 'host') return { kind: 'board', src: '' };
   if (s === 'fallback' || s === 'constant') return { kind: 'fallback', src: 'fallback' };
   if (s === 'temp' || s === 'cpu_load' || s === 'gpu_load') return { kind: s, src: s };
-  if (s === 'pwm') return { kind: 'pwm', src: s, spec: '' }; // an older daemon sent kind names
   const i = s.indexOf(':'), chip = i < 0 ? s : s.slice(0, i), lbl = i < 0 ? '' : s.slice(i + 1);
   if (chip === 'gpio') return { kind: 'gpio', src: s, gpio: parseInt(lbl, 10) };
   if (/^pwm\d+$/.test(lbl)) return { kind: 'pwm', src: s, spec: s };
   return { kind: 'hwmon', src: s, spec: s };
 }
-// the config string a working copy stands for
-export const srcText = h => h.kind === 'gpio' ? `gpio:${h.gpio}` : (h.kind === 'hwmon' || h.kind === 'pwm') ? (h.spec || '') : h.kind;
-export const isFixed = h => h.kind === 'fallback';                 // no curve: the fallback is the duty
+// the config string a working copy's input stands for
+export const srcText = h => h.kind === 'gpio' ? `gpio:${h.gpio}` : h.kind === 'board' ? ''
+  : (h.kind === 'hwmon' || h.kind === 'pwm') ? (h.spec || '') : h.kind;
+// its output: "" (parked), "headerN", "gpio:N", "chip:pwmN" (a host output)
+export function outInfo(o) {
+  o = String(o || '');
+  if (!o) return { kind: 'parked' };
+  let m = /^header([1-9]\d*)$/.exec(o);
+  if (m) return { kind: 'header', num: +m[1] };
+  m = /^gpio:(0|[1-9]\d*)$/.exec(o);
+  if (m) return { kind: 'gpio', num: +m[1] };
+  return { kind: 'host', spec: o };
+}
+export const isReceiverOut = o => o.kind === 'header' || o.kind === 'gpio';
+// the GPIO a receiver output drives, through the receiver's header map (null
+// = not a receiver output, or a header the map doesn't know)
+export function outPin(o) {
+  if (o.kind === 'gpio') return o.num;
+  const hp = S.info && S.info.headerPins;
+  return o.kind === 'header' && hp && hp[o.num - 1] != null ? hp[o.num - 1] : null;
+}
+export const outLabel = o => o.kind === 'header' ? `Header ${o.num}` : o.kind === 'gpio' ? `GPIO${o.num}`
+  : o.kind === 'host' ? o.spec.replace(':', ' ') : 'No output';
+export const isFixed = h => h.kind === 'fallback' || h.kind === 'board'; // no curve
 export const isTempX = h => h.kind === 'temp' || h.kind === 'hwmon'; // the curve's x is °C
+export const TEMP_MAX = 200; // °C, the daemon's hwmon::TEMP_MAX: no reading goes above it
 export const NONE = 0xFF;
 export const CHANNELS = 6, MAX_POINTS = 8; // common/fancurve.hpp: the daemon and the receiver cap at this too
 export const SRC_NAMES = ['', 'fallback', 'live', 'boost', 'curve']; // fan::SRC_* (curve = the receiver's own gpio curve)
 const KIND_BYTE = { fallback: 0, gpio: 1, host: 2 }; // protocol.hpp FAN_KIND_*
-// the fans view's length by layout version: 1 = state(1) duty(1) per header,
-// 2 adds the receiver's stored fallback(1), 3 the source kind(1) and input(1)
+const OUT_HEADER = 1, OUT_GPIO = 2;                  // protocol.hpp FAN_OUT_*
+// the fans view's length by layout version: 1 = state(1) duty(1) per slot,
+// 2 adds the receiver's stored fallback(1), 3 the input kind(1) and input(1)
 const FANS_STRIDE = { 1: 2, 2: 3, 3: 5 };
 export const FANS_LEN = ver => 4 + CHANNELS * FANS_STRIDE[ver] + 4;
 // the standalone value: protocol.hpp CMD_FAN_STANDALONE's layout — one record
-// per header (common/fanwire.hpp): fallback boost boost_secs ramp kind gpio npts pts[8][2]
-export const SA_HEADER_LEN = 7 + 2 * MAX_POINTS;
+// per slot (common/fanwire.hpp): fallback boost boost_secs ramp kind gpio npts
+// pts[8][2] out_kind out
+export const SA_HEADER_LEN = 9 + 2 * MAX_POINTS;
 export const SA_LEN = CHANNELS * SA_HEADER_LEN;
-// what a header runs when its config says nothing (protocol.hpp FAN_DEFAULT_*,
+// what a fan runs when its config says nothing (protocol.hpp FAN_DEFAULT_*,
 // fans.hpp DEFAULT_HYSTERESIS): the daemon's JSON leaves a tuning out at its default
 export const DEFAULTS = { hyst: 3, ramp: 5, boostSecs: 5 };
+export const NAME_CHARS = 16; // fans.hpp NAME_CHARS
 const SAVE_TIMEOUT_MS = 6000;
 const utf8 = new TextDecoder();
 const u32 = (dv, o) => dv.getUint32(o, true);
@@ -496,28 +529,34 @@ export function parseFans(dv) {
     const o = 4 + i * stride, st = dv.getUint8(o);
     out.h.push({ wired: !!(st & 1), src: (st >> 1) & 7, duty: dv.getUint8(o + 1),
                  fb: stride >= 3 ? dv.getUint8(o + 2) : null,   // null: firmware before the slider
-                 kind: stride >= 5 ? dv.getUint8(o + 3) : null, // null: firmware before gpio sources
+                 kind: stride >= 5 ? dv.getUint8(o + 3) : null, // null: firmware before gpio inputs
                  in: stride >= 5 ? dv.getUint8(o + 4) : NONE });
   }
   return out;
 }
 
-// one header's record → { fb, boost, boostSecs, ramp, kind, gpio, pts }
+// one slot's record → { used, out, fb, boost, boostSecs, ramp, kind, gpio, pts }
 function decodeRecord(dv, q) {
   const k = dv.getUint8(q + 4), n = Math.min(MAX_POINTS, dv.getUint8(q + 6));
+  const ok = dv.getUint8(q + 7 + 2 * MAX_POINTS), on = dv.getUint8(q + 8 + 2 * MAX_POINTS);
   const pts = [];
   if (k === KIND_BYTE.gpio) for (let j = 0; j < n; j++) pts.push({ x: dv.getUint8(q + 7 + 2 * j), y: dv.getUint8(q + 8 + 2 * j) });
-  return { fb: dv.getUint8(q), boost: dv.getUint8(q + 1), boostSecs: dv.getUint8(q + 2), ramp: dv.getUint8(q + 3),
+  return { used: ok === OUT_HEADER || ok === OUT_GPIO,
+           out: ok === OUT_HEADER ? { kind: 'header', num: on } : ok === OUT_GPIO ? { kind: 'gpio', num: on } : { kind: 'parked' },
+           fb: dv.getUint8(q), boost: dv.getUint8(q + 1), boostSecs: dv.getUint8(q + 2), ramp: dv.getUint8(q + 3),
            kind: k === KIND_BYTE.fallback ? 'fallback' : k === KIND_BYTE.gpio ? 'gpio' : 'host', gpio: dv.getUint8(q + 5), pts };
 }
-// ...and a card's header → the record the receiver stores (the control op's argument)
+// ...and a card's fan → the record the receiver stores (the control op's
+// argument); null = an unused slot (the fan removed)
 export function encodeRecord(h) {
-  const r = new Uint8Array(SA_HEADER_LEN);
+  const r = new Uint8Array(SA_HEADER_LEN).fill(NONE);
+  if (!h) return r;
   const gpio = h.kind === 'gpio';
   r.set([h.fallback, h.boost === NONE || h.boost === null || h.boost === undefined ? NONE : h.boost,
          Math.round(h.boostSecs ?? DEFAULTS.boostSecs), Math.round(h.ramp ?? DEFAULTS.ramp),
          KIND_BYTE[h.kind] ?? KIND_BYTE.host, gpio ? h.gpio : NONE, gpio ? h.pts.length : 0]);
-  if (gpio) h.pts.forEach((p, j) => r.set([p.x, p.y], 7 + 2 * j));
+  for (let j = 0; j < MAX_POINTS; j++) r.set(gpio && j < h.pts.length ? [h.pts[j].x, h.pts[j].y] : [0, 0], 7 + 2 * j);
+  r.set([h.out.kind === 'header' ? OUT_HEADER : OUT_GPIO, h.out.num], 7 + 2 * MAX_POINTS);
   return r;
 }
 
@@ -529,47 +568,76 @@ export function parseSa(dv) {
   return out;
 }
 
-// the header a card shows: the daemon's, when it has one (route 'daemon'),
-// else the receiver's own standalone view of a wired header (route
-// 'receiver'), else null. Route 'daemon' edits go into the config file and
-// the daemon pushes the receiver; route 'receiver' edits are stored on the
-// receiver until a daemon next connects and the config wins again.
-export function cardHeader(slot) {
-  const c = S.cfg && S.cfg.h[slot];
-  if (c) return { ...c, route: 'daemon' };
-  const f = S.fans && S.fans.h[slot], s = S.sa && S.sa.h[slot];
-  if (!f || !f.wired || !s) return null;
-  return { name: `header${slot + 1}`, kind: s.kind, src: s.kind === 'gpio' ? `gpio:${s.gpio}` : s.kind,
-           gpio: s.gpio, spec: '', pts: s.pts.map(p => ({ ...p })), boost: s.boost, boostSecs: s.boostSecs,
-           ramp: s.ramp, hyst: DEFAULTS.hyst,
-           fallback: f.fb !== null && f.fb !== NONE ? f.fb : (s.fb !== NONE ? s.fb : null), route: 'receiver' };
+// the fan cards, in the order the page shows them: the daemon's list when it
+// has one (key 'f<index>', route 'daemon' — edits go into the config file
+// and the daemon pushes the receiver), else the receiver's own fans (key
+// 's<slot>', route 'receiver' — stored on the receiver until a daemon next
+// connects and the config wins again). A receiver-output fan carries its
+// slot: the daemon gives the slots out in list order, as the receiver holds them
+export function cards() {
+  if (S.cfg) {
+    let slot = 0;
+    return S.cfg.fans.map((f, i) => ({ ...f, key: 'f' + i, index: i, route: 'daemon',
+                                       slot: isReceiverOut(f.out) ? slot++ : -1 }));
+  }
+  if (!S.sa) return [];
+  return S.sa.h.map((s, i) => s.used ? { ...receiverFan(s, i), key: 's' + i, index: -1, route: 'receiver', slot: i } : null)
+               .filter(Boolean);
+}
+// a receiver slot as a fan (no daemon to name it)
+function receiverFan(s, slot) {
+  const f = S.fans && S.fans.h[slot];
+  return { name: outLabel(s.out), output: s.out.kind === 'header' ? `header${s.out.num}` : `gpio:${s.out.num}`, out: s.out,
+           kind: s.kind, src: s.kind === 'gpio' ? `gpio:${s.gpio}` : s.kind, gpio: s.gpio, spec: '',
+           pts: s.pts.map(p => ({ ...p })), boost: s.boost, boostSecs: s.boostSecs, ramp: s.ramp, hyst: DEFAULTS.hyst,
+           fallback: f && f.fb !== null && f.fb !== NONE ? f.fb : s.fb };
+}
+export const cardOf = key => cards().find(c => c.key === key) || null;
+// a fan to start the "add a fan" editor from: the first header no fan has,
+// else no output; a fixed speed
+export function newFan() {
+  const route = S.cfg ? 'daemon' : 'receiver';
+  const used = new Set(cards().map(c => c.output));
+  const hdr = headerList().find(n => !used.has(`header${n}`));
+  const output = hdr ? `header${hdr}` : route === 'daemon' ? '' : null;
+  if (output === null) return null; // the receiver alone, every header taken
+  const slot = route === 'daemon' ? -1 : S.sa ? S.sa.h.findIndex(s => !s.used) : -1;
+  if (route === 'receiver' && slot < 0) return null;
+  return { key: 'new', index: -1, route, slot, name: '', output, out: outInfo(output), kind: 'fallback', src: 'fallback',
+           gpio: 0, spec: '', pts: [], boost: NONE, boostSecs: DEFAULTS.boostSecs, ramp: DEFAULTS.ramp,
+           hyst: DEFAULTS.hyst, fallback: 100 };
+}
+// the board's headers by number (info ver 3), else 1..4 on a receiver that
+// doesn't say
+export function headerList() {
+  const hp = S.info && S.info.headerPins;
+  if (!hp) return [1, 2, 3, 4];
+  const out = [];
+  hp.forEach((g, i) => { if (g !== null) out.push(i + 1); });
+  return out;
 }
 
-// which headers get a card: every wired one plus every one the daemon's
-// config has, so a header in the config but not flashed still shows
-export function cardSlots() {
-  const slots = new Set();
-  if (S.fans) S.fans.h.forEach((h, i) => { if (h.wired) slots.add(i); });
-  if (S.cfg) S.cfg.h.forEach((h, i) => { if (h) slots.add(i); });
-  return [...slots].sort((a, b) => a - b);
+// the receiver's live view of a card (its slot), or null
+export const liveOf = c => c && c.slot >= 0 && S.fans ? S.fans.h[c.slot] : null;
+// the daemon's telemetry for a card (by list index), or null
+export const telemOf = c => c && c.index >= 0 && S.fans && S.fans.telem && S.telem ? S.telem.fans[c.index] || null : null;
+// the reading a card's curve sees right now: a gpio input's from the
+// receiver (it samples the pin), a host input's (and the board's own duty)
+// from the daemon's telemetry
+export function inputOf(c) {
+  if (!c) return null;
+  if (c.kind === 'gpio') { const f = liveOf(c); return f && f.in !== NONE ? f.in : null; }
+  const t = telemOf(c);
+  return t && t.in !== undefined ? t.in : null;
 }
-
-// the reading a header's curve sees right now: a gpio header's from the
-// receiver (it samples the pin), a host source's from the daemon's telemetry
-export function inputOf(slot, h) {
-  if (!h) return null;
-  if (h.kind === 'gpio') { const f = S.fans && S.fans.h[slot]; return f && f.in !== NONE ? f.in : null; }
-  const tm = S.fans && S.fans.telem && S.telem && S.telem.h[slot];
-  return tm && tm.in !== undefined ? tm.in : null;
-}
-
-// what a kind reads right now, for the source list: null when nothing does
-export function readingOf(kind, slot) {
+// what a kind reads right now, for the input list: null when nothing does
+export function readingOf(kind, c) {
   const t = S.fans && S.fans.telem && S.telem;
   if (kind === 'temp') return t && t.temp !== undefined ? t.temp : null;
   if (kind === 'cpu_load') return t && t.cpu !== undefined ? t.cpu : null;
   if (kind === 'gpu_load') return t && t.gpu !== undefined ? t.gpu : null;
-  if (kind === 'gpio') { const f = S.fans && S.fans.h[slot]; return f && f.kind === KIND_BYTE.gpio && f.in !== NONE ? f.in : null; }
+  if (kind === 'gpio') { const f = liveOf(c); return f && f.kind === KIND_BYTE.gpio && f.in !== NONE ? f.in : null; }
+  if (kind === 'board' && c) { const o = S.outs && S.outs.find(x => x.spec === c.output); return o ? o.duty : null; }
   return null;
 }
 // a catalogue entry's reading by its spec ("amdgpu:edge", "nct6686:pwm1"), null when not listed
@@ -581,14 +649,18 @@ export function sensorReading(spec) {
 // the daemon's sensor catalogue (fans.hpp sensorsJson): chips → labelled
 // readings; a "pwm1-8" key is one entry standing for a run of pwm outputs
 // that read alike — its spec is the first of them. "_more" counts sensors
-// that did not fit the wire (S.sensMore); they can still be typed.
+// that did not fit (S.sensMore); they can still be typed. "_outs" lists the
+// host's pwm outputs a fan could drive (S.outs)
 export function parseSensors(text) {
   let j;
   try { j = JSON.parse(text); } catch { return null; }
   if (!j || typeof j !== 'object') return null;
   const out = [];
   S.sensMore = typeof j._more === 'number' ? j._more : 0;
+  S.outs = Array.isArray(j._outs) ? j._outs.filter(o => Array.isArray(o) && typeof o[0] === 'string')
+    .map(([spec, duty, rpm, w]) => ({ spec, duty: +duty, rpm: rpm >= 0 ? +rpm : null, writable: !!w })) : null;
   for (const chip of Object.keys(j)) {
+    if (chip === '_outs' || chip === '_more') continue;
     const g = j[chip];
     if (!g || typeof g !== 'object') continue;
     for (const k of Object.keys(g)) {
@@ -608,56 +680,57 @@ export function parseCurve(text) {
 }
 export const curveText = pts => pts.map(p => `${p.x}:${p.y}`).join(' ');
 
-// the daemon's config JSON -> { editable, h[slot] }; a header's tunings
-// (h/r/t) are absent at their defaults or where they don't apply
+// the daemon's config JSON -> { editable, rev, err, fans: [fan] }; a fan's
+// tunings (h/r/t) are absent at their defaults or where they don't apply
 export function parseCfg(text) {
   let j;
   try { j = JSON.parse(text); } catch { return null; }
-  if (!j || typeof j !== 'object') return null;
-  const c = { editable: !!j.editable, h: [] };
-  for (let i = 0; i < CHANNELS; i++) {
-    const h = j['header' + (i + 1)];
-    if (!h) { c.h.push(null); continue; }
-    const s = srcInfo(h.s);
-    const pts = s.kind === 'fallback' ? [] : parseCurve(h.c);
-    c.h.push({ name: String(h.n || ''), ...s, pts,
-               boost: h.b === null || h.b === undefined ? NONE : +h.b,
-               fallback: h.f === undefined ? null : +h.f,
-               hyst: h.h === undefined ? DEFAULTS.hyst : +h.h, ramp: h.r === undefined ? DEFAULTS.ramp : +h.r,
-               boostSecs: h.t === undefined ? DEFAULTS.boostSecs : +h.t });
-  }
-  return c;
+  if (!j || typeof j !== 'object' || !Array.isArray(j.fans)) return null;
+  return { editable: !!j.editable, rev: String(j.rev || ''), err: typeof j.err === 'string' ? j.err : '',
+           fans: j.fans.map(h => {
+             const output = String(h.o ?? ''), s = srcInfo(h.i, output);
+             return { name: String(h.n || ''), output, out: outInfo(output), ...s, pts: isFixed(s) ? [] : parseCurve(h.c),
+                      boost: h.b === null || h.b === undefined ? NONE : +h.b,
+                      fallback: h.f === undefined ? 100 : +h.f,
+                      hyst: h.h === undefined ? DEFAULTS.hyst : +h.h, ramp: h.r === undefined ? DEFAULTS.ramp : +h.r,
+                      boostSecs: h.t === undefined ? DEFAULTS.boostSecs : +h.t };
+           }) };
 }
-// which tunings a header has (fans.hpp TUNINGS): the editor shows these, the
-// daemon refuses the others
-export const hasHyst = h => isTempX(h);                 // a temperature source
-export const hasRamp = h => !isFixed(h);                // a source with a curve
-export const hasBoostSecs = h => h.boost !== NONE;     // a header with a boost
+// which settings a fan has (fans.hpp TUNINGS, and the boost's rule): the
+// editor shows these, the daemon refuses the others
+export const hasHyst = h => isTempX(h);                 // a temperature input
+export const hasRamp = h => !isFixed(h);                // an input with a curve
+export const hasBoost = h => h.out.kind !== 'host';     // the receiver runs a boost, before the host is up
+export const hasBoostSecs = h => hasBoost(h) && h.boost !== NONE; // a fan with a boost
 
-// the daemon's telemetry JSON -> { temp, cpu, gpu, h[slot]: { in, duty } }
+// the daemon's telemetry JSON -> { temp, cpu, gpu, fans[index]: { in, duty, st } | null }
 export function parseTelem(text) {
   let j;
   try { j = JSON.parse(text); } catch { return null; }
   if (!j || typeof j !== 'object') return null;
-  const t = { temp: j.temp, cpu: j.cpu, gpu: j.gpu, h: [] };
-  for (let i = 0; i < CHANNELS; i++) t.h.push(j['header' + (i + 1)] || null);
-  return t;
+  return { temp: j.temp, cpu: j.cpu, gpu: j.gpu, fans: Array.isArray(j.fans) ? j.fans : [] };
 }
 
-// ver 1: version, heap. ver 2 adds the GPIOs a gpio:N source may read as a
+// ver 1: version, heap. ver 2 adds the GPIOs a gpio:N input may read as a
 // 64-bit mask (bit N = GPIO N) — `pins` is that as a sorted list, or null on
-// firmware that doesn't say (the editor then asks for a number)
+// firmware that doesn't say (the editor then asks for a number); ver 3 the
+// board's header map (`headerPins`, header n's GPIO at [n-1], null = none)
+// and the GPIOs a gpio:N output may drive (`outPins`). A ver-3 receiver is
+// also one that serves the page characteristic and the 25-byte fan record
+const mask64 = (dv, o) => { const out = []; for (let g = 0; g < 64; g++) if (dv.getUint8(o + (g >> 3)) >> (g & 7) & 1) out.push(g); return out; };
 export function parseInfo(dv) {
   const ver = dv.byteLength ? dv.getUint8(0) : 0;
-  if (dv.byteLength < 41 || ver < 1 || ver > 2) return null;
+  if (dv.byteLength < 41 || ver < 1 || ver > 3) return null;
   let v = '';
   for (let k = 1; k < 33; k++) { const ch = dv.getUint8(k); if (!ch) break; v += String.fromCharCode(ch); }
-  let pins = null;
-  if (ver >= 2 && dv.byteLength >= 49) {
-    pins = [];
-    for (let g = 0; g < 64; g++) if (dv.getUint8(41 + (g >> 3)) >> (g & 7) & 1) pins.push(g);
+  const pins = ver >= 2 && dv.byteLength >= 49 ? mask64(dv, 41) : null;
+  let headerPins = null, outPins = null;
+  if (ver >= 3 && dv.byteLength >= 49 + CHANNELS + 8) {
+    headerPins = [];
+    for (let i = 0; i < CHANNELS; i++) { const g = dv.getUint8(49 + i); headerPins.push(g === NONE ? null : g); }
+    outPins = mask64(dv, 49 + CHANNELS);
   }
-  return { version: v, heap: u32(dv, 33), minHeap: u32(dv, 37), pins };
+  return { ver, version: v, heap: u32(dv, 33), minHeap: u32(dv, 37), pins, headerPins, outPins };
 }
 
 // ---- the power switch ----
@@ -726,15 +799,15 @@ export function powerTuning() {
 export function wakePinOptions(current) {
   const pins = S.info && S.info.pins;
   if (!pins) return null;
-  const taken = new Set(S.sa ? S.sa.h.filter(h => h.kind === 'gpio' && h.gpio !== NONE).map(h => h.gpio) : []);
+  const taken = new Set(S.sa ? S.sa.h.filter(h => h.used && h.kind === 'gpio' && h.gpio !== NONE).map(h => h.gpio) : []);
   const opts = pins.filter(g => !taken.has(g));
   if (current !== null && current !== undefined && !opts.includes(current)) opts.push(current);
   return opts.sort((a, b) => a - b);
 }
 
 function dashReset() {
-  S.fansChr = S.cfgChr = S.telemChr = S.stripChr = S.saChr = S.sensChr = S.pwrChr = S.pcfgChr = S.infoChr = null;
-  S.fans = S.sa = S.cfg = S.telem = S.info = S.sens = S.pwr = S.pcfg = null; S.sensMore = 0;
+  S.fansChr = S.cfgChr = S.telemChr = S.stripChr = S.saChr = S.sensChr = S.pwrChr = S.pcfgChr = S.infoChr = S.pageChr = null;
+  S.fans = S.sa = S.cfg = S.telem = S.info = S.sens = S.outs = S.pwr = S.pcfg = null; S.sensMore = 0;
   S.saving = null; S.note = null;
   clearTimeout(saveTimer);
   stripReset();
@@ -750,12 +823,50 @@ export function note(text, cls) {
 }
 export function dismiss() { if (S.note && S.note.cls === 'err') { S.note = null; emit(); } }
 
-// a notification is truncated to the ATT MTU; a read isn't. The fans value
-// fits any MTU; the JSON values and the standalone value may not. A value
-// that arrived whole is used as it is; one cut short is re-read — one read at
-// a time, notifications landing meanwhile mark it stale so it runs once more.
+// a notification is truncated to the ATT MTU; a read isn't — but a read is
+// itself at most a GATT value, 512 bytes, and the daemon's JSON can be longer
+// (protocol.hpp DASH_*_MAX): those come through the page characteristic
+// (readPaged). The fans value fits any MTU; the JSON values and the
+// standalone value may not. A value that arrived whole is used as it is; one
+// cut short is re-read — one read at a time, notifications landing meanwhile
+// mark it stale so it runs once more.
 const whole = text => { try { JSON.parse(text); return true; } catch { return false; } };
-function notifier(current, ok, apply) {
+// the receiver's dash::Slot of each JSON value, for the page characteristic
+const SLOT = { fancfg: 0, telem: 1, stripcfg: 2, sensors: 3, pwrcfg: 4 };
+const PAGE_HDR = 6; // ver slot page pages len(2)
+// one whole payload, page by page: page 0 makes the receiver take a snapshot,
+// every later page is served from the same one, so the pages always belong
+// together (ble.cpp pageAccess) — as long as no other paged read's page 0
+// lands in between, which would re-snapshot under this one. Each GATT op is
+// queued on its own, so the whole read is held behind its own chain: paged
+// reads run one at a time.
+let pagedChain = Promise.resolve();
+export function readPaged(slot) {
+  const p = pagedChain.then(() => readPagedNow(slot));
+  pagedChain = p.then(() => {}, () => {});
+  return p;
+}
+async function readPagedNow(slot) {
+  const chr = S.pageChr, parts = [];
+  let pages = 1, total = 0, have = 0;
+  for (let p = 0; p < pages; p++) {
+    await gattWrite(chr, Uint8Array.of(slot, p));
+    const v = await gattRead(chr);
+    if (v.byteLength < PAGE_HDR || v.getUint8(0) !== 1 || v.getUint8(1) !== slot || v.getUint8(2) !== p)
+      throw new Error('the receiver answered a different page');
+    if (p === 0) { pages = Math.max(1, v.getUint8(3)); total = v.getUint16(4, true); }
+    const part = new Uint8Array(v.buffer, v.byteOffset + PAGE_HDR, v.byteLength - PAGE_HDR);
+    parts.push(part); have += part.length;
+  }
+  if (have !== total) throw new Error('a paged value came back short');
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const part of parts) { out.set(part, at); at += part.length; }
+  return new DataView(out.buffer);
+}
+// a JSON value, whole: paged where the receiver pages, a plain read otherwise
+const readJson = (chr, slot) => S.pageChr && slot !== undefined ? readPaged(slot) : gattRead(chr);
+function notifier(current, ok, apply, slot) {
   let reading = false, stale = false;
   return async e => {
     const chr = e.target;
@@ -767,44 +878,49 @@ function notifier(current, ok, apply) {
     try {
       do {
         stale = false;
-        const v = await gattRead(chr);
+        const v = await readJson(chr, slot);
         if (chr !== current()) return;
         apply(v);
       } while (stale);
     } catch {} finally { reading = false; }
   };
 }
-const jsonNotifier = (current, apply) => notifier(current, dv => !dv.byteLength || whole(utf8.decode(dv)), apply);
+// an empty notification is either "nothing from the daemon" or a value too
+// long for the notification's own read (ble.cpp serve) — a receiver that pages
+// tells the two apart through the page characteristic, so re-read it there
+const jsonNotifier = (current, apply, slot) =>
+  notifier(current, dv => dv.byteLength ? whole(utf8.decode(dv)) : !S.pageChr, apply, slot);
 const onFansEvent = e => {
   if (e.target !== S.fansChr) return;
   const f = parseFans(e.target.value);
   if (f) { S.fans = f; emit(); }
 };
-const onCfgEvent = jsonNotifier(() => S.cfgChr, onCfg);
+const onCfgEvent = jsonNotifier(() => S.cfgChr, onCfg, SLOT.fancfg);
 const onTelemEvent = jsonNotifier(() => S.telemChr, dv => {
   S.telem = dv.byteLength ? parseTelem(utf8.decode(dv)) : null;
   emit();
-});
+}, SLOT.telem);
 const onSaEvent = notifier(() => S.saChr, dv => dv.byteLength >= SA_LEN, onSa);
 const onSensEvent = jsonNotifier(() => S.sensChr, dv => {
   S.sens = dv.byteLength ? parseSensors(utf8.decode(dv)) : null;
   emit();
-});
+}, SLOT.sensors);
 const onPwrEvent = notifier(() => S.pwrChr, dv => dv.byteLength >= PWR_LEN, dv => {
   const v = parsePwr(dv);
   if (!v) return;
-  const moved = S.pwr && S.pwr.pins.wake !== v.pins.wake; // the one thing that changes the free-pin list
+  const moved = S.pwr && S.pwr.pins.wake !== v.pins.wake; // changes the free-pin lists
   S.pwr = v; emit();
   if (moved) refreshInfo();
 });
-// re-read the receiver's build facts — its free input pins, after the wake
-// pin moved (the info value is read-only and never notifies)
+// re-read the receiver's build facts — its free input and output pins,
+// after the wake pin or a fan's output moved (the info value is read-only and
+// never notifies)
 async function refreshInfo() {
   const chr = S.infoChr;
   if (!chr) return;
   try { const v = parseInfo(await gattRead(chr)); if (chr === S.infoChr && v) { S.info = v; emit(); } } catch {}
 }
-const onPcfgEvent = jsonNotifier(() => S.pcfgChr, onPcfg);
+const onPcfgEvent = jsonNotifier(() => S.pcfgChr, onPcfg, SLOT.pwrcfg);
 
 // an answer landed for the save in flight: that edit is done
 function settled(key) {
@@ -813,21 +929,31 @@ function settled(key) {
   note('saved', 'ok');
   onSaved?.(key);
 }
-const fanSaving = () => S.saving !== null && S.saving !== 'p'; // a fan save ('g' or a slot) is waiting
+const fanSaving = () => S.saving !== null && S.saving !== 'p'; // a fan save (a card's key) is waiting
 
 export function onCfg(dv) {
   S.cfg = dv.byteLength ? parseCfg(utf8.decode(dv)) : null;
-  if (fanSaving()) settled(S.saving); // the daemon answered with its new config
+  if (fanSaving()) {
+    // the daemon answers every edit with its config: with "err" when it
+    // refused (the list as it was, and why), without when it took it
+    if (S.cfg && S.cfg.err) { S.saving = null; clearTimeout(saveTimer); note(S.cfg.err, 'err'); }
+    // no list at all: the host has no fans block (any more) — the edit went
+    // nowhere, and the cards are the receiver's own now
+    else if (!S.cfg) { S.saving = null; clearTimeout(saveTimer); note('the host has no fan list — the receiver runs the fans; edit again', 'err'); }
+    else settled(S.saving);
+  }
   emit();
 }
 
-// the receiver's standalone settings (also the echo of a standalone save)
+// the receiver's standalone settings (also the echo of a standalone save);
+// a fan's output moving changes the receiver's free pins, so its info is read again
 export function onSa(dv) {
   const s = parseSa(dv);
   if (!s) return;
   S.sa = s;
   if (fanSaving() && !S.cfg) settled(S.saving);
   emit();
+  refreshInfo();
 }
 
 // the daemon's power switch view (also the answer to a routed power save)
@@ -840,6 +966,11 @@ export function onPcfg(dv) {
 let onSaved = null;
 export const whenSaved = fn => { onSaved = fn; };
 
+// does this receiver speak the fan list (the page characteristic, info ver
+// 3, the 25-byte record)? A receiver on older firmware — and the daemon that
+// matches it — still powers the host, but its fans are the old shape
+export const fansCurrent = () => S.demo || !!S.pageChr;
+
 async function dashOpen(svc) {
   let f, c, t, i;
   try {
@@ -848,13 +979,14 @@ async function dashOpen(svc) {
     t = await svc.getCharacteristic(TELEM);
   } catch { return; } // older firmware: no dashboard, and nothing to say
   try { i = await svc.getCharacteristic(INFO); } catch { i = null; }
-  let sc = null, s = null, se = null, pw = null, pc = null;
+  let sc = null, s = null, se = null, pw = null, pc = null, pg = null;
   try { sc = await svc.getCharacteristic(STRIPCFG); } catch { sc = null; } // firmware before the strip card
-  try { s = await svc.getCharacteristic(FANSA); } catch { s = null; }      // firmware before gpio sources
+  try { s = await svc.getCharacteristic(FANSA); } catch { s = null; }      // firmware before gpio inputs
   try { se = await svc.getCharacteristic(SENSORS); } catch { se = null; }  // firmware before the catalogue
   try { pw = await svc.getCharacteristic(PWR); pc = await svc.getCharacteristic(PWRCFG); } catch { pw = pc = null; } // firmware before the power settings
+  try { pg = await svc.getCharacteristic(PAGE); } catch { pg = null; }     // firmware before the fan list
   if (!connected()) return;
-  S.fansChr = f; S.cfgChr = c; S.telemChr = t; S.saChr = s; S.sensChr = se; S.pwrChr = pw; S.pcfgChr = pc; S.infoChr = i;
+  S.fansChr = f; S.cfgChr = c; S.telemChr = t; S.saChr = s; S.sensChr = se; S.pwrChr = pw; S.pcfgChr = pc; S.infoChr = i; S.pageChr = pg;
   f.addEventListener('characteristicvaluechanged', onFansEvent);
   c.addEventListener('characteristicvaluechanged', onCfgEvent);
   t.addEventListener('characteristicvaluechanged', onTelemEvent);
@@ -871,27 +1003,49 @@ async function dashOpen(svc) {
   if (pc) await gattSubscribe(pc);
   const fv = parseFans(await gattRead(f));
   if (fv) S.fans = fv;
-  onCfg(await gattRead(c));
-  const tv = await gattRead(t);
+  if (i) { try { S.info = parseInfo(await gattRead(i)); } catch { S.info = null; } }
+  onCfg(await readJson(c, SLOT.fancfg));
+  const tv = await readJson(t, SLOT.telem);
   S.telem = tv.byteLength ? parseTelem(utf8.decode(tv)) : null;
   if (s) { try { onSa(await gattRead(s)); } catch {} }
-  if (se) { try { const v = await gattRead(se); S.sens = v.byteLength ? parseSensors(utf8.decode(v)) : null; } catch { S.sens = null; } }
+  if (se) { try { const v = await readJson(se, SLOT.sensors); S.sens = v.byteLength ? parseSensors(utf8.decode(v)) : null; } catch { S.sens = null; } }
   if (pw) { try { S.pwr = parsePwr(await gattRead(pw)); } catch { S.pwr = null; } }
-  if (pc) { try { onPcfg(await gattRead(pc)); } catch { S.pcfg = null; } }
-  if (i) { try { S.info = parseInfo(await gattRead(i)); } catch { S.info = null; } }
+  if (pc) { try { onPcfg(await readJson(pc, SLOT.pwrcfg)); } catch { S.pcfg = null; } }
   emit();
   if (sc) await stripOpen(sc);
 }
 
 // ---- fan edits ----
-// what the daemon (or the receiver) will refuse, said here first (they also validate)
-export function checkEdit(h) {
+// what the daemon (or the receiver) will refuse, said here first (they also
+// validate). `key` is the card being edited ('new' for an added fan) — the
+// other cards are what an output may not collide with
+export function checkEdit(h, key) {
   if (h.route === 'daemon') {
     const nm = (h.name || '').trim();
-    if (!nm || [...nm].length > 16) return 'a name is 1–16 characters'; // characters, as the daemon counts
+    if (!nm || [...nm].length > NAME_CHARS) return `a name is 1–${NAME_CHARS} characters`; // characters, as the daemon counts
   }
+  if (h.route !== 'daemon' && !isReceiverOut(h.out)) return 'the receiver alone drives a header or a pin — pick one';
   if (h.route !== 'daemon' && h.kind !== 'fallback' && h.kind !== 'gpio') return 'the receiver alone runs a fixed speed or a PWM input — pick one';
+  const other = cards().find(c => c.key !== key && h.output && c.output === h.output);
+  if (other) return `${outLabel(h.out)} is ${other.name || 'another fan'}’s output`;
+  // the same pin under two spellings (header1 and gpio:5 on a board wiring
+  // header 1 to GPIO5): the daemon can't see the header map, the receiver
+  // would drive only the first — so catch it here, where the map is known
+  const og = outPin(h.out), ig = h.kind === 'gpio' ? h.gpio : null;
+  if (og !== null && ig === og) return 'a pin can’t be the input and the output';
+  for (const c of cards()) {
+    if (c.key === key) continue;
+    const cg = outPin(c.out), who = c.name || 'another fan';
+    if (og !== null && cg === og) return `GPIO${og} is ${who}’s output (${outLabel(c.out)})`;
+    if (og !== null && c.kind === 'gpio' && c.gpio === og) return `GPIO${og} is ${who}’s PWM input`;
+    if (ig !== null && cg === ig) return `GPIO${ig} is ${who}’s output (${outLabel(c.out)})`;
+  }
+  if (h.out.kind === 'gpio' && !(Number.isInteger(h.out.num) && h.out.num >= 0 && h.out.num <= 48)) return 'the output pin is a number 0–48';
+  if (h.out.kind === 'host' && !/^[^:\s]+:pwm\d+$/.test(h.output)) return 'a host output is chip:pwmN, e.g. nct6686:pwm2';
+  if (h.kind === 'gpio' && h.out.kind === 'host') return 'a PWM input is read by the receiver, which can’t drive a host output';
+  if (h.kind === 'board' && h.out.kind !== 'host') return 'only a host output has a board curve';
   if (h.kind === 'gpio' && !(Number.isInteger(h.gpio) && h.gpio >= 0 && h.gpio <= 48)) return 'the pin is a number 0–48';
+  if (h.kind === 'gpio' && h.out.kind === 'gpio' && h.gpio === h.out.num) return 'a pin can’t be the input and the output';
   if (h.kind === 'hwmon' && (h.spec || '').startsWith(FILE_PREFIX) && !/^\/\S/.test(h.spec.slice(FILE_PREFIX.length))) // the daemon insists on an absolute path
     return 'a temperature file is its full path, e.g. /tmp/some_custom_temp_reading';
   if ((h.kind === 'hwmon' || h.kind === 'pwm') && !/^[^:\s]+:\S[^:]*$/.test(h.spec || '')) // a label may hold spaces ("AMD TSI Addr 98h", "CPU VRM")
@@ -903,29 +1057,31 @@ export function checkEdit(h) {
     const xs = new Set();
     for (const p of h.pts) {
       if (!(p.y >= 0 && p.y <= 100)) return 'speed must be 0–100 %';
+      if (!Number.isFinite(p.x)) return 'every point needs an input value';
       if (h.kind === 'gpio' && !(Number.isInteger(p.x) && p.x >= 0 && p.x <= 100)) return 'a PWM input curve reads whole percents 0–100';
       if (xs.has(p.x)) return `two points at ${p.x}`;
       xs.add(p.x);
     }
   }
-  if (h.boost !== NONE && !(h.boost >= 0 && h.boost <= 100)) return 'boost must be 0–100 % or blank';
+  if (hasBoost(h) && h.boost !== NONE && !(h.boost >= 0 && h.boost <= 100)) return 'boost must be 0–100 % or blank';
   if (hasHyst(h) && !(h.hyst >= 0)) return 'hysteresis is 0 °C or more';
   if (hasRamp(h) && !(h.ramp >= 0 && h.ramp <= 255)) return 'the ramp is 0–255 % per second';
   if (hasBoostSecs(h) && !(Number.isInteger(h.boostSecs) && h.boostSecs >= 0 && h.boostSecs <= 255)) return 'the boost runs 0–255 whole seconds';
-  if (h.fallback !== null && h.fallback !== undefined && !(h.fallback >= 0 && h.fallback <= 100)) return 'the fallback speed is 0–100 %';
+  if (!(h.fallback >= 0 && h.fallback <= 100)) return 'the fallback speed is 0–100 %';
   return '';
 }
 
-// write a partial edit (one header, or the globals — the daemon's JSON
-// shape), then wait for the daemon's config to come back (onCfg) — that is
-// what "saved" means here. Resolves true once the write itself went through.
-// `chr` is the daemon view's characteristic: the fan config by default, the
-// power switch's for a 'p' save (answered by onPcfg).
+// write one fan edit (the daemon's shapes, fans.hpp), then wait for the
+// daemon's config to come back (onCfg) — that is what "saved" or "refused"
+// means here. Resolves true once the write itself went through. `chr` is the
+// daemon view's characteristic: the fan config by default, the power
+// switch's for a 'p' save (answered by onPcfg).
 export async function writeCfg(key, edit, chr = S.cfgChr) {
   if (!chr || S.saving !== null) return false;
   const text = new TextEncoder().encode(JSON.stringify(edit));
   const buf = new Uint8Array(TOKEN_LEN + text.length);
   buf.set(tokenBytes()); buf.set(text, TOKEN_LEN);
+  if (buf.length > 512) { note('that edit is too long to send — shorten the name or the input', 'err'); return false; }
   S.saving = key;
   note('saving…');
   try {
@@ -945,45 +1101,57 @@ export async function writeCfg(key, edit, chr = S.cfgChr) {
   }
 }
 
-// a standalone header's edit: its whole record straight to the receiver,
-// which validates the pin and the curve itself (a refusal comes back as a
-// write error) and echoes the stored value on the standalone characteristic
-async function writeRecord(slot, h) {
+// a standalone fan's edit: its whole record (null: removed) straight to the
+// receiver's slot, which validates the pins and the curve itself (a refusal
+// comes back as a write error) and echoes the stored value on the standalone
+// characteristic
+async function writeRecord(slot, h, key) {
   if (!S.ctrl || S.saving !== null) return;
-  S.saving = slot;
+  S.saving = key;
   note('saving…');
   try {
     await writeOp(OP_FAN_HEADER, slot, ...encodeRecord(h));
-    if (!S.saChr) { S.saving = null; note('saved', 'ok'); onSaved?.(slot); return; }
+    if (!S.saChr) { S.saving = null; note('saved', 'ok'); onSaved?.(key); return; }
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-      if (S.saving !== slot) return;
+      if (S.saving !== key) return;
       S.saving = null;
       note('the receiver did not confirm the change', 'err');
     }, SAVE_TIMEOUT_MS);
   } catch {
     S.saving = null;
-    note('refused by the receiver — a pin it can’t read on, a bad curve, or a value out of range', 'err'); // writeOp said more
+    note('refused by the receiver — a pin it can’t use, a bad curve, or a value out of range', 'err'); // writeOp said more
   }
 }
 
-// the editor's Save: the working copy `h` against what the card had
-export function saveHeader(slot, h) {
-  h.pts.sort((a, b) => a.x - b.x);
-  const bad = checkEdit(h);
-  if (bad) { note(bad, 'err'); return; }
-  if (h.route !== 'daemon') { writeRecord(slot, h); return; }
-  if (!S.cfg) return;
-  const before = cardHeader(slot) || {};
-  const e = { s: srcText(h), b: h.boost === NONE ? null : h.boost, n: h.name.trim() };
+// a card's fan in the daemon's short keys (fans.hpp): everything that
+// applies to it, so the daemon holds the whole fan to its rules
+function fanEdit(h) {
+  const e = { n: h.name.trim(), o: h.output, i: srcText(h), f: h.fallback };
   if (!isFixed(h)) e.c = curveText(h.pts);
-  if (h.fallback !== null && h.fallback !== undefined) e.f = h.fallback;
-  // a tuning travels when it applies to the header as saved and moved (the
-  // daemon refuses one that doesn't apply, so an old value stays home)
-  if (hasHyst(h) && h.hyst !== before.hyst) e.h = h.hyst;
-  if (hasRamp(h) && h.ramp !== before.ramp) e.r = h.ramp;
-  if (hasBoostSecs(h) && h.boostSecs !== before.boostSecs) e.t = h.boostSecs;
-  writeCfg(slot, { ['header' + (slot + 1)]: e });
+  if (hasBoost(h)) e.b = h.boost === NONE ? null : h.boost;
+  if (hasHyst(h)) e.h = h.hyst;
+  if (hasRamp(h)) e.r = h.ramp;
+  if (hasBoostSecs(h)) e.t = h.boostSecs;
+  return e;
+}
+
+// the editor's Save: the working copy `h` of card `key` ('new' = an added fan)
+export function saveFan(key, h) {
+  h.pts.sort((a, b) => a.x - b.x);
+  const bad = checkEdit(h, key);
+  if (bad) { note(bad, 'err'); return; }
+  if (h.route !== 'daemon') { writeRecord(h.slot, h, key); return; }
+  if (!S.cfg) return;
+  writeCfg(key, key === 'new' ? { rev: S.cfg.rev, add: fanEdit(h) } : { rev: S.cfg.rev, fan: h.index, edit: fanEdit(h) });
+}
+
+// the editor's Delete
+export function deleteFan(key) {
+  const c = cardOf(key);
+  if (!c) return;
+  if (c.route !== 'daemon') { writeRecord(c.slot, null, key); return; }
+  if (S.cfg) writeCfg(key, { rev: S.cfg.rev, del: c.index });
 }
 
 // ---- power switch edits ----
@@ -1091,7 +1259,7 @@ function stripReset() {
   clearTimeout(sTimer);
 }
 
-const onStripEvent = jsonNotifier(() => S.stripChr, onStripCfg);
+const onStripEvent = jsonNotifier(() => S.stripChr, onStripCfg, SLOT.stripcfg);
 
 // does the daemon's view carry the edit? The view is also pushed unsolicited
 // (a scene's file appearing or disappearing), so an answer is recognised by
@@ -1131,7 +1299,7 @@ async function stripOpen(sc) {
   S.stripChr = sc;
   sc.addEventListener('characteristicvaluechanged', onStripEvent);
   await gattSubscribe(sc);
-  const v = await gattRead(sc);
+  const v = await readJson(sc, SLOT.stripcfg);
   if (S.stripChr !== sc) return;
   onStripCfg(v);
 }
@@ -1188,45 +1356,56 @@ document.addEventListener('visibilitychange', () => {
 // is the same board with the host off.
 export function demo() {
   S.demo = true;
-  S.cfg = parseCfg(JSON.stringify({ editable: true,
-    header1: { n: 'pump', s: 'fallback', b: 100, f: 65 },
-    header2: { n: 'radiator', s: 'temp', c: '45:35 60:55 75:100', b: null, f: 100 },
-    header3: { n: 'exhaust', s: 'gpio:0', c: '0:25 100:80', b: null, f: 100, r: 0 },
-    header4: { n: 'intake', s: 'gpu_load', c: '0:20 40:20 100:60', b: null, f: 60 } }));
+  // the daemon's list: four receiver headers and the board's own fan header,
+  // taken over on a CPU curve (a fifth, parked, keeps its settings)
+  let demoRev = 1;
+  const demoFans = [
+    { n: 'pump', o: 'header1', i: 'fallback', b: 100, f: 65 },
+    { n: 'radiator', o: 'header2', i: 'temp', c: '45:35 60:55 75:100', f: 100 },
+    { n: 'exhaust', o: 'header3', i: 'gpio:0', c: '0:25 100:80', f: 100, r: 0 },
+    { n: 'intake', o: 'header4', i: 'gpu_load', c: '0:20 40:20 100:60', f: 60 },
+    { n: 'board fan', o: 'nct6686:pwm2', i: 'k10temp:Tctl', c: '50:30 80:100', f: 60 },
+    { n: 'spare', o: '', i: 'fallback', f: 40 } ];
+  const cfgJson = err => JSON.stringify({ editable: true, rev: String(demoRev), ...(err ? { err } : {}), fans: demoFans });
+  S.cfg = parseCfg(cfgJson());
   S.scfg = parseStripCfg(JSON.stringify({ editable: true, leds: 33, pin: 4, reverse: false, brightness: 1,
     gamma: '2.2', white_balance: 'ffb0f0', scenes: [
       { p: '/tmp/led-static-color', e: 'solid', on: false, color: 'ffffff', l: 0.6 },
       { p: '/tmp/led-night', e: 'drift', on: false } ] }));
-  S.telem = parseTelem(JSON.stringify({ temp: 58.3, cpu: 37, gpu: 62,
-    header2: { in: 58.3, duty: 52 }, header4: { in: 62, duty: 45 } }));
+  const demoTelem = () => S.telem = parseTelem(JSON.stringify({ temp: 58.3, cpu: 37, gpu: 62,
+    fans: demoFans.map(f => f.o === 'header2' ? { in: 58.3, duty: 52 } : f.o === 'header4' ? { in: 62, duty: 45 }
+                        : f.o === 'nct6686:pwm2' ? (f.i === '' ? { in: 48, duty: 48, st: 'board' } : { in: 58.3, duty: 57, st: 'host' }) : null) }));
+  demoTelem();
   S.sens = parseSensors(JSON.stringify({ amdgpu: { edge: 61.0, junction: 64.5, mem: 58.0 },
-    k10temp: { Tctl: 58.3 }, nct6686: { CPU: 52.0, System: 38.5, 'VRM MOS': 41.0, 'pwm1-8': 48 } }));
-  // the receiver's stored standalone settings: the config's, as the daemon
-  // pushes them (header6 is wired but not in the daemon's config — dropped
-  // from the file after flashing — and was dialled from the phone)
-  const saBytes = new Uint8Array(SA_LEN);
-  [[65, 100, 'fallback', NONE, [], 5], [100, NONE, 'host', NONE, [], 5], [100, NONE, 'gpio', 0, [[0, 25], [100, 80]], 0],
-   [60, NONE, 'host', NONE, [], 5], [NONE, NONE, 'host', NONE, [], 5], [40, NONE, 'gpio', 20, [[0, 30], [100, 100]], 5]]
-    .forEach(([fb, b, k, g, pts, ramp], i) =>
-      saBytes.set(encodeRecord({ fallback: fb, boost: b, boostSecs: 5, ramp, kind: k, gpio: g, pts: pts.map(([x, y]) => ({ x, y })) }), i * SA_HEADER_LEN));
+    k10temp: { Tctl: 58.3 }, nct6686: { CPU: 52.0, System: 38.5, 'VRM MOS': 41.0, 'pwm1-8': 48 },
+    _outs: [['nct6686:pwm1', 48, -1, 1], ['nct6686:pwm2', 57, 1420, 1], ['amdgpu:pwm1', 30, 900, 0]] }));
+  // the receiver's stored standalone settings: the config's receiver fans,
+  // as the daemon pushes them, in list order
+  const saBytes = new Uint8Array(SA_LEN).fill(NONE);
+  [[1, 65, 100, 'fallback', NONE, [], 5], [2, 100, NONE, 'host', NONE, [], 5], [3, 100, NONE, 'gpio', 0, [[0, 25], [100, 80]], 0],
+   [4, 60, NONE, 'host', NONE, [], 5]]
+    .forEach(([hdr, fb, b, k, g, pts, ramp], i) =>
+      saBytes.set(encodeRecord({ out: { kind: 'header', num: hdr }, fallback: fb, boost: b, boostSecs: 5, ramp, kind: k, gpio: g,
+                                 pts: pts.map(([x, y]) => ({ x, y })) }), i * SA_HEADER_LEN));
   S.sa = parseSa(new DataView(saBytes.buffer));
   const f = new Uint8Array(FANS_LEN(3)), dv = new DataView(f.buffer);
   f[0] = 3; f[1] = 0x01 | 0x08 | 0x10 | 0x20; f[2] = 2; f[3] = 1;
-  // state: wired | src<<1 (1 = fallback, 2 = live, 3 = boost, 4 = the
-  // receiver's own curve); duty; the stored fallback; the source kind; a gpio
-  // header's reading
-  [[0x03, 65, 100, 0, NONE], [0x05, 52, 100, 2, NONE], [0x07, 61, 100, 1, 65], [0x05, 45, 60, 2, NONE],
-   [0, NONE, NONE, NONE, NONE], [0x09, 58, 40, 1, 40]]
+  // state: driving | src<<1 (1 = fallback, 2 = live, 3 = boost, 4 = the
+  // receiver's own curve); duty; the stored fallback; the input kind; a gpio
+  // slot's reading
+  [[0x03, 65, 65, 0, NONE], [0x05, 52, 100, 2, NONE], [0x09, 61, 100, 1, 65], [0x05, 45, 60, 2, NONE],
+   [0, NONE, NONE, NONE, NONE], [0, NONE, NONE, NONE, NONE]]
     .forEach(([st, d, fb, k, inp], i) => { f.set([st, d, fb, k, inp], 4 + i * 5); });
   dv.setUint32(4 + CHANNELS * 5, 5 * 3600 + 17 * 60, true);
   S.fans = parseFans(dv);
   if (location.search.includes('nodaemon')) {
-    S.cfg = S.telem = S.scfg = S.sens = null; // nothing from the daemon
+    S.cfg = S.telem = S.scfg = S.sens = S.outs = null; // nothing from the daemon
     S.fans.live = S.fans.telem = S.fans.host = false; S.fans.age = 255; S.fans.psu = 0;
-    // the receiver alone: a gpio header keeps its own curve, everything else runs its fallback
+    // the receiver alone: a gpio slot keeps its own curve, everything else runs its fallback
     S.fans.h.forEach(h => { if (!h.wired) return; if (h.kind === KIND_BYTE.gpio) h.src = 4; else { h.src = 1; h.duty = h.fb; } });
   }
-  S.info = { version: 'v1.28.0-demo', heap: 143 * 1024, minHeap: 121 * 1024, pins: [0, 20, 21] };
+  S.info = { ver: 3, version: 'v1.31.0-demo', heap: 143 * 1024, minHeap: 121 * 1024, pins: [0, 20, 21],
+             headerPins: [5, 6, 7, 10, null, null], outPins: [0, 1, 2, 3, 20, 21] };
   S.psu = S.fans.psu;
   // the receiver's power switch: the shipped wiring, the config's tunings, a
   // sense wire reading the board's rail (and the daemon's view of the block)
@@ -1275,31 +1454,38 @@ export function demo() {
     }
     if (op === OP_FAN_HEADER) {
       const rec = buf.subarray(TOKEN_LEN + 2, TOKEN_LEN + 2 + SA_HEADER_LEN), r = decodeRecord(new DataView(rec.buffer, rec.byteOffset), 0);
-      if (r.kind === 'gpio' && (r.gpio === 4 || r.gpio === 9 || r.gpio > 21)) throw new Error('GATT operation failed'); // a pin the receiver refuses
+      if (r.used && r.kind === 'gpio' && (r.gpio === 4 || r.gpio === 9 || r.gpio > 21)) throw new Error('GATT operation failed'); // a pin the receiver refuses
       Object.assign(st, r);
-      h.fb = r.fb; h.kind = KIND_BYTE[r.kind];
-      if (r.kind === 'gpio') { h.in = 50; h.src = 4; h.duty = Math.round(r.pts.length ? r.pts[0].y : 50); }
-      else { h.in = NONE; h.src = 1; h.duty = h.fb; }
+      if (!r.used) { Object.assign(h, { wired: false, src: 0, duty: NONE, fb: NONE, kind: NONE, in: NONE }); }
+      else {
+        h.wired = true; h.fb = r.fb; h.kind = KIND_BYTE[r.kind];
+        if (r.kind === 'gpio') { h.in = 50; h.src = 4; h.duty = Math.round(r.pts.length ? r.pts[0].y : 50); }
+        else { h.in = NONE; h.src = 1; h.duty = h.fb; }
+      }
       saBytes.set(rec, slot * SA_HEADER_LEN); // the stored value, as the receiver would echo it
       setTimeout(() => onSa(new DataView(saBytes.buffer)), 400);
     } } };
   S.cfgChr = { writeValueWithResponse: async buf => {
-    // merge the partial edit the way the daemon would
+    // apply the edit the way the daemon would (fans.hpp applyJson), and
+    // answer with the list — or with why not
     const edit = JSON.parse(utf8.decode(buf.subarray(TOKEN_LEN)));
-    const cur = S.cfg, out = { editable: true };
-    cur.h.forEach((h, i) => { if (!h) return; const k = 'header' + (i + 1), e = edit[k] || {};
-      const s = srcInfo(e.s ?? h.src);
-      out[k] = { n: e.n ?? h.name, s: s.src, b: 'b' in e ? e.b : (h.boost === NONE ? null : h.boost), f: e.f ?? h.fallback };
-      if (s.kind !== 'fallback') out[k].c = e.c ?? curveText(h.pts);
-      // the tunings, as the daemon sends them: where they apply and off their default
-      const t = { hyst: e.h ?? h.hyst, ramp: e.r ?? h.ramp, boostSecs: e.t ?? h.boostSecs }, n = { ...h, ...s, boost: out[k].b === null ? NONE : out[k].b };
-      if (hasHyst(n) && t.hyst !== DEFAULTS.hyst) out[k].h = t.hyst;
-      if (hasRamp(n) && t.ramp !== DEFAULTS.ramp) out[k].r = t.ramp;
-      if (hasBoostSecs(n) && t.boostSecs !== DEFAULTS.boostSecs) out[k].t = t.boostSecs; });
-    // ...and push the standalone values to the receiver, as the daemon does
-    cur.h.forEach((h, i) => { const e = edit['header' + (i + 1)]; const f = S.fans.h[i];
-      if (e && 'f' in e && f.wired) { f.fb = e.f; if (f.src === 1) f.duty = e.f; } });
-    setTimeout(() => onCfg(new DataView(new TextEncoder().encode(JSON.stringify(out)).buffer)), 600); } };
+    const answer = err => setTimeout(() => onCfg(new DataView(new TextEncoder().encode(cfgJson(err)).buffer)), 600);
+    if (edit.rev !== String(demoRev)) return answer('the fan list changed on the host since the phone read it — look again and retry');
+    let next = demoFans.map(x => ({ ...x }));
+    if ('del' in edit) next.splice(edit.del, 1);
+    else {
+      const f = 'add' in edit ? edit.add : { ...next[edit.fan], ...edit.edit };
+      for (const k of Object.keys(f)) if (f[k] === undefined) delete f[k];
+      if (f.b === null) delete f.b;
+      if (next.some((x, i) => x.o && x.o === f.o && ('add' in edit || i !== edit.fan))) return answer(`"${f.o}" is another fan's output already — one fan per output`);
+      if (f.o && !/^header[1-4]$|^gpio:\d+$/.test(f.o) && !['nct6686:pwm1', 'nct6686:pwm2'].includes(f.o)) return answer(`"${f.o}" is not a pwm output on this machine`);
+      if ('add' in edit) next.push(f); else next[edit.fan] = f;
+    }
+    demoFans.splice(0, demoFans.length, ...next);
+    demoRev++;
+    demoTelem();
+    answer();
+  } };
   S.stripChr = { writeValueWithResponse: async buf => {
     // apply the partial edit the way the daemon would, scenes by path
     const edit = JSON.parse(utf8.decode(buf.subarray(TOKEN_LEN)));

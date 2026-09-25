@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "protocol.hpp"
+
 // The receiver→host channel for things the receiver *initiates*, as opposed to
 // the debug log it merely answers when asked (dbglog.hpp). Two kinds:
 //
@@ -25,9 +27,9 @@
 // phone waits for, and its timeout is what reports a lost one.
 namespace hostreq
 {
-// the most a message payload can carry (the msg frame's len byte allows 255;
-// this leaves the frame and a margin)
-static const uint16_t MSG_MAX = 224;
+// the most a message payload can carry — protocol.hpp's, a GATT write's own
+// ceiling, so whatever the phone writes fits one frame
+static const uint16_t MSG_MAX = proto::MSG_MAX;
 
 // queue one message for the host. Callable from any task; false when the
 // queue is full (the caller reports it) or the payload too long.

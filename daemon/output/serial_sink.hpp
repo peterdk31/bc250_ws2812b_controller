@@ -384,7 +384,7 @@ private:
     void readerLoop()
     {
         enum { SCAN, TYPE, LOG_HDR, LOG_DATA, LOG_SUM, REQ_BODY,
-               MSG_KIND, MSG_LEN, MSG_DATA, MSG_SUM } st = SCAN;
+               MSG_KIND, MSG_LEN_LO, MSG_LEN_HI, MSG_DATA, MSG_SUM } st = SCAN;
         uint8_t hdr[9];
         int hn = 0, len = 0, have = 0;
         uint32_t seq = 0, ms = 0;
@@ -394,7 +394,7 @@ private:
         uint8_t rq[6];
         int rn = 0;
         uint8_t mkind = 0;
-        uint8_t mdata[256];
+        uint8_t mdata[proto::MSG_MAX];
 
         while (!stop_.load(std::memory_order_relaxed))
         {
@@ -427,16 +427,23 @@ private:
                     else if (b != proto::SYNC0) st = SCAN;
                     break;
                 case MSG_KIND:
-                    // kind(1) len(1) payload checksum
+                    // kind(1) len(2, little-endian) payload checksum
                     mkind = b;
                     sum = b;
-                    st = MSG_LEN;
+                    st = MSG_LEN_LO;
                     break;
-                case MSG_LEN:
+                case MSG_LEN_LO:
                     len = b;
                     sum ^= b;
+                    st = MSG_LEN_HI;
+                    break;
+                case MSG_LEN_HI:
+                    len |= b << 8;
+                    sum ^= b;
                     have = 0;
-                    st = len ? MSG_DATA : MSG_SUM;
+                    // longer than any message can be: noise that happened to
+                    // start like one — rescan
+                    st = len > proto::MSG_MAX ? SCAN : len ? MSG_DATA : MSG_SUM;
                     break;
                 case MSG_DATA:
                     mdata[have++] = b;

@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <algorithm>
 #include <vector>
 #include "protocol.hpp"
 
@@ -58,13 +59,15 @@ class Receiver
 public:
     // maxLeds bounds the work buffers (maxLeds*6 raw bytes — a deep frame's
     // worst case — plus the decoded 8.8 pixels): a pixel frame claiming more
-    // LEDs, or a command with a longer payload, is rejected as noise. The raw
-    // buffer carries one spare byte so onCommand's payload can be
-    // NUL-terminated.
+    // LEDs is rejected as noise, and so is a command with a payload longer
+    // than that buffer. The buffer is never smaller than CMD_MAX, the longest
+    // command payload the daemon sends (the dashboard's JSON is sized by the
+    // config, not the strip), so a short strip still takes every command. It
+    // carries one spare byte so onCommand's payload can be NUL-terminated.
     explicit Receiver(FrameHandler& handler, uint16_t maxLeds = 2048)
         : handler_(handler),
           maxLeds_(maxLeds),
-          cap_(static_cast<size_t>(maxLeds) * 6),
+          cap_(std::max(static_cast<size_t>(maxLeds) * 6, static_cast<size_t>(CMD_MAX))),
           buf_(cap_ + 1),
           px_(static_cast<size_t>(maxLeds) * 3)
     {
@@ -238,7 +241,7 @@ private:
 
     FrameHandler& handler_;
     const uint16_t maxLeds_;
-    const size_t cap_;         // max payload bytes (maxLeds*6, a deep frame)
+    const size_t cap_;         // max payload bytes (a deep frame of maxLeds, or CMD_MAX)
     std::vector<uint8_t> buf_; // cap_ + 1, the extra byte for the NUL above
     std::vector<uint16_t> px_; // maxLeds*3 decoded 8.8 pixels for onPixels
 

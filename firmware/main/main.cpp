@@ -23,8 +23,9 @@
 // wiring in the `fancfg` partition), fed the two CMD_FAN_* commands and the
 // shutdown notice by the LED task.
 // ble.* is the third: the BLE power remote and dashboard (config in
-// `blecfg`) — a phone-facing remote control for the power switch (its contact
-// surface there is pwr::psuState() / pwr::remoteRequest()) that also serves
+// `blecfg`) — a phone-facing remote control for the power switch, when there
+// is one (its contact surface there is pwr::psuState() /
+// pwr::remoteRequest()), that also serves
 // the fan controller's view and relays the daemon's fan config and readings,
 // which fan.* holds for it and the LED task hands over (two more commands).
 // The wire protocol, framing, recording format/replay and crossfading are the

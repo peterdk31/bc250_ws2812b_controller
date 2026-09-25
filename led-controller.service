@@ -11,6 +11,18 @@ ExecStart=/usr/local/bin/led /etc/led-controller/config.json
 # the daemon also watches the file and reloads a save on its own (README
 # "Configuration"); this makes `systemctl reload led-controller` do it now
 ExecReload=/bin/kill -HUP $MAINPID
+# a fan on a host output (README "Fans": "output": "nct6686:pwm2") is this
+# daemon writing the chip's pwmN_enable; the claims record under the state
+# dir is how every one of them gets back to the board's own curve. The daemon
+# hands them back on every exit it runs code for; this runs after ANY stop —
+# a crash, SIGKILL, the watchdog below — and hands back whatever the record
+# still holds. Cheap when there is nothing claimed (no record file).
+ExecStopPost=/usr/local/bin/led --release-fans
+StateDirectory=led-controller
+# a hung daemon would leave a host fan frozen at its last duty: the main loop
+# pings systemd (sd_notify WATCHDOG=1), and a silence this long kills it
+# (SIGABRT) — which runs ExecStopPost, then the restart below
+WatchdogSec=30
 Restart=always
 RestartSec=2
 

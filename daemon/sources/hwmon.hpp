@@ -46,6 +46,15 @@ inline bool hasPrefix(const std::string& s, const char* prefix)
     return s.compare(0, strlen(prefix), prefix) == 0;
 }
 
+// the hwmon tree: /sys/class/hwmon, or LED_HWMON_ROOT's stand-in (tests on a
+// machine with no sensors — every lookup below, and the fans' host outputs,
+// then read and write the stand-in instead)
+inline std::string root()
+{
+    const char* env = getenv("LED_HWMON_ROOT");
+    return env && *env ? env : "/sys/class/hwmon";
+}
+
 // Tctl first when k10temp is present; the BC-250's NCT6686D registers
 // as "nct6686" under both the nct6687d driver (label "CPU") and the
 // in-kernel nct6683 driver (label "AMD TSI Addr 98h"). A bare chip
@@ -102,6 +111,43 @@ inline bool fileExists(const std::string& path)
     return statExists(path);
 }
 
+// the hwmon chips, as { dir, name }, in sorted directory order and one per
+// name: a second chip of the same name can't be named apart, so the first
+// is the one every lookup by name means (findSensor, findChipFile, and the
+// phone's pickers through enumerate — all must agree on which chip that is)
+struct Chip
+{
+    std::string dir;
+    std::string name;
+};
+inline std::vector<Chip> chips()
+{
+    std::vector<Chip> out;
+    const std::string top = root();
+    DIR* dir = opendir(top.c_str());
+    if (!dir)
+        return out;
+    std::vector<std::string> dirs;
+    while (dirent* e = readdir(dir))
+        if (e->d_name[0] != '.')
+            dirs.push_back(top + "/" + e->d_name);
+    closedir(dir);
+    std::sort(dirs.begin(), dirs.end());
+
+    for (auto& d : dirs)
+    {
+        std::string name = readFileLine(d + "/name");
+        if (name.empty())
+            continue;
+        bool seen = false;
+        for (auto& c : out)
+            seen |= c.name == name;
+        if (!seen)
+            out.push_back({d, name});
+    }
+    return out;
+}
+
 // locate a chip's temp input by label; an empty label means the chip's
 // first input. No match → "" so the caller can try the next candidate
 inline std::string findSensor(const std::string& chip, const std::string& label)
@@ -119,45 +165,39 @@ inline std::string findSensor(const std::string& chip, const std::string& label)
                    ? SMU_PREFIX + label
                    : "";
 
-    DIR* dir = opendir("/sys/class/hwmon");
-    if (!dir) return "";
-
-    std::string found;
-
-    while (dirent* e = readdir(dir))
+    for (const auto& c : chips())
     {
-        if (e->d_name[0] == '.')
-            continue;
-
-        std::string base = std::string("/sys/class/hwmon/") + e->d_name;
-
-        if (readFileLine(base + "/name") != chip)
+        if (c.name != chip)
             continue;
 
         if (label.empty())
-        {
-            if (fileExists(base + "/temp1_input"))
-                found = base + "/temp1_input";
-            break;
-        }
+            return fileExists(c.dir + "/temp1_input") ? c.dir + "/temp1_input" : "";
 
         for (int i = 1; i <= 32; i++) // nct6683 exposes up to 32 temperature channels
         {
-            std::string input = base + "/temp" + std::to_string(i);
-
-            if (readFileLine(input + "_label") == label
-                && fileExists(input + "_input"))
-            {
-                found = input + "_input";
-                break;
-            }
+            std::string input = c.dir + "/temp" + std::to_string(i);
+            if (readFileLine(input + "_label") == label && fileExists(input + "_input"))
+                return input + "_input";
         }
-
-        break;
+        return "";
     }
+    return "";
+}
 
-    closedir(dir);
-    return found;
+// find <hwmon root>/<chip>/<file> — a pwmN output, say; "" when absent
+inline std::string findChipFile(const std::string& chip, const std::string& file)
+{
+    for (auto& c : chips())
+        if (c.name == chip)
+            return fileExists(c.dir + "/" + file) ? c.dir + "/" + file : "";
+    return "";
+}
+
+// the chip name of the hwmon directory a file sits in ("" = none)
+inline std::string chipOfFile(const std::string& path)
+{
+    size_t slash = path.rfind('/');
+    return slash == std::string::npos ? "" : readFileLine(path.substr(0, slash) + "/name");
 }
 
 // "k10temp:Tctl,nct6687:CPU" → path of the first candidate present
@@ -357,7 +397,8 @@ private:
 
 inline void listChips()
 {
-    DIR* dir = opendir("/sys/class/hwmon");
+    const std::string top = root();
+    DIR* dir = opendir(top.c_str());
     if (!dir) return;
 
     while (dirent* e = readdir(dir))
@@ -365,7 +406,7 @@ inline void listChips()
         if (e->d_name[0] == '.')
             continue;
 
-        std::string base = std::string("/sys/class/hwmon/") + e->d_name;
+        std::string base = top + "/" + e->d_name;
 
         fprintf(stderr, "  %s (%s)\n",
                 readFileLine(base + "/name").c_str(), base.c_str());
@@ -383,6 +424,7 @@ struct Reading
     std::string label; // the temp's label, or "pwmN"
     bool pwm = false;
     float value = 0;
+    std::string path;  // a pwm output's pwmN file ("" for the rest)
 };
 
 // every such reading, chips and entries in a stable order. Unlabelled
@@ -390,29 +432,13 @@ struct Reading
 // thermistor produces: at or below 0 °C, or above TEMP_MAX (the NCT6686D's
 // unconnected inputs read 0). Fan tachometers, voltages and currents are not
 // sources and are not listed.
-// LED_HWMON_ROOT points enumerate() at a stand-in tree (tests on a machine
-// with no sensors); the daemon's own lookups always read the real one
 inline std::vector<Reading> enumerate()
 {
     std::vector<Reading> out;
-    const char* env = getenv("LED_HWMON_ROOT");
-    std::string root = env && *env ? env : "/sys/class/hwmon";
-    DIR* dir = opendir(root.c_str());
-    if (!dir)
-        return out;
-
-    std::vector<std::string> dirs;
-    while (dirent* e = readdir(dir))
-        if (e->d_name[0] != '.')
-            dirs.push_back(root + "/" + e->d_name);
-    closedir(dir);
-    std::sort(dirs.begin(), dirs.end());
-
-    for (const auto& base : dirs)
+    for (const auto& c : chips())
     {
-        std::string chip = readFileLine(base + "/name");
-        if (chip.empty())
-            continue;
+        const std::string& base = c.dir;
+        const std::string& chip = c.name;
 
         for (int i = 1; i <= 32; i++) // nct6683 exposes up to 32 temperature channels
         {
@@ -425,7 +451,7 @@ inline std::vector<Reading> enumerate()
             float v;
             if (!readTempOk(input + "_input", v))
                 continue;
-            out.push_back({chip, label, false, v});
+            out.push_back({chip, label, false, v, ""});
         }
 
         for (int i = 1; i <= 8; i++)
@@ -438,7 +464,7 @@ inline std::vector<Reading> enumerate()
             f >> raw;
             if (raw < 0 || raw > 255)
                 continue;
-            out.push_back({chip, "pwm" + std::to_string(i), true, raw * 100.0f / 255.0f});
+            out.push_back({chip, "pwm" + std::to_string(i), true, raw * 100.0f / 255.0f, file});
         }
     }
 
@@ -449,7 +475,7 @@ inline std::vector<Reading> enumerate()
     {
         float v;
         if (readTempOk(std::string(PMBUS_PREFIX) + pmbus::RAILS[i].label, v))
-            out.push_back({"pmbus", pmbus::RAILS[i].label, false, v});
+            out.push_back({"pmbus", pmbus::RAILS[i].label, false, v, ""});
     }
 
     // the GDDR6 chips, once the SMU is patched (only when the config opted in,
@@ -458,7 +484,7 @@ inline std::vector<Reading> enumerate()
     {
         float v;
         if (readTempOk(std::string(SMU_PREFIX) + smu::SOURCES[i].label, v))
-            out.push_back({"smu", smu::SOURCES[i].label, false, v});
+            out.push_back({"smu", smu::SOURCES[i].label, false, v, ""});
     }
 
     // temperatures other telemetry publishes as files: BC250-Telemetry
@@ -493,7 +519,7 @@ inline void listTempFiles(const char* dirPath, std::vector<Reading>& out)
         std::string path = std::string(dirPath) + "/" + n;
         float v;
         if (readTempOk(FILE_PREFIX + path, v))
-            out.push_back({"file", path, false, v});
+            out.push_back({"file", path, false, v, ""});
     }
 }
 

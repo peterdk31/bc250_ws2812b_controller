@@ -230,7 +230,7 @@ public:
     }
 
 private:
-    static const int WIRE_MAX = 256; // the receiver's slot for CMD_PWR_CONFIG (protocol.hpp)
+    static const int WIRE_MAX = proto::DASH_PWR_CONFIG_MAX; // the receiver's slot for CMD_PWR_CONFIG
     static const int WAKE_MAX = 63;  // the info value's pin mask is 64 bits; no ESP32 has more
 
     bool bad(const std::string& where, const std::string& what)

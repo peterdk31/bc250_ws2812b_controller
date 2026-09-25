@@ -27,98 +27,132 @@
 #include "fanwire.hpp"
 #include "hwmon.hpp"
 #include "protocol.hpp"
+#include "pwmout.hpp"
 #include "sink.hpp"
 
-// The daemon's half of the fan controller (README "Fans"). The receiver
-// drives the PWM headers; this side decides what they should run, from the
-// config's "fans" block:
+// The daemon's half of the fan controller (README "Fans"). The config's
+// "fans" block is a list of fans, each an input read through a curve onto an
+// output:
 //
-//     "fans": {
-//         "header1": { "name": "pump", "source": "fallback",
-//                      "boost": 100, "boost_seconds": 5, "fallback": 65 },
-//         "header2": { ... "source": "temp", "curve": "45:35 60:55 75:100",
-//                      "hysteresis": 3, "ramp": 5, "boost": null, "fallback": 100 },
-//         "header3": { ... "source": "gpio:0", "curve": "0:25 100:80",
-//                      "ramp": 0, "boost": null, "fallback": 100 },
+//     "fans": [
+//         { "name": "pump", "output": "header1", "input": "fallback",
+//           "fallback": 65, "boost": 100, "boost_seconds": 5 },
+//         { "name": "radiator", "output": "header2", "input": "temp",
+//           "curve": "45:35 60:55 75:100", "hysteresis": 3, "ramp": 5, "fallback": 100 },
+//         { "name": "board fan", "output": "nct6686:pwm2", "input": "k10temp:Tctl",
+//           "curve": "50:30 80:100", "fallback": 60 },
 //         ...
-//     }
+//     ]
 //
-// Every header has name, source, boost and fallback, plus a curve for every
-// source but "fallback", and optionally its tunings — hysteresis, ramp,
-// boost_seconds (TUNINGS below: each has a default and applies to some
-// headers only; on the others it is refused). There is nothing global: a
-// board's own fan header mirrored over pwm wants no ramp at all while the
-// radiator next to it wants one, so each header says for itself. A header
-// listed here is driven: its curve runs, its
-// output is wired at flash time. To take one out of service, delete its
-// block (and reflash fancfg); to stop its fan, give it source "fallback" and
-// a fallback of 0. There is no enable flag — one existed, and meant two
-// things at once (wiring at flash time, curve at runtime), so a phone could
-// switch on a header the receiver had no pin for; the key is now a startup
-// error. `source` is what the curve reads, and WHERE the curve runs follows
-// from what can read it:
+// The list's order is the phone's; nothing else hangs on it. Every fan has a
+// name, an output, an input and a fallback, a curve for every input but
+// "fallback" (and the board's own, below), optionally a boost, and optionally
+// its tunings — hysteresis, ramp, boost_seconds (TUNINGS below: each has a
+// default and applies to some fans only; on the others it is refused).
+// There is nothing global.
 //
-//   fallback     nothing: the header runs its fallback value, always
+// `output` is what the fan drives:
+//
+//   headerN      header N of the receiver's board (its header → GPIO map is
+//                the board's, flash-time: tools/pincheck.py FAN_PINS)
+//   gpio:N       a receiver GPIO by number (a hand-wired build)
+//   chip:pwmN    a PWM output of THIS host, a hwmon pwmN — the BC-250's own
+//                fan header on the NCT6686D, say. This daemon drives it
+//                itself (daemon/pwmout.hpp: pwmN_enable taken to manual, and
+//                always handed back); the receiver has no part in it
+//   ""           nothing: the fan is parked, its settings kept. A receiver
+//                header no fan names is not driven at all (a 4-pin fan on it
+//                runs full); a host output no fan names runs the board's own
+//                curve
+//
+// Receiver outputs take the receiver's slots (FAN_CHANNELS of them) in list
+// order; every one of them moves at runtime — the pin travels in the slot's
+// record (protocol.hpp CMD_FAN_STANDALONE).
+//
+// `input` is what the curve reads, and WHERE the curve runs follows from
+// what can read it:
+//
+//   fallback     nothing: the fan runs its fallback value, always
 //   gpio:N       the duty of a PWM signal on the RECEIVER's GPIO N (the
 //                BC-250's own fan header, wired over) — the receiver samples
 //                it and runs the curve itself, so this works with no daemon
-//                and the machine off. x is 0..100 %
+//                and the machine off. x is 0..100 %. A receiver output only
 //   temp         the top-level `sensors` pick, °C            (this daemon)
 //   chip:label   any hwmon temperature, °C                   (this daemon)
 //   pmbus:CPU VRM / pmbus:GPU VRM
 //                the BC-250's VRM controller over I2C, °C   (this daemon)
+//   smu:VRAM hotspot / average / 0..7
+//                the GDDR6 chips over the SMU, °C            (this daemon)
 //   file:/path   a file holding one temperature, °C         (this daemon)
 //   chip:pwmN    a hwmon pwm output, read as 0..100 %        (this daemon)
 //   cpu_load / gpu_load   0..100 %                           (this daemon)
+//   ""           a host output only: the board drives it, with its own
+//                curve — "output": "nct6686:pwm2", "input": "". This daemon
+//                never takes the output, and shows the board's duty; any
+//                other input takes it over
 //
-// A daemon-evaluated ("host") curve's output goes out as CMD_FAN_LIVE whole
-// percents on the rules' 0.5 s tick, sharing the reads the rule conditions
-// already do — when something changed, plus a refresh every few seconds so
-// the receiver can treat a silence as "the daemon is gone" and fall back,
-// which is also why a live duty is never persisted on the receiver. A
-// fallback or gpio header is never the daemon's to drive: its live slot is
-// always FAN_NONE.
+// A daemon-evaluated ("host") curve on a receiver output goes out as
+// CMD_FAN_LIVE whole percents on the rules' 0.5 s tick, sharing the reads the
+// rule conditions already do — when something changed, plus a refresh every
+// few seconds so the receiver can treat a silence as "the daemon is gone"
+// and fall back. On a host output it is written to the chip. An input that
+// can't be read (a sensor gone, a thermistor reading 0) runs the fallback,
+// on every output alike; a host output goes back to the board's own curve
+// only when this daemon stops driving it altogether (it exits, or no fan
+// names it).
 //
 // `curve` is "x:percent" points (up to fancurve::MAX_POINTS), linear between
-// and flat beyond the ends; the x unit is the source's. `boost` is the duty
-// for the first boost_seconds after the host powers on (null = sits it out)
-// and `fallback` what the receiver runs whenever nothing else drives the
-// header. Those, the ramp, and every header's source kind (with a gpio
-// header's pin and curve) are the receiver's standalone settings — one
-// fanwire::Header record per header: pushed at startup and after any edit
-// that moves them (CMD_FAN_STANDALONE, common/protocol.hpp) and also baked into its fancfg
-// partition at flash time from this same block (tools/fancfg.py). They are
-// pushed for every header in this block — the config is the one source of
-// truth while a daemon is connected, and a value dialled on the receiver
-// from the phone while no daemon ran is overwritten by it.
+// and flat beyond the ends; the x unit is the input's. `boost` is the duty
+// for the first boost_seconds after the host powers on (null or absent = no
+// boost; a receiver output only — the receiver runs it before this daemon
+// exists) and `fallback` what the fan runs whenever its input can't be read
+// and, on a receiver output, whenever no daemon drives it. Those, the ramp,
+// the output, and every receiver fan's input kind (with a gpio fan's pin and
+// curve) are the receiver's standalone settings — one fanwire::Header record
+// per slot: pushed at startup and after any edit that moves them
+// (CMD_FAN_STANDALONE) and also baked into its fancfg partition at flash time
+// from this same block (tools/fancfg.py, which assigns the slots the same
+// way). The push is the whole truth for every slot — the config is the one
+// source of truth while a daemon is connected, and a value dialled on the
+// receiver from the phone while no daemon ran is overwritten by it.
 //
-// The BLE dashboard (README "BLE remote") sees and edits this block through
+// The BLE dashboard (README "BLE remote") sees and edits this list through
 // the receiver, all of it as JSON text the receiver relays without reading:
 // the controller sends the config as it runs it (CMD_FAN_CONFIG, toJson) and,
 // while a phone is watching, what the curves read and produce (CMD_FAN_TELEM,
-// telemetryJson); a phone edit comes back as MSG_FAN_CONFIG — a partial
-// object of just the fields it changed — is validated exactly like the config
-// (applyJson) and, once live, is written back into the config file itself:
-// only the bytes of the `fans` block are replaced (writeConfig, through
+// telemetryJson) and what the machine offers (CMD_FAN_SENSORS, sensorsJson);
+// a phone edit comes back as MSG_FAN_CONFIG, is validated exactly like the
+// config (every edit is folded into the fan's config object and re-read by
+// loadFan) and, once live, is written back into the config file itself: only
+// the bytes of the `fans` block are replaced (writeConfig, through
 // daemon/config_edit.hpp), everything around it stays as the user wrote it.
 // So the config stays the one source of truth — there is no second file to
 // migrate — and a restart reads the edit like any other setting.
 //
-// The JSON shape the wire and the phone's edits use:
+// The JSON shapes the wire and the phone's edits use:
 //
 //     { "editable": true,        // the config file is writable
-//       "header1": { "n": "pump", "s": "fallback", "b": 100, "t": 5, "f": 65 },
-//       "header2": { "n": "radiator", "s": "temp",
-//                    "c": "45:35 60:55 75:100", "f": 100, "h": 3, "r": 5 }, ... }
+//       "rev": "3fa2c019",       // the list's revision, see below
+//       "err": "...",            // once, after a refused edit: why
+//       "fans": [ { "n": "pump", "o": "header1", "i": "fallback", "b": 100, "t": 5, "f": 65 },
+//                 { "n": "radiator", "o": "header2", "i": "temp",
+//                   "c": "45:35 60:55 75:100", "f": 100, "h": 3, "r": 5 }, ... ] }
 //
-// s is the source exactly as the config spells it, c/b/f are curve, boost
-// and fallback in the config's own notation (c absent for a fallback source,
-// b absent = null, no boost), n the name, h/r/t the tunings (TUNINGS' short
-// keys; one is absent when it doesn't apply to the header or sits at its
-// default, which the page knows). All of them are editable; a phone that
-// changes s sends the curve for the new source in the same edit. Keys are
-// short because a GATT attribute holds 512 bytes at most and six headers
-// have to fit — pushConfig says so in the journal when they don't.
+// n, o, i are the name, output and input exactly as the config spells them,
+// c/b/f the curve, boost and fallback in the config's own notation (c absent
+// without a curve, b absent = no boost), h/r/t the tunings (TUNINGS' short
+// keys; one is absent when it doesn't apply or sits at its default, which
+// the page knows). An edit is ONE operation, naming the revision it was made
+// against — a hash of the list as the phone saw it, so an edit made against
+// a list that has changed since (another phone, a hand edit, a reload) is
+// refused rather than landing on the wrong fan:
+//
+//     { "rev": "3fa2c019", "fan": 1, "edit": { "c": "40:30 70:100" } }   // some fields of fans[1]
+//     { "rev": "3fa2c019", "add": { "n": ..., "o": ..., "i": ..., ... } } // a new fan, at the end
+//     { "rev": "3fa2c019", "del": 2 }                                      // drop fans[2]
+//
+// Keys are short because the phone reads the JSON over GATT, in pages of a
+// few hundred bytes (the receiver holds up to DASH_FAN_CONFIG_MAX).
 namespace fans
 {
 static const int CHANNELS = proto::FAN_CHANNELS;
@@ -136,47 +170,63 @@ static_assert(proto::FAN_CURVE_POINTS == fancurve::MAX_POINTS,
 
 using fancurve::Point;
 
-struct Header
+struct Fan
 {
-    int slot = 0;                    // 0-based; header1 is slot 0
-    std::string key;                 // "header1"
     std::string name;
-    std::string source;              // as written
 
-    enum Kind { Fallback, Gpio, Temp, Pwm, CpuLoad, GpuLoad } kind = Fallback;
+    std::string output;              // as written
+    enum Out { Parked, Header, GpioOut, Host } out = Parked;
+    int outNum = -1;                 // Header: 1-based header number; GpioOut: the GPIO
+    std::string outChip, outFile;    // Host: "nct6686", "pwm2"
+    int slot = -1;                   // the receiver slot (Header/GpioOut), else -1
+
+    std::string input;               // as written
+    enum Kind { Fallback, Gpio, Temp, Pwm, CpuLoad, GpuLoad, Board } kind = Fallback;
     int gpio = -1;                   // Gpio: the receiver's input pin
-    std::vector<Point> curve;        // sorted by x; empty for Fallback
+    std::string spec;                // hwmon candidates (Temp) / chip (Pwm)
+    std::string pwmFile;             // "pwm1" (Pwm)
+    std::vector<Point> curve;        // sorted by x; empty without one
     std::string curveText;           // the curve, canonical "x:y x:y"
-    int boost = -1;                  // percent, -1 = null (no boost)
+    int boost = -1;                  // percent, -1 = none
     int fallback = 100;
-    // the tunings (TUNINGS below); one that doesn't apply to this header's
-    // kind holds its default and is never written out
+    // the tunings (TUNINGS below); one that doesn't apply to this fan holds
+    // its default and is never written out
     float hysteresis = DEFAULT_HYSTERESIS;       // °C a temperature must fall before the fan follows
     float ramp = proto::FAN_DEFAULT_RAMP;        // percent per second on the way down, 0 = at once
     float boostSecs = proto::FAN_DEFAULT_BOOST_SECS;
 
-    // runtime
-    std::string spec;                // hwmon candidates (Temp) / chip (Pwm)
-    std::string pwmFile;             // "pwm1" (Pwm)
-    std::string path;                // resolved sysfs file, "" = not yet
-    bool reported = false;           // "no sensor yet" said once
-    bool lost = false;               // the resolved sensor stopped reading (said once)
-    bool haveIn = false;
-    float effIn = 0;                 // hysteresis-filtered input
-    bool haveOut = false;
-    float out = 0;                   // ramped output
-    float lastIn = 0;                // last raw reading (for --fan-status)
-    bool lastInOk = false;
+    // runtime — carried over an edit that leaves the input alone
+    struct Runtime
+    {
+        std::string path;            // the input's resolved file, "" = not yet
+        bool lost = false;           // the resolved input stopped reading (said once)
+        bool haveIn = false;
+        float effIn = 0;             // hysteresis-filtered input
+        bool haveOut = false;
+        float out = 0;               // ramped output
+        float lastIn = 0;            // last raw reading (telemetry, --fan-status)
+        bool lastInOk = false;
+        int duty = proto::FAN_NONE;  // what this side ran it at this tick (NONE = not ours)
+        // a host output
+        std::string outPath;         // the resolved pwmN file, "" = not found (yet)
+        enum HostSt { HNone, HDrive, HBoard, HRefused, HGone, HReadOnly, HBusy } host = HNone;
+        bool saidGone = false, saidRo = false;
+    } rt;
 
-    // the daemon evaluates this header's curve (the receiver runs the rest)
-    bool hostRun() const { return kind != Fallback && kind != Gpio; }
+    bool receiverOut() const { return out == Header || out == GpioOut; }
+
+    // does this fan's curve read something only this daemon can?
+    bool hostInput() const { return kind != Fallback && kind != Gpio && kind != Board; }
+
+    // does it take a curve?
+    bool hasCurve() const { return kind != Fallback && kind != Board; }
 
     float eval(float x) const
     {
         return curve.empty() ? fallback : fancurve::eval(curve.data(), (int)curve.size(), x);
     }
 
-    // the receiver's record of this header (protocol.hpp CMD_FAN_STANDALONE)
+    // the receiver's record of this fan (protocol.hpp CMD_FAN_STANDALONE)
     fanwire::Header wire() const
     {
         fanwire::Header w;
@@ -197,13 +247,15 @@ struct Header
                 w.pts[i][1] = (uint8_t)(curve[i].y + 0.5f);
             }
         }
+        w.outKind = out == Header ? proto::FAN_OUT_HEADER : proto::FAN_OUT_GPIO;
+        w.out = (uint8_t)outNum;
         return w;
     }
 };
 
-// A header's tunings: optional numbers with a default, each meaningful for
-// some headers only — and refused on the others, so a hysteresis on a load
-// header is a typo caught at startup rather than a number that silently does
+// A fan's tunings: optional numbers with a default, each meaningful for
+// some fans only — and refused on the others, so a hysteresis on a load
+// input is a typo caught at startup rather than a number that silently does
 // nothing. This one table drives the config parser, the dashboard's JSON in
 // both directions, the write-back into the file and --fan-status.
 struct Tuning
@@ -212,48 +264,39 @@ struct Tuning
     const char* shortKey; // the dashboard's
     const char* range;    // what a value outside lo..hi is told
     float lo, hi;
-    float Header::* field;
-    bool (*applies)(const Header&);
+    float Fan::* field;
+    bool (*applies)(const Fan&);
     const char* onlyFor;  // "...only applies to <onlyFor>"
     float dflt;
 };
 static const Tuning TUNINGS[] = {
-    {"hysteresis", "h", "a number of °C, 0 or more", 0, 1e9f, &Header::hysteresis,
-     [](const Header& h) { return h.kind == Header::Temp; }, "a temperature source", DEFAULT_HYSTERESIS},
-    {"ramp", "r", "percent per second, 0..255 (0 = at once)", 0, 255, &Header::ramp,
-     [](const Header& h) { return h.kind != Header::Fallback; }, "a source with a curve", proto::FAN_DEFAULT_RAMP},
-    {"boost_seconds", "t", "seconds, 0..255", 0, 255, &Header::boostSecs,
-     [](const Header& h) { return h.boost >= 0; }, "a header with a boost", proto::FAN_DEFAULT_BOOST_SECS},
+    {"hysteresis", "h", "a number of °C, 0 or more", 0, 1e9f, &Fan::hysteresis,
+     [](const Fan& f) { return f.kind == Fan::Temp; }, "a temperature input", DEFAULT_HYSTERESIS},
+    {"ramp", "r", "percent per second, 0..255 (0 = at once)", 0, 255, &Fan::ramp,
+     [](const Fan& f) { return f.hasCurve(); }, "an input with a curve", proto::FAN_DEFAULT_RAMP},
+    {"boost_seconds", "t", "seconds, 0..255", 0, 255, &Fan::boostSecs,
+     [](const Fan& f) { return f.boost >= 0; }, "a fan with a boost", proto::FAN_DEFAULT_BOOST_SECS},
 };
 static const int TUNING_COUNT = sizeof TUNINGS / sizeof *TUNINGS;
 
-// find /sys/class/hwmon/<chip>/<file> (a pwmN output, say); "" when absent
-inline std::string findChipFile(const std::string& chip, const std::string& file)
+// the short keys of the other fields, config key → dashboard key (the
+// tunings' are in TUNINGS)
+struct Field
 {
-    DIR* dir = opendir("/sys/class/hwmon");
-    if (!dir)
-        return "";
+    const char* key;
+    const char* shortKey;
+};
+static const Field FIELDS[] = {
+    {"name", "n"}, {"output", "o"}, {"input", "i"}, {"curve", "c"}, {"fallback", "f"}, {"boost", "b"},
+};
 
-    std::string found;
+using hwmon::findChipFile;
 
-    while (dirent* e = readdir(dir))
-    {
-        if (e->d_name[0] == '.')
-            continue;
-
-        std::string base = std::string("/sys/class/hwmon/") + e->d_name;
-
-        if (hwmon::readFileLine(base + "/name") != chip)
-            continue;
-
-        if (hwmon::fileExists(base + "/" + file))
-            found = base + "/" + file;
-
-        break;
-    }
-
-    closedir(dir);
-    return found;
+// is "label" a pwm output's file name, "pwm1".."pwm99"?
+inline bool isPwmLabel(const std::string& label)
+{
+    return label.size() > 3 && label.compare(0, 3, "pwm") == 0 &&
+           label.find_first_not_of("0123456789", 3) == std::string::npos;
 }
 
 class Controller
@@ -265,99 +308,90 @@ public:
     static constexpr const char* BLOCK = "fans";
 
     // read and validate the "fans" block. Returns false (having said what is
-    // wrong, "fans.header2.curve: ...") on a bad block, so the daemon can
-    // refuse to start the way it does for a bad rule; true with no block or no
-    // header, in which case active() is false and nothing is ever sent.
-    // writer is the config file's editor (config_edit.hpp), where a dashboard
-    // edit is written back (see the header comment); null = edits are refused.
-    bool load(const Config& cfg, cfgedit::Writer* writer = nullptr)
+    // wrong, "fans[2].curve: ...") on a bad block, so the daemon can refuse to
+    // start the way it does for a bad rule; true with no block, in which case
+    // nothing is ever sent. `writer` is the config file's editor
+    // (config_edit.hpp), where a dashboard edit is written back (null = edits
+    // are refused); `claims` drives the host outputs (pwmout.hpp — null for a
+    // look that must never touch one: --fan-status, --check).
+    bool load(const Config& cfg, cfgedit::Writer* writer = nullptr, pwmout::Claims* claims = nullptr)
     {
         const json::Value* block = cfg.root().find(BLOCK);
+
+        writer_ = writer;
+        claims_ = claims;
 
         if (!block)
             return true;
 
-        if (!block->isObject())
-        {
-            fprintf(stderr, "fans: expected an object\n");
+        if (block->isObject())
+            return retiredShape(*block);
+
+        if (!block->isArray())
+            return bad("fans", "expected a list of fans [ { \"name\", \"output\", \"input\", ... }, ... ]");
+
+        sensors_ = cfg.get("sensors", hwmon::DEFAULT_SENSORS);
+        stripPin_ = cfg.getInt("strip.pin", 13); // output/strip.hpp's default
+
+        std::vector<Fan> list;
+        if (!parseList(*block, list, "fans", true))
             return false;
-        }
 
-        const std::string sensors = cfg.get("sensors", hwmon::DEFAULT_SENSORS);
-
-        for (auto& m : block->members)
-        {
-            const std::string& k = m.first;
-            const json::Value& v = m.second;
-
-            if (k == "hysteresis" || k == "ramp" || k == "boost_seconds")
-                return bad("fans." + k, "moved: this is each header's own setting now — put it "
-                                        "in the fans.headerN block it belongs to (README \"Fans\")");
-            else if (k == "pins")
-            {
-                // the flasher's business (tools/fancfg.py); only the shape is
-                // checked here so a typo still fails before the fans run
-                if (!v.isString() && !v.isArray())
-                    return bad("fans.pins", "expected \"5,6,7,10\" (or an array)");
-            }
-            else if (k.rfind("header", 0) == 0)
-            {
-                int n = atoi(k.c_str() + 6);
-                if (n < 1 || n > CHANNELS || k != "header" + std::to_string(n))
-                    return bad("fans." + k, "no such header (header1..header" +
-                                                std::to_string(CHANNELS) + ")");
-
-                Header h;
-                h.slot = n - 1;
-                h.key = k;
-                if (!loadHeader(v, sensors, h))
-                    return false;
-
-                for (auto& o : headers_)
-                    if (o.slot == h.slot)
-                        return bad("fans." + k, "given twice");
-
-                headers_.push_back(std::move(h));
-            }
-            else
-                return bad("fans." + k, "unknown key");
-        }
-
-        sensors_ = sensors;
+        fans_ = std::move(list);
         block_ = *block; // the block as written, for writeConfig to update in place
-        writer_ = writer;
+        for (size_t i = 0; i < fans_.size(); i++)
+            lastFrom_.push_back((int)i);
+        present_ = true;
+
+        for (auto& f : fans_)
+            if (f.out == Fan::Host && f.kind != Fan::Board)
+                resolveOutput(f);
 
         return true;
     }
 
-    bool active() const { return !headers_.empty(); }
+    // is there a fans block at all? (none: the receiver's fans are left alone)
+    bool present() const { return present_; }
 
     bool writable() const { return writer_ && writer_->writable(); }
 
     // the receiver's standalone settings (protocol.hpp CMD_FAN_STANDALONE) —
-    // once, at startup, and again when an edit moves them. Every header in
-    // the block: the config wins over whatever the receiver held (see the
-    // header comment)
+    // once, at startup, and again when an edit moves them. Every slot: the
+    // config wins over whatever the receiver held (see the header comment)
     void pushStandalone(std::vector<std::unique_ptr<Sink>>& sinks)
     {
-        if (!active())
+        if (!present_)
             return;
 
         uint8_t p[proto::FAN_STANDALONE_LEN];
         standaloneBlob(p);
         for (auto& s : sinks)
             s->sendCommand(proto::CMD_FAN_STANDALONE, p, sizeof p);
+        // the receiver drops a live push still queued behind this one (it
+        // may be laid out for the old slots): send the live duties again on
+        // the next tick rather than at the next change or REFRESH_S
+        lastSent_ = -1e9;
     }
 
-    // one evaluation: read every host-run header's source, run the curves,
-    // and send the live duties if they changed (or the refresh is due). Call
-    // it on the rules tick; it costs nothing when there are no headers and no
-    // phone is watching (a watcher still gets the host tiles' readings).
+    // one evaluation: read every fan's input this side evaluates, run the
+    // curves, drive the host outputs, and send the receiver's live duties if
+    // they changed (or the refresh is due). Call it on the rules tick; it
+    // costs nothing when there are no fans and no phone is watching (a
+    // watcher still gets the tiles' readings).
     void tick(double now, std::vector<std::unique_ptr<Sink>>& sinks)
     {
         bool watch = watching(now);
-        if (!active() && !watch)
+        if (!present_ && !watch)
+        {
+            // no fans (a reload dropped the block): anything an earlier config
+            // drove is handed back on this, the first tick without it
+            if (claims_)
+            {
+                claims_->begin();
+                claims_->end(now);
+            }
             return;
+        }
 
         float dt = lastTick_ > 0 ? (float)(now - lastTick_) : 0.5f;
         lastTick_ = now;
@@ -367,12 +401,26 @@ public:
         uint8_t p[CHANNELS];
         memset(p, proto::FAN_NONE, sizeof p);
 
-        for (auto& h : headers_)
-            p[h.slot] = (uint8_t)compute(h, dt);
+        if (claims_)
+            claims_->begin();
+        for (auto& f : fans_)
+        {
+            int d = compute(f, dt);
+            f.rt.duty = d;
+            if (f.slot >= 0)
+                p[f.slot] = (uint8_t)d;
+            else if (f.out == Fan::Host)
+                driveHost(f, d, now);
+        }
+        if (claims_)
+            claims_->end(now);
 
         bool changed = memcmp(p, live_, sizeof p) != 0;
+        bool slots = false;
+        for (auto& f : fans_)
+            slots |= f.slot >= 0;
 
-        if (changed || (active() && now - lastSent_ >= REFRESH_S))
+        if (changed || (slots && now - lastSent_ >= REFRESH_S))
         {
             memcpy(live_, p, sizeof p);
             lastSent_ = now;
@@ -391,20 +439,39 @@ public:
     // ---- the BLE dashboard's side (see the header comment) ----
 
     // the config as run, for the receiver to serve over GATT — once at startup
-    // and after every applied edit
+    // and after every applied (or refused) edit
     void pushConfig(std::vector<std::unique_ptr<Sink>>& sinks)
     {
-        if (headers_.empty())
+        if (!present_)
+        {
+            // no fans block: an empty value, so a list an earlier run left on
+            // the receiver isn't shown (and edited, into a daemon that has
+            // none) — the phone falls back to the receiver's own slots
+            for (auto& s : sinks)
+                s->sendCommand(proto::CMD_FAN_CONFIG, nullptr, 0);
+            err_.clear();
             return;
+        }
 
         std::string j = toJson();
-        if (j.size() > WIRE_MAX)
+        // a long refusal on a list near the ceiling: the reason is cut, never
+        // the answer (the phone waits for it)
+        while (j.size() > proto::DASH_FAN_CONFIG_MAX && !err_.empty())
         {
-            // the receiver holds WIRE_MAX (a GATT attribute's ceiling) and would
-            // drop this; say so once rather than leave the phone showing nothing
+            size_t cut = err_.size() > 16 ? err_.size() - 16 : 0;
+            while (cut > 0 && ((unsigned char)err_[cut] & 0xC0) == 0x80)
+                cut--; // not inside a UTF-8 character
+            err_.resize(cut);
+            j = toJson();
+        }
+        err_.clear(); // said once
+        if (j.size() > proto::DASH_FAN_CONFIG_MAX)
+        {
+            // the receiver holds DASH_FAN_CONFIG_MAX and would drop this; say
+            // so once rather than leave the phone showing nothing
             if (!warnedSize_)
-                fprintf(stderr, "fans: config is %zu bytes as JSON, over the dashboard's "
-                                "%d — shorten header names or sources\n", j.size(), WIRE_MAX);
+                fprintf(stderr, "fans: the config is %zu bytes as JSON, over the dashboard's "
+                                "%u — shorten fan names or inputs\n", j.size(), proto::DASH_FAN_CONFIG_MAX);
             warnedSize_ = true;
             return;
         }
@@ -426,21 +493,24 @@ public:
             if (on && !was)
             {
                 lastTelemSent_ = lastSensorsSent_ = -1e9; // answer a fresh watcher on the next tick
+                lastSensors_.clear();
                 pwmSplit_.clear(); // the pwm outputs start out as one entry again
             }
         }
         else if (kind == proto::MSG_FAN_CONFIG)
         {
-            if (applyEdit(std::string(payload.begin(), payload.end()), sinks))
-                pushConfig(sinks); // the answer the phone waits for
+            // answered either way: the new config, or the old one with why
+            applyEdit(std::string(payload.begin(), payload.end()), sinks);
+            pushConfig(sinks);
         }
     }
 
-    // ./led <config> --fan-status: what each header resolves to and would run
-    // right now (two ticks, so cpu_load has a delta to report)
+    // ./led <config> --fan-status: what each fan resolves to and would run
+    // right now (two ticks, so cpu_load has a delta to report). Drives
+    // nothing: the controller was loaded without claims.
     void dumpStatus(FILE* out)
     {
-        if (headers_.empty())
+        if (!present_)
         {
             fprintf(out, "fans: no \"fans\" block in the config\n");
             return;
@@ -454,35 +524,56 @@ public:
 
         fprintf(out, "fans: dashboard edits: %s\n",
                 writable() ? "written back to the config" : "off (config not writable)");
-        fprintf(out, "  sensors a header could follow (the phone's picker): %s\n", sensorsJson().c_str());
+        fprintf(out, "  sensors a fan could follow (the phone's picker): %s\n", sensorsJson().c_str());
+        if (fans_.empty())
+            fprintf(out, "  no fans in the list\n");
 
-        for (auto& h : headers_)
+        for (size_t i = 0; i < fans_.size(); i++)
         {
-            fprintf(out, "  %s %-10s", h.key.c_str(), h.name.c_str());
+            Fan& f = fans_[i];
+            fprintf(out, "  fans[%zu] %-12s -> %s", i, f.name.c_str(),
+                    f.out == Fan::Parked ? "(no output, parked)" : f.output.c_str());
+            if (f.slot >= 0)
+                fprintf(out, " (receiver slot %d)", f.slot);
+            if (f.out == Fan::Host)
+            {
+                // the board's own is only read, through its input path
+                const std::string& p = f.kind == Fan::Board ? f.rt.path : f.rt.outPath;
+                fprintf(out, " -> %s", p.empty() ? "(not found)" : p.c_str());
+            }
+            fprintf(out, "\n      ");
 
-            if (h.kind == Header::Fallback)
-                fprintf(out, "  fallback (the receiver runs it at %d%%)", h.fallback);
-            else if (h.kind == Header::Gpio)
-                fprintf(out, "  %s \"%s\" (the receiver reads the pin and runs the curve)",
-                        h.source.c_str(), h.curveText.c_str());
+            if (f.kind == Fan::Board)
+                fprintf(out, "input: the board's own curve (not taken over)%s",
+                        f.rt.lastInOk ? (", at " + std::to_string((int)(f.rt.lastIn + 0.5f)) + "%").c_str() : "");
+            else if (f.kind == Fan::Fallback)
+                fprintf(out, "input: none — runs its fallback, %d%%%s", f.fallback,
+                        f.receiverOut() ? " (the receiver runs it)" : "");
+            else if (f.kind == Fan::Gpio)
+                fprintf(out, "input: %s \"%s\" (the receiver reads the pin and runs the curve)",
+                        f.input.c_str(), f.curveText.c_str());
             else
             {
-                fprintf(out, "  %s", h.source.c_str());
-                if (h.kind == Header::Temp || h.kind == Header::Pwm)
-                    fprintf(out, " -> %s", h.path.empty() ? "(not found)" : h.path.c_str());
-                if (h.lastInOk)
-                    fprintf(out, " = %g%s", h.lastIn, h.kind == Header::Temp ? " °C" : " %");
+                fprintf(out, "input: %s", f.input.c_str());
+                if (f.kind == Fan::Temp || f.kind == Fan::Pwm)
+                    fprintf(out, " -> %s", f.rt.path.empty() ? "(not found)" : f.rt.path.c_str());
+                if (f.rt.lastInOk)
+                    fprintf(out, " = %g%s", f.rt.lastIn, f.kind == Fan::Temp ? " °C" : " %");
                 else
-                    fprintf(out, " = (no reading)");
-                fprintf(out, "  -> %d%%", (int)live_[h.slot]);
+                    fprintf(out, " = (no reading — runs the fallback)");
+                if (f.out != Fan::Parked && f.rt.duty != proto::FAN_NONE)
+                    fprintf(out, "  -> %d%%", f.rt.duty);
             }
 
-            fprintf(out, "   boost %s, fallback %d%%",
-                    h.boost < 0 ? "none" : (std::to_string(h.boost) + "%").c_str(),
-                    h.fallback);
+            if (f.out == Fan::Host && f.kind != Fan::Board)
+                fprintf(out, " [%s]", hostState(f).text);
+
+            fprintf(out, "\n      fallback %d%%", f.fallback);
+            if (f.boost >= 0)
+                fprintf(out, ", boost %d%%", f.boost);
             for (auto& t : TUNINGS)
-                if (t.applies(h))
-                    fprintf(out, ", %s %g", t.key, h.*t.field);
+                if (t.applies(f))
+                    fprintf(out, ", %s %g", t.key, f.*t.field);
             fprintf(out, "\n");
         }
     }
@@ -491,79 +582,203 @@ private:
     bool bad(const std::string& where, const std::string& what)
     {
         fprintf(stderr, "%s: %s\n", where.c_str(), what.c_str());
+        if (capture_)
+            lastBad_ = what; // the phone's reason (applyEdit)
         return false;
     }
 
-    static const char* SOURCE_HELP()
+    // the old shape — an object of "header1".."header6" blocks — said as a
+    // startup error, with the list it becomes printed ready to paste (there
+    // is no compatibility path: one file on one box, and a silently
+    // half-read fan block would mean a pump at the wrong speed)
+    bool retiredShape(const json::Value& block)
     {
-        return "expected fallback, gpio:N, temp, cpu_load, gpu_load, a hwmon "
-               "chip:label / chip:pwmN, pmbus:CPU VRM / pmbus:GPU VRM, "
-               "smu:VRAM hotspot / smu:VRAM 0..7, or file:/path";
+        json::Value list;
+        list.type = json::Value::Type::Array;
+        std::vector<int> pins;
+        if (const json::Value* p = block.find("pins"))
+            for (auto& t : hwmon::split(json::toString(*p), ','))
+                pins.push_back(atoi(t.c_str()));
+        for (int n = 1; n <= CHANNELS; n++)
+        {
+            const json::Value* h = block.find("header" + std::to_string(n));
+            if (!h || !h->isObject())
+                continue;
+            json::Value f;
+            f.type = json::Value::Type::Object;
+            std::string out = (int)pins.size() >= n ? "gpio:" + std::to_string(pins[n - 1])
+                                                    : "header" + std::to_string(n);
+            for (auto& m : h->members)
+            {
+                if (m.first == "enabled")
+                    continue;
+                if (m.first == "source")
+                {
+                    std::string src = json::toString(m.second);
+                    cfgedit::member(f, "output") = cfgedit::string(out);
+                    cfgedit::member(f, "input") = cfgedit::string(src == "constant" ? "fallback" : src);
+                    continue;
+                }
+                cfgedit::member(f, m.first) = m.second;
+            }
+            if (!f.find("output"))
+                cfgedit::member(f, "output") = cfgedit::string(out);
+            list.items.push_back(f);
+        }
+        std::string text;
+        cfgedit::print(list, 1, text);
+        fprintf(stderr, "fans: the fans block is a list now, each fan naming its output and its "
+                        "input (\"source\" became \"input\"; README \"Fans\") — replace the block "
+                        "with:\n    \"fans\": %s\n", text.c_str());
+        return false;
     }
 
-    // what a source string means: kind, and for gpio the pin, for hwmon
-    // sources the spec. "" when it parses, else what is wrong with it. Only
-    // the source fields of h are touched.
-    static std::string parseSource(const std::string& src, const std::string& sensors,
-                                   Header& h)
+    static const char* INPUT_HELP()
     {
-        h.gpio = -1;
-        h.spec.clear();
-        h.pwmFile.clear();
+        return "expected fallback, gpio:N, temp, cpu_load, gpu_load, a hwmon chip:label / "
+               "chip:pwmN, pmbus:CPU VRM / pmbus:GPU VRM, smu:VRAM hotspot / smu:VRAM 0..7, "
+               "file:/path, or (for a host output) \"\" for the board's own curve";
+    }
+
+    static const char* OUTPUT_HELP()
+    {
+        return "expected headerN (the receiver's header N), gpio:N (a receiver GPIO), "
+               "chip:pwmN (a pwm output of this host, e.g. nct6686:pwm2), or \"\" for none";
+    }
+
+    // the N of a "gpio:N", output or input alike; -1 when it isn't a pin number
+    // — digits only, no leading zero, so one pin has one spelling (the list
+    // check compares outputs as written)
+    static int parseGpio(const std::string& n)
+    {
+        if (n.empty() || n.size() > 3 || n.find_first_not_of("0123456789") != std::string::npos ||
+            (n.size() > 1 && n[0] == '0'))
+            return -1;
+        int v = atoi(n.c_str());
+        return v > MAX_GPIO ? -1 : v;
+    }
+    static std::string GPIO_HELP()
+    {
+        return "gpio:N names a receiver GPIO, 0.." + std::to_string(MAX_GPIO) +
+               " (the flasher and the receiver check it against the chip and the pins other "
+               "features use)";
+    }
+
+    // what an output string means. "" when it parses, else what is wrong.
+    // Only the output fields of f are touched.
+    static std::string parseOutput(const std::string& o, Fan& f)
+    {
+        f.out = Fan::Parked;
+        f.outNum = -1;
+        f.outChip.clear();
+        f.outFile.clear();
+
+        if (o.empty())
+            return "";
+
+        if (o.compare(0, 6, "header") == 0)
+        {
+            const std::string n = o.substr(6);
+            if (n.empty() || n.find_first_not_of("0123456789") != std::string::npos ||
+                atoi(n.c_str()) < 1 || atoi(n.c_str()) > CHANNELS || n[0] == '0')
+                return "headerN names the receiver board's header N, header1..header" +
+                       std::to_string(CHANNELS) + " (the board has as many as tools/pincheck.py FAN_PINS lists)";
+            f.out = Fan::Header;
+            f.outNum = atoi(n.c_str());
+            return "";
+        }
+
+        size_t colon = o.find(':');
+        if (colon == std::string::npos)
+            return OUTPUT_HELP();
+        std::string chip = o.substr(0, colon), label = o.substr(colon + 1);
+
+        if (chip == "gpio")
+        {
+            f.outNum = parseGpio(label);
+            if (f.outNum < 0)
+                return GPIO_HELP();
+            f.out = Fan::GpioOut;
+            return "";
+        }
+
+        if (chip.empty() || chip == "file" || chip == "pmbus" || chip == "smu" || !isPwmLabel(label))
+            return OUTPUT_HELP();
+
+        f.out = Fan::Host;
+        f.outChip = chip;
+        f.outFile = label;
+        return "";
+    }
+
+    // what an input string means: kind, and for gpio the pin, for hwmon
+    // inputs the spec. "" when it parses, else what is wrong with it. Only
+    // the input fields of f are touched; the output must be parsed first (the
+    // board's own spelling is the output's).
+    static std::string parseInput(const std::string& src, const std::string& sensors, Fan& f)
+    {
+        f.gpio = -1;
+        f.spec.clear();
+        f.pwmFile.clear();
 
         if (src.empty())
-            return SOURCE_HELP();
+        {
+            if (f.out != Fan::Host)
+                return "a blank input is the board's own curve, which only a host output has — "
+                       "a fixed speed is input \"fallback\"";
+            f.kind = Fan::Board;
+            return "";
+        }
 
         if (src == "constant")
-            return "renamed: a fixed speed is source \"fallback\" — the header runs its "
+            return "renamed: a fixed speed is input \"fallback\" — the fan runs its "
                    "fallback value and takes no curve (move the constant into fallback)";
+
+        if (f.out == Fan::Host && src == f.output)
+            return "renamed: the board's own curve is a blank input now — write \"input\": \"\"";
 
         if (src == "fallback")
         {
-            h.kind = Header::Fallback;
+            f.kind = Fan::Fallback;
             return "";
         }
 
         if (src == "temp")
         {
-            h.kind = Header::Temp;
-            h.spec = sensors;
+            f.kind = Fan::Temp;
+            f.spec = sensors;
             return "";
         }
 
         if (src == "cpu_load")
         {
-            h.kind = Header::CpuLoad;
+            f.kind = Fan::CpuLoad;
             return "";
         }
 
         if (src == "gpu_load")
         {
-            h.kind = Header::GpuLoad;
+            f.kind = Fan::GpuLoad;
             return "";
         }
 
         size_t colon = src.find(':');
         if (colon == std::string::npos)
-            return SOURCE_HELP();
+            return INPUT_HELP();
 
         std::string chip = src.substr(0, colon);
         std::string label = src.substr(colon + 1);
 
         if (chip == "gpio")
         {
-            char* end = nullptr;
-            long n = label.empty() ? -1 : strtol(label.c_str(), &end, 10);
-            if (label.empty() || *end || n < 0 || n > MAX_GPIO)
-                return "gpio:N names a receiver GPIO, 0.." + std::to_string(MAX_GPIO) +
-                       " (the flasher checks it against the chip and the pins other "
-                       "features use)";
-            h.kind = Header::Gpio;
-            h.gpio = (int)n;
+            f.gpio = parseGpio(label);
+            if (f.gpio < 0)
+                return GPIO_HELP();
+            f.kind = Fan::Gpio;
             return "";
         }
 
-        // the two sources outside hwmon (hwmon.hpp): a spec that could never
+        // the sources outside hwmon (hwmon.hpp): a spec that could never
         // resolve is a typo, not a sensor to keep looking for. A comma list
         // of candidates is checked one by one.
         for (auto& c : hwmon::split(src, ','))
@@ -584,24 +799,22 @@ private:
                 return "file:/path names a file holding one temperature (millidegrees or degrees)";
         }
 
-        bool pwm = label.size() > 3 && label.compare(0, 3, "pwm") == 0 &&
-                   label.find_first_not_of("0123456789", 3) == std::string::npos;
-        if (pwm)
+        if (isPwmLabel(label))
         {
-            h.kind = Header::Pwm;
-            h.spec = chip;
-            h.pwmFile = label;
+            f.kind = Fan::Pwm;
+            f.spec = chip;
+            f.pwmFile = label;
         }
         else
         {
-            h.kind = Header::Temp;
-            h.spec = src;
+            f.kind = Fan::Temp;
+            f.spec = src;
         }
         return "";
     }
 
-    // "45:35 60:55 75:100" → sorted points, for a header of kind `kind`
-    bool parseCurve(const std::string& text, Header::Kind kind, const std::string& where,
+    // "45:35 60:55 75:100" → sorted points, for a fan of kind `kind`
+    bool parseCurve(const std::string& text, Fan::Kind kind, const std::string& where,
                     std::vector<Point>& out)
     {
         std::vector<std::string> toks;
@@ -637,14 +850,14 @@ private:
             size_t colon = t.find(':');
             float x, y;
             if (colon == std::string::npos)
-                return bad(where, "\"" + t + "\": expected source:percent points, e.g. "
-                                  "\"45:35 60:55 75:100\" (a fixed speed is source "
+                return bad(where, "\"" + t + "\": expected input:percent points, e.g. "
+                                  "\"45:35 60:55 75:100\" (a fixed speed is input "
                                   "\"fallback\" with no curve)");
             if (!number(t.substr(0, colon), x) || !number(t.substr(colon + 1), y))
                 return bad(where, "\"" + t + "\": not a number pair");
             if (y < 0 || y > 100)
                 return bad(where, "\"" + t + "\": percent must be 0..100");
-            if (kind == Header::Gpio && (x < 0 || x > 100 || x != floorf(x)))
+            if (kind == Fan::Gpio && (x < 0 || x > 100 || x != floorf(x)))
                 return bad(where, "\"" + t + "\": a gpio curve's input is whole percents "
                                   "0..100 (it travels to the receiver as bytes)");
             for (auto& p : out)
@@ -660,127 +873,232 @@ private:
         return true;
     }
 
-    bool loadHeader(const json::Value& v, const std::string& sensors, Header& h)
+    // one fan of the list, as the config (or an edit folded into it) spells
+    // it. Every problem is said with `where` ("fans[2]").
+    bool loadFan(const json::Value& v, const std::string& where, Fan& f)
     {
-        const std::string where = "fans." + h.key;
-
         if (!v.isObject())
-            return bad(where, "expected an object");
+            return bad(where, "expected an object { \"name\", \"output\", \"input\", ... }");
 
-        static const char* KEYS[] = {"name", "source", "curve", "boost", "fallback"};
         for (auto& m : v.members)
         {
-            if (m.first == "enabled")
-                return bad(where + ".enabled",
-                           "retired — a header listed here is always driven; delete "
-                           "the header's block to drop it, or give it source "
-                           "\"fallback\" with a fallback of 0 to stop the fan");
+            if (m.first == "source")
+                return bad(where + ".source", "renamed: this is \"input\" now (what the curve "
+                                              "reads; \"output\" is what the fan drives)");
             bool known = false;
-            for (const char* k : KEYS)
-                known |= m.first == k;
+            for (auto& fl : FIELDS)
+                known |= m.first == fl.key;
             for (auto& t : TUNINGS)
                 known |= m.first == t.key;
             if (!known)
                 return bad(where + "." + m.first, "unknown key");
         }
-        for (const char* k : KEYS)
-            if (strcmp(k, "curve") != 0 && !v.find(k))
+        for (const char* k : {"name", "output", "input", "fallback"})
+            if (!v.find(k))
                 return bad(where, std::string("missing \"") + k +
-                                      "\" (every header has name, source, boost, "
-                                      "fallback, and a curve unless the source is "
-                                      "fallback)");
+                                      "\" (every fan has a name, an output, an input and a fallback, "
+                                      "and a curve unless the input is fallback)");
 
         const json::Value& name = *v.find("name");
         if (!name.isString())
             return bad(where + ".name", "expected a string");
-        h.name = name.text;
+        f.name = name.text;
 
-        const json::Value& src = *v.find("source");
-        if (!src.isString())
-            return bad(where + ".source", SOURCE_HELP());
-        h.source = src.text;
-        std::string e = parseSource(h.source, sensors, h);
+        const json::Value& out = *v.find("output");
+        if (!out.isString())
+            return bad(where + ".output", OUTPUT_HELP());
+        f.output = out.text;
+        std::string e = parseOutput(f.output, f);
         if (!e.empty())
-            return bad(where + ".source", e);
+            return bad(where + ".output", e);
+
+        const json::Value& in = *v.find("input");
+        if (!in.isString())
+            return bad(where + ".input", INPUT_HELP());
+        f.input = in.text;
+        e = parseInput(f.input, sensors_, f);
+        if (!e.empty())
+            return bad(where + ".input", e);
+
+        if (f.kind == Fan::Gpio && f.out == Fan::Host)
+            return bad(where + ".input", "a gpio input is read by the receiver, which can't drive a "
+                                         "host output — put the fan on a receiver output (headerN / "
+                                         "gpio:N), or give it a host input");
+        if (f.kind == Fan::Gpio && f.out == Fan::GpioOut && f.gpio == f.outNum)
+            return bad(where + ".input", "GPIO" + std::to_string(f.gpio) + " can't be the fan's "
+                                         "input and its output at once");
 
         const json::Value* curve = v.find("curve");
-        if (h.kind == Header::Fallback)
+        f.curve.clear();
+        f.curveText.clear();
+        if (!f.hasCurve())
         {
             if (curve)
-                return bad(where + ".curve", "a fallback source takes no curve — the header "
-                                             "runs its fallback value; delete this key");
+                return bad(where + ".curve", f.kind == Fan::Board
+                                                 ? "the board's own curve runs this output — delete this key"
+                                                 : "a fallback input takes no curve — the fan runs its "
+                                                   "fallback value; delete this key");
         }
         else
         {
             if (!curve)
-                return bad(where, "missing \"curve\" (source:percent points, e.g. "
+                return bad(where, "missing \"curve\" (input:percent points, e.g. "
                                   "\"45:35 60:55 75:100\")");
             if (!curve->isString())
                 return bad(where + ".curve", "expected a string like \"45:35 60:55 75:100\"");
-            if (!parseCurve(curve->text, h.kind, where + ".curve", h.curve))
+            if (!parseCurve(curve->text, f.kind, where + ".curve", f.curve))
                 return false;
-            h.curveText = curveToText(h.curve);
+            f.curveText = curveToText(f.curve);
         }
 
-        const json::Value& boost = *v.find("boost");
-        if (boost.type == json::Value::Type::Null)
-            h.boost = -1;
-        else if (boost.isNumber() && boost.number >= 0 && boost.number <= 100)
-            h.boost = (int)(boost.number + 0.5);
-        else
-            return bad(where + ".boost", "expected a percent 0..100, or null for no boost");
+        f.boost = -1;
+        if (const json::Value* boost = v.find("boost"))
+        {
+            if (boost->type == json::Value::Type::Null)
+                f.boost = -1;
+            else if (boost->isNumber() && boost->number >= 0 && boost->number <= 100)
+                f.boost = (int)(boost->number + 0.5);
+            else
+                return bad(where + ".boost", "expected a percent 0..100, or null for no boost");
+            if (f.boost >= 0 && f.out == Fan::Host)
+                return bad(where + ".boost", "a boost is the receiver's, run the moment the host "
+                                             "powers on — before this daemon exists to drive a host "
+                                             "output; write null");
+        }
 
         const json::Value& fb = *v.find("fallback");
         if (!fb.isNumber() || fb.number < 0 || fb.number > 100)
             return bad(where + ".fallback", "expected a percent 0..100");
-        h.fallback = (int)(fb.number + 0.5);
+        f.fallback = (int)(fb.number + 0.5);
 
         for (auto& t : TUNINGS)
         {
+            f.*t.field = t.dflt;
             const json::Value* tv = v.find(t.key);
             if (!tv)
                 continue;
             if (!tv->isNumber() || tv->number < t.lo || tv->number > t.hi)
                 return bad(where + "." + t.key, std::string("expected ") + t.range);
-            if (!t.applies(h))
+            if (!t.applies(f))
                 return bad(where + "." + t.key, std::string(t.key) + " only applies to " + t.onlyFor +
                                                     " — delete this key");
-            h.*t.field = (float)tv->number;
-        }
-
-        if (h.kind == Header::Temp || h.kind == Header::Pwm)
-        {
-            resolve(h);
-            if (h.path.empty())
-            {
-                fprintf(stderr, "%s (%s): %s not found yet, will keep looking\n",
-                        where.c_str(), h.name.c_str(), h.source.c_str());
-                h.reported = true;
-            }
+            f.*t.field = (float)tv->number;
         }
 
         return true;
     }
 
-    void resolve(Header& h)
+    // the whole list: each fan, then what only the list can say — an output
+    // given twice, more receiver outputs than the receiver has, a pin read by
+    // one fan and driven by another — and the receiver slots, in list order.
+    // `startup` says the not-found-yet inputs (a hand in the file may name a
+    // sensor that turns up later); an edit is held to more (applyList).
+    bool parseList(const json::Value& arr, std::vector<Fan>& out, const std::string& where, bool startup)
     {
-        if (h.kind == Header::Temp)
-            h.path = hwmon::findSensorFromSpec(h.spec);
-        else if (h.kind == Header::Pwm)
-            h.path = findChipFile(h.spec, h.pwmFile);
+        out.clear();
+        for (size_t i = 0; i < arr.items.size(); i++)
+        {
+            Fan f;
+            if (!loadFan(arr.items[i], where + "[" + std::to_string(i) + "]", f))
+                return false;
+            out.push_back(std::move(f));
+        }
+
+        int slot = 0;
+        for (size_t i = 0; i < out.size(); i++)
+        {
+            Fan& f = out[i];
+            std::string at = where + "[" + std::to_string(i) + "]";
+            for (size_t j = 0; j < i; j++)
+                if (!f.output.empty() && out[j].output == f.output)
+                    return bad(at + ".output", "\"" + f.output + "\" is fans[" + std::to_string(j) +
+                                                   "]'s output already — one fan per output");
+            if (f.out == Fan::GpioOut)
+                for (size_t j = 0; j < out.size(); j++)
+                    if (out[j].kind == Fan::Gpio && out[j].gpio == f.outNum)
+                        return bad(at + ".output", "GPIO" + std::to_string(f.outNum) + " is fans[" +
+                                                       std::to_string(j) + "]'s gpio input — an output "
+                                                       "needs a pin of its own");
+            // a pwm input reads what the board asks of that output; one this
+            // daemon drives for another fan would read our own writes back
+            if (f.kind == Fan::Pwm)
+                for (size_t j = 0; j < out.size(); j++)
+                    if (out[j].out == Fan::Host && out[j].kind != Fan::Board && out[j].outChip == f.spec &&
+                        out[j].outFile == f.pwmFile)
+                        return bad(at + ".input", "\"" + f.input + "\" is fans[" + std::to_string(j) +
+                                                      "]'s output — this daemon drives it, so it would "
+                                                      "read its own duty back, not the board's");
+            // a header's pin is the receiver's to know (it refuses the strip's
+            // too); a pin by number is caught here, before it reaches it
+            if (f.out == Fan::GpioOut && f.outNum == stripPin_)
+                return bad(at + ".output", "GPIO" + std::to_string(f.outNum) + " is the strip's data pin "
+                                               "(strip.pin)");
+            if (f.kind == Fan::Gpio && f.gpio == stripPin_)
+                return bad(at + ".input", "GPIO" + std::to_string(f.gpio) + " is the strip's data pin "
+                                              "(strip.pin)");
+            f.slot = -1;
+            if (f.receiverOut())
+            {
+                if (slot >= CHANNELS)
+                    return bad(at + ".output", "more than " + std::to_string(CHANNELS) + " fans on "
+                                                   "receiver outputs — it has " + std::to_string(CHANNELS) +
+                                                   " PWM channels");
+                f.slot = slot++;
+            }
+        }
+
+        if (startup)
+            for (size_t i = 0; i < out.size(); i++)
+            {
+                Fan& f = out[i];
+                if (f.kind == Fan::Temp || f.kind == Fan::Pwm)
+                {
+                    resolve(f);
+                    if (f.rt.path.empty())
+                        fprintf(stderr, "%s[%zu] (%s): %s not found yet, will keep looking\n",
+                                where.c_str(), i, f.name.c_str(), f.input.c_str());
+                }
+            }
+
+        return true;
     }
 
-    // the readings more than one header may want, once per tick. A watching
+    void resolve(Fan& f)
+    {
+        if (f.kind == Fan::Temp)
+            f.rt.path = hwmon::findSensorFromSpec(f.spec);
+        else if (f.kind == Fan::Pwm)
+            f.rt.path = findChipFile(f.spec, f.pwmFile);
+        else if (f.kind == Fan::Board)
+            f.rt.path = findChipFile(f.outChip, f.outFile);
+    }
+
+    // find a host output's pwmN file, saying once when there is none (yet:
+    // at boot the hwmon driver may still be loading)
+    void resolveOutput(Fan& f)
+    {
+        f.rt.outPath = findChipFile(f.outChip, f.outFile);
+        if (f.rt.outPath.empty() && !f.rt.saidGone)
+        {
+            f.rt.saidGone = true;
+            fprintf(stderr, "fans: %s (%s): no such pwm output on this machine yet, will keep looking\n",
+                    f.output.c_str(), f.name.c_str());
+        }
+    }
+
+    // the readings more than one fan may want, once per tick. A watching
     // phone wants all of them (the dashboard's tiles); otherwise only what
     // some curve reads is read at all.
     void readShared(double now)
     {
         bool watch = watching(now);
         bool wantCpu = watch, wantGpu = watch;
-        for (auto& h : headers_)
+        for (auto& f : fans_)
         {
-            wantCpu |= h.kind == Header::CpuLoad;
-            wantGpu |= h.kind == Header::GpuLoad;
+            if (f.out == Fan::Parked)
+                continue;
+            wantCpu |= f.kind == Fan::CpuLoad;
+            wantGpu |= f.kind == Fan::GpuLoad;
         }
 
         tempOk_ = false;
@@ -821,68 +1139,71 @@ private:
         temps_.clear();
     }
 
-    bool readInput(Header& h, float& v)
+    bool readInput(Fan& f, float& v, size_t idx)
     {
-        switch (h.kind)
+        switch (f.kind)
         {
-            case Header::Fallback:
-            case Header::Gpio:
-                return false; // the receiver's, never read here
+            case Fan::Fallback:
+            case Fan::Gpio:
+                return false; // nothing this side reads
 
-            case Header::CpuLoad:
+            case Fan::CpuLoad:
                 v = cpuLoad_;
                 return cpuLoadOk_;
 
-            case Header::GpuLoad:
+            case Fan::GpuLoad:
                 v = gpuLoad_;
                 return gpuLoadOk_;
 
-            case Header::Temp:
-            case Header::Pwm:
-                if (h.path.empty())
+            case Fan::Temp:
+            case Fan::Pwm:
+            case Fan::Board:
+                if (f.rt.path.empty())
                 {
-                    resolve(h);
-                    if (h.path.empty())
+                    resolve(f);
+                    if (f.rt.path.empty())
                         return false;
-                    fprintf(stderr, "fans.%s (%s): using %s\n", h.key.c_str(),
-                            h.name.c_str(), h.path.c_str());
+                    fprintf(stderr, "fans[%zu] (%s): using %s\n", idx, f.name.c_str(), f.rt.path.c_str());
                 }
 
-                if (h.kind == Header::Temp)
+                if (f.kind == Fan::Temp)
                 {
                     // per tick, one read per path; NaN = no usable reading
-                    auto it = temps_.find(h.path);
+                    auto it = temps_.find(f.rt.path);
                     if (it == temps_.end())
                     {
                         float t;
-                        it = temps_.emplace(h.path, hwmon::readTempOk(h.path, t) ? t : NAN).first;
+                        it = temps_.emplace(f.rt.path, hwmon::readTempOk(f.rt.path, t) ? t : NAN).first;
                     }
                     if (std::isnan(it->second))
                     {
                         // an unplugged thermistor reads 0, a gone chip reads
-                        // nothing: either way the header runs its fallback
+                        // nothing: either way the fan runs its fallback
                         // rather than a curve fed a temperature nobody measured
-                        if (!h.lost)
-                            fprintf(stderr, "fans.%s (%s): %s gives no usable reading — running the "
-                                            "fallback until it does\n", h.key.c_str(), h.name.c_str(), h.path.c_str());
-                        h.lost = true;
-                        if (!hwmon::fileExists(h.path))
-                            h.path.clear(); // gone: look it up again — it may return under another hwmon number
+                        if (!f.rt.lost)
+                            fprintf(stderr, "fans[%zu] (%s): %s gives no usable reading — running the "
+                                            "fallback until it does\n", idx, f.name.c_str(), f.rt.path.c_str());
+                        f.rt.lost = true;
+                        if (!hwmon::fileExists(f.rt.path))
+                            f.rt.path.clear(); // gone: look it up again — it may return under another hwmon number
                         return false;
                     }
-                    if (h.lost)
-                        fprintf(stderr, "fans.%s (%s): %s is reading again\n", h.key.c_str(), h.name.c_str(), h.path.c_str());
-                    h.lost = false;
+                    if (f.rt.lost)
+                        fprintf(stderr, "fans[%zu] (%s): %s is reading again\n", idx, f.name.c_str(), f.rt.path.c_str());
+                    f.rt.lost = false;
                     v = it->second;
                     return true;
                 }
 
                 {
-                    std::string s = hwmon::readFileLine(h.path);
-                    if (s.empty())
+                    int raw;
+                    if (!pwmout::readInt(f.rt.path, raw))
+                    {
+                        if (!hwmon::fileExists(f.rt.path))
+                            f.rt.path.clear();
                         return false;
-                    float raw = (float)atof(s.c_str()); // 0..255
-                    v = raw * 100.0f / 255.0f;
+                    }
+                    v = raw * 100.0f / 255.0f; // 0..255
                     if (v < 0) v = 0;
                     if (v > 100) v = 100;
                     return true;
@@ -892,48 +1213,161 @@ private:
         return false;
     }
 
-    // one header's live duty this tick: read, hysteresis (temperatures),
-    // curve, ramp. A header whose source can't be read runs its fallback; a
-    // header the receiver runs itself is FAN_NONE — not this side's to drive.
-    int compute(Header& h, float dt)
+    // one fan's duty this tick, as this side runs it: read, hysteresis
+    // (temperatures), curve, ramp. An input that can't be read runs the
+    // fallback; a fan this side doesn't run is FAN_NONE — parked, the
+    // receiver's own (a fallback or gpio fan on a receiver output), or the
+    // board's (its reading is kept for the dashboard).
+    int compute(Fan& f, float dt)
     {
-        if (!h.hostRun())
+        const size_t idx = &f - fans_.data();
+        if (f.out == Fan::Parked)
+        {
+            f.rt.lastInOk = false;
+            return proto::FAN_NONE;
+        }
+
+        if (f.kind == Fan::Board)
+        {
+            float in;
+            f.rt.lastInOk = readInput(f, in, idx);
+            if (f.rt.lastInOk)
+                f.rt.lastIn = in;
+            return proto::FAN_NONE;
+        }
+
+        if (f.kind == Fan::Fallback)
+            return f.receiverOut() ? proto::FAN_NONE : f.fallback;
+
+        if (f.kind == Fan::Gpio)
             return proto::FAN_NONE;
 
         float in;
-        h.lastInOk = readInput(h, in);
-        if (!h.lastInOk)
+        f.rt.lastInOk = readInput(f, in, idx);
+        if (!f.rt.lastInOk)
         {
-            h.haveIn = h.haveOut = false;
-            return h.fallback;
+            f.rt.haveIn = f.rt.haveOut = false;
+            return f.fallback;
         }
-        h.lastIn = in;
+        f.rt.lastIn = in;
 
-        // hysteresis: a temperature has to fall the header's `hysteresis`
+        // hysteresis: a temperature has to fall the fan's `hysteresis`
         // below the value the fan is running for before the fan follows it
-        // down; rises are taken at once. Percent sources (loads, a mirrored
+        // down; rises are taken at once. Percent inputs (loads, a mirrored
         // pwm) skip it.
-        if (h.kind == Header::Temp)
+        if (f.kind == Fan::Temp)
         {
-            if (!h.haveIn || in > h.effIn || in < h.effIn - h.hysteresis)
-                h.effIn = in;
+            if (!f.rt.haveIn || in > f.rt.effIn || in < f.rt.effIn - f.hysteresis)
+                f.rt.effIn = in;
         }
         else
-            h.effIn = in;
-        h.haveIn = true;
+            f.rt.effIn = in;
+        f.rt.haveIn = true;
 
-        h.out = fancurve::ramp(h.eval(h.effIn), h.out, h.haveOut, h.ramp, dt);
-        h.haveOut = true;
+        f.rt.out = fancurve::ramp(f.eval(f.rt.effIn), f.rt.out, f.rt.haveOut, f.ramp, dt);
+        f.rt.haveOut = true;
 
-        return (int)(h.out + 0.5f);
+        return (int)(f.rt.out + 0.5f);
+    }
+
+    // a host output's turn: find its pwmN, then have the claims drive it at
+    // `duty` — or not, and say why on the dashboard. The board's own (a blank
+    // input) is never driven: not naming it is what hands it back.
+    void driveHost(Fan& f, int duty, double now)
+    {
+        if (f.kind == Fan::Board)
+        {
+            f.rt.host = Fan::Runtime::HBoard;
+            return;
+        }
+
+        // the path found once must still be there AND still be the named
+        // chip's: a driver reloaded mid-run hands its hwmonN to whichever
+        // chip registers next, and that chip may have a pwmN too — driving
+        // (and re-asserting manual on) it would take over a fan nobody named
+        // and whose setting the claim never recorded. One small sysfs read a
+        // tick; the claims follow the output by name to where it is now.
+        if (!f.rt.outPath.empty())
+        {
+            bool gone = !hwmon::statExists(f.rt.outPath);
+            if (gone || hwmon::chipOfFile(f.rt.outPath) != f.outChip)
+            {
+                fprintf(stderr, "fans: %s (%s): %s %s — looking for it again\n", f.output.c_str(),
+                        f.name.c_str(), f.rt.outPath.c_str(), gone ? "is gone" : "is another chip's now");
+                f.rt.outPath.clear();
+                f.rt.saidGone = false;
+            }
+        }
+        if (f.rt.outPath.empty())
+            resolveOutput(f);
+        if (f.rt.outPath.empty())
+        {
+            f.rt.host = Fan::Runtime::HGone;
+            return;
+        }
+        if (f.rt.saidGone)
+        {
+            fprintf(stderr, "fans: %s (%s): found %s\n", f.output.c_str(), f.name.c_str(), f.rt.outPath.c_str());
+            f.rt.saidGone = false;
+        }
+
+        if (!pwmout::writable(f.rt.outPath))
+        {
+            if (!f.rt.saidRo)
+                fprintf(stderr, "fans: %s (%s): %s can be read but not set — this driver is read-only "
+                                "(on the BC-250 the in-kernel nct6683 is; the nct6687 driver can set it), "
+                                "so the board's own curve keeps running it\n",
+                        f.output.c_str(), f.name.c_str(), f.rt.outPath.c_str());
+            f.rt.saidRo = true;
+            f.rt.host = Fan::Runtime::HReadOnly;
+            return;
+        }
+        f.rt.saidRo = false;
+
+        // the claims open on the first host output that needs them (and a
+        // lock busy then is retried now and then)
+        if (!claims_ || !claims_->want(now))
+        {
+            f.rt.host = Fan::Runtime::HBusy;
+            return;
+        }
+
+        f.rt.host = claims_->drive(f.rt.outPath, f.output, duty, now) ? Fan::Runtime::HDrive
+                                                                     : Fan::Runtime::HRefused;
+    }
+
+    // a host output's state, one row per Runtime::HostSt: the phone's code
+    // (telemetry "st"; null = none sent) and the --fan-status text
+    struct HostStateRow
+    {
+        Fan::Runtime::HostSt st;
+        const char* code;
+        const char* text;
+    };
+    static constexpr HostStateRow HOST_STATES[] = {
+        {Fan::Runtime::HNone, nullptr, ""},
+        {Fan::Runtime::HDrive, "host", "driven by this daemon"},
+        {Fan::Runtime::HBoard, "board", "the board's own curve"},
+        // the phone shows both as the board's; the journal says why this one is
+        {Fan::Runtime::HRefused, "board", "the board's own curve (the takeover failed — see the journal)"},
+        {Fan::Runtime::HGone, "gone", "no such output on this machine (yet)"},
+        {Fan::Runtime::HReadOnly, "ro", "read-only driver: the board's own curve"},
+        {Fan::Runtime::HBusy, "busy", "not driven here (a look only, or another daemon drives it)"},
+    };
+    static const HostStateRow& hostState(const Fan& f)
+    {
+        for (auto& r : HOST_STATES)
+            if (r.st == f.rt.host)
+                return r;
+        return HOST_STATES[0];
     }
 
     // ---- dashboard helpers ----
 
+    static const size_t ERR_ROOM = 160; // the longest "err" an answer adds to toJson
     static const int WATCH_S = 30; // a MSG_FAN_WATCH 1 keeps telemetry flowing this long
     static const int TELEM_REFRESH_S = 5;
     static const int SENSORS_REFRESH_S = 5; // the catalogue's pace while watched
-    static const int WIRE_MAX = 512; // a GATT attribute's ceiling = the receiver's buffer
 
     bool watching(double now) const { return watchUntil_ > 0 && now <= watchUntil_; }
 
@@ -951,87 +1385,143 @@ private:
         return out;
     }
 
-    // the block as run, for the dashboard (see the header comment)
-    std::string toJson() const
+    // one fan in the dashboard's shape (see the header comment)
+    static std::string fanJson(const Fan& f)
     {
         char buf[40];
-        std::string j = writable() ? "{\"editable\":true" : "{\"editable\":false";
-
-        for (auto& h : headers_)
-        {
-            j += ",\"" + h.key + "\":{\"n\":\"" + cfgedit::escape(h.name) + "\",\"s\":\"" +
-                 cfgedit::escape(h.source) + "\"";
-            if (h.kind != Header::Fallback)
-                j += ",\"c\":\"" + h.curveText + "\"";
-            j += (h.boost < 0 ? std::string() : ",\"b\":" + std::to_string(h.boost)) +
-                 ",\"f\":" + std::to_string(h.fallback);
-            // a tuning travels when it applies and moved off its default; the
-            // page fills in the defaults (the wire's, protocol.hpp)
-            for (auto& t : TUNINGS)
-                if (t.applies(h) && h.*t.field != t.dflt)
-                {
-                    snprintf(buf, sizeof buf, ",\"%s\":%g", t.shortKey, (double)(h.*t.field));
-                    j += buf;
-                }
-            j += "}";
-        }
+        std::string j = "{\"n\":\"" + cfgedit::escape(f.name) + "\",\"o\":\"" + cfgedit::escape(f.output) +
+                        "\",\"i\":\"" + cfgedit::escape(f.input) + "\"";
+        if (f.hasCurve())
+            j += ",\"c\":\"" + f.curveText + "\"";
+        if (f.boost >= 0)
+            j += ",\"b\":" + std::to_string(f.boost);
+        j += ",\"f\":" + std::to_string(f.fallback);
+        // a tuning travels when it applies and moved off its default; the
+        // page fills in the defaults (the wire's, protocol.hpp)
+        for (auto& t : TUNINGS)
+            if (t.applies(f) && f.*t.field != t.dflt)
+            {
+                snprintf(buf, sizeof buf, ",\"%s\":%g", t.shortKey, (double)(f.*t.field));
+                j += buf;
+            }
         return j + "}";
+    }
+
+    std::string listJson() const
+    {
+        std::string j = "[";
+        for (size_t i = 0; i < fans_.size(); i++)
+            j += (i ? "," : "") + fanJson(fans_[i]);
+        return j + "]";
+    }
+
+    // the list's revision: FNV-1a over its JSON — what the phone saw is what
+    // an edit must name, whoever changed the list since
+    std::string rev() const
+    {
+        uint32_t h = 2166136261u;
+        for (unsigned char c : listJson())
+        {
+            h ^= c;
+            h *= 16777619u;
+        }
+        char buf[12];
+        snprintf(buf, sizeof buf, "%08x", h);
+        return buf;
+    }
+
+    // the list as run, for the dashboard (see the header comment)
+    std::string toJson() const
+    {
+        std::string j = std::string("{\"editable\":") + (writable() ? "true" : "false") +
+                        ",\"rev\":\"" + rev() + "\"";
+        if (!err_.empty())
+            j += ",\"err\":\"" + cfgedit::escape(err_) + "\"";
+        return j + ",\"fans\":" + listJson() + "}";
     }
 
     // what the curves see and do right now, for the dashboard's tiles and
     // cards: { "temp": 58.3, "cpu": 37, "gpu": 62,
-    //          "header2": { "in": 58.3, "duty": 52 }, ... }
-    // — a reading is absent when there is none, "in" when the header has no
-    // input (a sensor not found), and a header the receiver runs (fallback,
-    // gpio) has no entry at all: the receiver's own view carries those
+    //          "fans": [ null, { "in": 58.3, "duty": 52 }, { "duty": 60, "st": "host" }, ... ] }
+    // — indexed like the config's list. A reading is absent when there is
+    // none; a fan the receiver runs (a fallback or gpio fan on a receiver
+    // output: its own view carries those) and a parked fan are null. "st" is
+    // a host output's state: host (this daemon drives it), board (its own
+    // curve), gone (not found), ro (read-only driver), busy (not driven here)
     std::string telemetryJson() const
     {
         char buf[64];
         std::string j = "{";
-        auto add = [&](const char* s) { if (j.size() > 1) j += ','; j += s; };
+        auto add = [&](const std::string& s) { if (j.size() > 1) j += ','; j += s; };
         if (tempOk_)
             snprintf(buf, sizeof buf, "\"temp\":%.1f", temp_), add(buf);
         if (cpuLoadOk_)
             snprintf(buf, sizeof buf, "\"cpu\":%d", (int)(cpuLoad_ + 0.5f)), add(buf);
         if (gpuLoadOk_)
             snprintf(buf, sizeof buf, "\"gpu\":%d", (int)(gpuLoad_ + 0.5f)), add(buf);
-        for (auto& h : headers_)
+        std::string list = "\"fans\":[";
+        for (size_t i = 0; i < fans_.size(); i++)
         {
-            if (!h.hostRun())
+            const Fan& f = fans_[i];
+            if (i)
+                list += ",";
+            bool receiverRun = f.receiverOut() && !f.hostInput();
+            if (f.out == Fan::Parked || receiverRun)
+            {
+                list += "null";
                 continue;
-            std::string e = "\"" + h.key + "\":{";
-            if (h.lastInOk)
-                snprintf(buf, sizeof buf, "\"in\":%.1f,", h.lastIn), e += buf;
-            snprintf(buf, sizeof buf, "\"duty\":%d}", (int)live_[h.slot]);
-            add((e + buf).c_str());
+            }
+            std::string e = "{";
+            auto field = [&](const char* s) { if (e.size() > 1) e += ','; e += s; };
+            if (f.rt.lastInOk)
+                snprintf(buf, sizeof buf, "\"in\":%.1f", f.rt.lastIn), field(buf);
+            int duty = f.kind == Fan::Board ? (f.rt.lastInOk ? (int)(f.rt.lastIn + 0.5f) : -1)
+                     : f.out == Fan::Host && f.rt.host != Fan::Runtime::HDrive ? -1
+                     : f.rt.duty == proto::FAN_NONE ? -1 : f.rt.duty;
+            if (duty >= 0)
+                snprintf(buf, sizeof buf, "\"duty\":%d", duty), field(buf);
+            if (f.out == Fan::Host)
+                if (const char* st = hostState(f).code)
+                    snprintf(buf, sizeof buf, "\"st\":\"%s\"", st), field(buf);
+            list += e + "}";
         }
+        add(list + "]");
         return j + "}";
     }
 
-    // the catalogue: what a header could follow, with readings, for the
-    // phone's source picker — hwmon::enumerate() as JSON grouped by chip:
+    // the catalogue: what a fan could follow and drive, with readings, for
+    // the phone's pickers — hwmon::enumerate() as JSON grouped by chip, and
+    // every host pwm output (from the same scan) under "_outs":
     //   {"amdgpu":{"edge":61.0,"junction":64.5},
-    //    "nct6686":{"CPU":52.0,"System":38.5,"pwm1-8":48}}
-    // A chip's pwm outputs are one entry while they have all read alike since
-    // the watch began (a board whose firmware drives them from one curve
-    // shows one line, named for the range; the spec to follow is its first);
-    // the moment two differ they are listed apart for the rest of the watch.
-    // WIRE_MAX is a GATT attribute's ceiling, so a machine with more sensors
-    // than fit loses entries by priority: pwm outputs first, then labelled
-    // temperatures from the end — never a sensor a header follows or the
-    // `sensors` pick, which the picker must be able to show as chosen. What
-    // was left out is counted in "_more", so the page can say so (the typed
-    // field still reaches them). Said once in the journal as well.
+    //    "nct6686":{"CPU":52.0,"System":38.5,"pwm1-8":48},
+    //    "_outs":[["nct6686:pwm1",48,1450,1],["nct6686:pwm2",48,-1,1],...]}
+    // an output is [spec, duty %, rpm of the same-numbered tachometer (-1 =
+    // none), 1 = can be driven]. A chip's pwm outputs are one input entry
+    // while they have all read alike since the watch began (a board whose
+    // firmware drives them from one curve shows one line, named for the
+    // range; the spec to follow is its first); the moment two differ they
+    // are listed apart for the rest of the watch. DASH_FAN_SENSORS_MAX is the
+    // receiver's buffer, so a machine with more sensors than fit loses input
+    // entries by priority: pwm outputs first, then labelled temperatures from
+    // the end — never an input or output a fan names or the `sensors` pick,
+    // which the pickers must be able to show as chosen. "_outs" is held to
+    // half the ceiling the same way (the outputs a fan names always kept).
+    // What was left out is counted in "_more", so the page can say so (the
+    // typed field still reaches them). Said once in the journal as well.
     std::string sensorsJson()
     {
         auto all = hwmon::enumerate();
 
-        // the specs in use: every candidate of every header's source and of
-        // the top-level sensors pick ("k10temp:Tctl,nct6686:CPU" names two)
+        // the specs in use: every candidate of every fan's input and of the
+        // top-level sensors pick ("k10temp:Tctl,nct6686:CPU" names two)
         std::vector<std::string> used = hwmon::split(sensors_, ',');
-        for (auto& h : headers_)
-            for (auto& c : hwmon::split(h.source, ','))
+        for (auto& f : fans_)
+        {
+            for (auto& c : hwmon::split(f.input, ','))
                 used.push_back(c);
+            if (f.out == Fan::Host)
+                used.push_back(f.output);
+        }
 
         // a file: spec in use that the scan of /run/bc250 did not list (its
         // path is the spec's label, and a file spec is its own resolved path)
@@ -1045,7 +1535,46 @@ private:
                 listed |= r.chip == "file" && r.label == path;
             float v;
             if (!listed && hwmon::readTempOk(spec, v))
-                all.push_back({"file", path, false, v});
+                all.push_back({"file", path, false, v, ""});
+        }
+
+        // the host's pwm outputs, from the same scan: the ones a fan names
+        // always, the rest while they take at most half the ceiling (the
+        // input entries need the other half)
+        std::string outs = "\"_outs\":[";
+        bool firstOut = true;
+        size_t outsLeft = 0;
+        for (int pass = 0; pass < 2; pass++)
+            for (auto& r : all)
+            {
+                if (!r.pwm)
+                    continue;
+                const std::string spec = r.chip + ":" + r.label;
+                bool inUse = std::find(used.begin(), used.end(), spec) != used.end();
+                if (inUse != (pass == 0))
+                    continue;
+                int rpm = -1;
+                if (!pwmout::readInt(r.path.substr(0, r.path.rfind('/')) + "/fan" + r.label.substr(3) + "_input", rpm) ||
+                    rpm < 0)
+                    rpm = -1;
+                std::string e = std::string(firstOut ? "" : ",") + "[\"" + cfgedit::escape(spec) + "\"," +
+                                std::to_string((int)(r.value + 0.5f)) + "," + std::to_string(rpm) + "," +
+                                (pwmout::writable(r.path) ? "1" : "0") + "]";
+                if (!inUse && outs.size() + e.size() > proto::DASH_FAN_SENSORS_MAX / 2)
+                {
+                    outsLeft++;
+                    continue;
+                }
+                outs += e;
+                firstOut = false;
+            }
+        outs += "]";
+        if (outsLeft && !warnedOuts_)
+        {
+            fprintf(stderr, "fans: %zu host pwm outputs left out of the phone's output picker (the "
+                            "catalogue is over the dashboard's %u bytes; they can still be typed)\n",
+                    outsLeft, proto::DASH_FAN_SENSORS_MAX);
+            warnedOuts_ = true;
         }
 
         struct Entry { std::string chip, key, val; int prio; };
@@ -1089,7 +1618,7 @@ private:
         // fit: take entries by priority (order kept within a priority) while
         // the grouped text stays under the ceiling; the size of an entry is
         // its own text plus its chip's wrapper the first time the chip appears
-        const size_t RESERVE = sizeof ",\"_more\":999" - 1;
+        const size_t RESERVE = sizeof ",\"_more\":999" - 1 + 1 + outs.size();
         size_t size = 2; // the braces
         std::vector<bool> take(entries.size(), false);
         std::vector<std::string> open; // chips already counted
@@ -1103,7 +1632,7 @@ private:
                 size_t cost = 1 + 1 + cfgedit::escape(e.key).size() + 2 + e.val.size(); // ,"key":val
                 if (std::find(open.begin(), open.end(), e.chip) == open.end())
                     cost += 1 + cfgedit::escape(e.chip).size() + 2 + 1 + 1;      // ,"chip":{ ... }
-                if (size + cost + RESERVE > (size_t)WIRE_MAX)
+                if (size + cost + RESERVE > (size_t)proto::DASH_FAN_SENSORS_MAX)
                 {
                     dropped++;
                     continue;
@@ -1129,11 +1658,12 @@ private:
         {
             j += (j.size() > 1 ? "," : "") + std::string("\"_more\":") + std::to_string(dropped);
             if (!warnedSensors_)
-                fprintf(stderr, "fans: the sensor catalogue is over the dashboard's %d bytes — %zu of %zu "
+                fprintf(stderr, "fans: the sensor catalogue is over the dashboard's %u bytes — %zu of %zu "
                                 "sensors are left out of the phone's picker (they can still be typed)\n",
-                        WIRE_MAX, dropped, entries.size());
+                        proto::DASH_FAN_SENSORS_MAX, dropped, entries.size());
             warnedSensors_ = true;
         }
+        j += (j.size() > 1 ? "," : "") + outs;
         return j + "}";
     }
 
@@ -1146,6 +1676,17 @@ private:
         if (j == lastSensors_)
             return;
         lastSensors_ = j;
+        if (j.size() > proto::DASH_FAN_SENSORS_MAX)
+        {
+            // only what the fans name is over the ceiling (the rest is trimmed
+            // to fit): the receiver would drop it, so say so instead
+            if (!warnedSensorsSize_)
+                fprintf(stderr, "fans: the sensor catalogue is %zu bytes even trimmed, over the "
+                                "dashboard's %u — not sent (shorten the fans' inputs)\n",
+                        j.size(), proto::DASH_FAN_SENSORS_MAX);
+            warnedSensorsSize_ = true;
+            return;
+        }
         for (auto& s : sinks)
             s->sendCommand(proto::CMD_FAN_SENSORS, (const uint8_t*)j.data(), (uint16_t)j.size());
     }
@@ -1155,6 +1696,14 @@ private:
         std::string j = telemetryJson();
         if (j == lastTelem_ && now - lastTelemSent_ < TELEM_REFRESH_S)
             return;
+        if (j.size() > proto::DASH_FAN_TELEM_MAX)
+        {
+            if (!warnedTelem_)
+                fprintf(stderr, "fans: the telemetry is %zu bytes, over the dashboard's %u — not sent\n",
+                        j.size(), proto::DASH_FAN_TELEM_MAX);
+            warnedTelem_ = true;
+            return;
+        }
 
         lastTelem_ = j;
         lastTelemSent_ = now;
@@ -1162,34 +1711,9 @@ private:
             s->sendCommand(proto::CMD_FAN_TELEM, (const uint8_t*)j.data(), (uint16_t)j.size());
     }
 
-    // One header's editable fields as text — what a JSON edit reduces to, so
-    // the config's own parseSource/parseCurve and range checks validate every
-    // edit exactly as they validate the file.
-    struct HeaderEdit
-    {
-        Header* h;
-        std::string source;
-        std::string curve;
-        int boost;    // -1 = none
-        int fallback;
-        std::string name;
-        float tuning[TUNING_COUNT];     // TUNINGS' values to run...
-        bool tuningGiven[TUNING_COUNT]; // ...and which the edit named (held to the kind)
+    // ---- edits ----
 
-        HeaderEdit(Header* hp)
-            : h(hp), source(hp->source), curve(hp->curveText), boost(hp->boost),
-              fallback(hp->fallback), name(hp->name)
-        {
-            for (int i = 0; i < TUNING_COUNT; i++)
-            {
-                tuning[i] = hp->*TUNINGS[i].field;
-                tuningGiven[i] = false;
-            }
-        }
-    };
-
-    static const size_t NAME_CHARS = 16; // the card's title (characters, not bytes);
-                                         // six of these plus curves fit the 512-byte wire
+    static const size_t NAME_CHARS = 16; // the card's title (characters, not bytes)
 
     static size_t utf8Chars(const std::string& s)
     {
@@ -1199,161 +1723,298 @@ private:
         return n;
     }
 
-    // validate a set of edits and, only if every one passes, apply them.
-    // `where` prefixes the error lines. Returns false with nothing changed.
-    bool applyValues(const std::vector<HeaderEdit>& edits, const std::string& where)
+    // a fan as the config would spell it, from the running values: what an
+    // edit is folded into, so loadFan validates the result exactly as it
+    // validates the file
+    static json::Value configObject(const Fan& f)
     {
-        // each edit's source and curve, parsed into a scratch copy of its header
-        std::vector<Header> next;
-        for (auto& e : edits)
+        json::Value o;
+        o.type = json::Value::Type::Object;
+        cfgedit::member(o, "name") = cfgedit::string(f.name);
+        cfgedit::member(o, "output") = cfgedit::string(f.output);
+        cfgedit::member(o, "input") = cfgedit::string(f.input);
+        if (f.hasCurve())
+            cfgedit::member(o, "curve") = cfgedit::string(f.curveText);
+        cfgedit::member(o, "fallback") = cfgedit::number(f.fallback);
+        if (f.boost >= 0)
+            cfgedit::member(o, "boost") = cfgedit::number(f.boost);
+        for (auto& t : TUNINGS)
+            if (t.applies(f) && f.*t.field != t.dflt)
+                cfgedit::member(o, t.key) = cfgedit::number(f.*t.field);
+        return o;
+    }
+
+    // a dashboard object (short keys) as config keys, into `into`; the keys
+    // it named go into `named`. False on a key or value it can't take.
+    bool fromShort(const json::Value& e, json::Value& into, std::vector<std::string>& named,
+                   const std::string& where)
+    {
+        if (!e.isObject())
+            return bad(where, "expected an object");
+        for (auto& m : e.members)
         {
-            std::string at = where + "." + e.h->key;
-            next.push_back(*e.h);
-            Header& t = next.back();
-            bool moved = e.source != e.h->source;
-
-            if (moved)
-            {
-                std::string err = parseSource(e.source, sensors_, t);
-                if (!err.empty())
-                    return bad(at + ".s", err);
-                t.source = e.source;
-                t.path.clear();
-                if (t.kind == Header::Temp || t.kind == Header::Pwm)
-                {
-                    // a hand in the file may name a sensor that turns up later;
-                    // a phone pointing at one that isn't there is told now
-                    resolve(t);
-                    if (t.path.empty())
-                        return bad(at + ".s", "\"" + e.source + "\" is not a sensor on this "
-                                              "machine (nothing in /sys/class/hwmon matches)");
-                }
-            }
-
-            t.curve.clear();
-            if (t.kind != Header::Fallback)
-            {
-                if (e.curve.empty())
-                    return bad(at + ".c", "source \"" + t.source + "\" needs a curve");
-                if (!parseCurve(e.curve, t.kind, at + ".c", t.curve))
-                    return false;
-            }
-            t.curveText = curveToText(t.curve);
-
-            if (e.boost < -1 || e.boost > 100)
-                return bad(at + ".b", "expected a percent 0..100, or null");
-            if (e.fallback < 0 || e.fallback > 100)
-                return bad(at + ".f", "expected a percent 0..100");
-            // only a name the phone changed is held to this — the config may
-            // hold any name, and a curve edit echoes it back untouched
-            if (e.name != e.h->name && (e.name.empty() || utf8Chars(e.name) > NAME_CHARS))
-                return bad(at + ".n", "a name is 1.." + std::to_string(NAME_CHARS) + " characters");
-            t.boost = e.boost;
-            t.fallback = e.fallback;
-            t.name = e.name;
-            for (int i = 0; i < TUNING_COUNT; i++)
-            {
-                const Tuning& tn = TUNINGS[i];
-                if (e.tuningGiven[i] && (e.tuning[i] < tn.lo || e.tuning[i] > tn.hi))
-                    return bad(at + "." + tn.shortKey, std::string("expected ") + tn.range);
-                if (e.tuningGiven[i] && !tn.applies(t))
-                    return bad(at + "." + tn.shortKey, std::string(tn.key) + " only applies to " + tn.onlyFor);
-                t.*tn.field = e.tuning[i];
-            }
-
-            if (moved)
-            {
-                // a fresh source starts its filters over; the ramp otherwise
-                // eases from the old duty to the new curve
-                t.haveIn = t.haveOut = false;
-                t.reported = false;
-            }
+            const char* key = nullptr;
+            for (auto& fl : FIELDS)
+                if (m.first == fl.shortKey)
+                    key = fl.key;
+            for (auto& t : TUNINGS)
+                if (m.first == t.shortKey)
+                    key = t.key;
+            if (!key)
+                return bad(where + "." + m.first, "not understood");
+            // a curve typed as a single number is still a curve for loadFan
+            // to refuse, not a crash
+            cfgedit::member(into, key) = m.second;
+            named.push_back(key);
         }
-
-        for (size_t i = 0; i < edits.size(); i++)
-            *edits[i].h = std::move(next[i]);
-
         return true;
     }
 
-    // apply a phone's partial edit (the shape in the header comment): every
-    // header optional, its s/c/b/f/n/h/r/t each optional (the rest keeps its
-    // value), anything else an error. Validated as a whole by applyValues.
-    bool applyJson(const json::Value& root, const std::string& where)
+    // fold a partial edit into a fan's config object. A key the edit didn't
+    // name that stops applying once it lands — the curve of a fan whose input
+    // became fallback, a hysteresis once the input isn't a temperature, a
+    // boost once the output is the host's — goes quietly, as the write-back
+    // drops it from the file; a key the edit did name is held to loadFan.
+    void fold(json::Value& obj, const std::vector<std::string>& named)
     {
-        std::vector<HeaderEdit> edits;
+        auto has = [&](const char* k) { return std::find(named.begin(), named.end(), k) != named.end(); };
+        Fan scratch;
+        const json::Value* o = obj.find("output");
+        const json::Value* i = obj.find("input");
+        if (!o || !i || !o->isString() || !i->isString() || !parseOutput(o->text, scratch).empty())
+            return;
+        scratch.output = o->text;
+        if (!parseInput(i->text, sensors_, scratch).empty())
+            return;
+        if (!has("curve") && !scratch.hasCurve())
+            cfgedit::erase(obj, "curve");
+        if (!has("boost") && scratch.out == Fan::Host)
+            cfgedit::erase(obj, "boost");
+        const json::Value* b = obj.find("boost");
+        scratch.boost = b && b->isNumber() ? (int)b->number : -1;
+        for (auto& t : TUNINGS)
+            if (!has(t.key) && !t.applies(scratch))
+                cfgedit::erase(obj, t.key);
+    }
 
-        for (auto& m : root.members)
+    // validate a whole new list (the edit applied to the running one's config
+    // objects) and, if it passes, make it the running list. `from` is the old
+    // index each new fan continues (-1: new), so the runtime state (filters,
+    // ramp, a resolved sensor) carries over where the fan's input is the same,
+    // and the write-back finds the file's object each fan came from. Returns
+    // false with nothing changed.
+    bool applyList(const json::Value& arr, const std::vector<int>& from, const std::string& where)
+    {
+        std::vector<Fan> next;
+        if (!parseList(arr, next, where, false))
+            return false;
+
+        for (size_t i = 0; i < next.size(); i++)
         {
-            const std::string& k = m.first;
-            const json::Value& v = m.second;
-            if (k == "editable")
-                continue;
-            if (k.rfind("header", 0) == 0 && v.isObject())
-            {
-                Header* h = nullptr;
-                for (auto& o : headers_)
-                    if (o.key == k)
-                        h = &o;
-                if (!h)
-                    return bad(where + "." + k, "no such header in the config");
+            Fan& n = next[i];
+            const Fan* old = from[i] >= 0 ? &fans_[from[i]] : nullptr;
+            const std::string at = where + "[" + std::to_string(i) + "]";
 
-                HeaderEdit e(h);
-                for (auto& f : v.members)
-                {
-                    const std::string& fk = f.first;
-                    const json::Value& fv = f.second;
-                    int ti = -1;
-                    for (int i = 0; i < TUNING_COUNT; i++)
-                        if (fk == TUNINGS[i].shortKey)
-                            ti = i;
-                    if (ti >= 0 && fv.isNumber())
-                    {
-                        e.tuning[ti] = (float)fv.number;
-                        e.tuningGiven[ti] = true;
-                    }
-                    else if (fk == "s" && fv.isString())
-                        e.source = fv.text;
-                    else if (fk == "n" && fv.isString())
-                        e.name = fv.text;
-                    else if (fk == "c" && (fv.isString() || fv.isNumber()))
-                        e.curve = json::toString(fv);
-                    else if (fk == "b" && fv.type == json::Value::Type::Null)
-                        e.boost = -1;
-                    else if (fk == "b" && fv.isNumber())
-                        e.boost = (int)(fv.number + 0.5);
-                    else if (fk == "f" && fv.isNumber())
-                        e.fallback = (int)(fv.number + 0.5);
-                    else
-                        return bad(where + "." + k + "." + fk, "not understood");
-                }
-                edits.push_back(e);
+            // a name the phone changed is held to the card's width — the
+            // config may hold any name, and an edit elsewhere leaves it be
+            if ((!old || old->name != n.name) && (n.name.empty() || utf8Chars(n.name) > NAME_CHARS))
+                return bad(at + ".n", "a name is 1.." + std::to_string(NAME_CHARS) + " characters");
+
+            // what the input reads depends on the output too (the board's own
+            // curve, a blank input, reads the output)
+            bool inputMoved = !old || old->input != n.input || old->output != n.output;
+            bool outputMoved = !old || old->output != n.output;
+
+            // a phone pointing at a sensor or an output that isn't there is
+            // told now (a hand in the file may name one that turns up later)
+            if (inputMoved && (n.kind == Fan::Temp || n.kind == Fan::Pwm))
+            {
+                resolve(n);
+                if (n.rt.path.empty())
+                    return bad(at + ".i", "\"" + n.input + "\" is not a sensor on this machine "
+                                          "(nothing in " + hwmon::root() + " matches)");
             }
-            else
-                return bad(where + "." + k, "unknown key");
+            // an output handed from the board to the host is checked like a
+            // new one: taking it over is what needs a writable driver
+            bool takenOver = old && old->kind == Fan::Board && n.kind != Fan::Board;
+            if ((outputMoved || takenOver) && n.out == Fan::Host)
+            {
+                std::string p = findChipFile(n.outChip, n.outFile);
+                if (p.empty())
+                    return bad(at + ".o", "\"" + n.output + "\" is not a pwm output on this machine");
+                if (n.kind != Fan::Board && !pwmout::writable(p))
+                    return bad(at + ".o", "\"" + n.output + "\" is read-only here — its driver can't set "
+                                          "it (on the BC-250 the nct6687 driver can, the in-kernel nct6683 "
+                                          "can't)");
+            }
+
+            if (old)
+            {
+                // the same fan: keep what it has learnt. A fresh input starts
+                // its filters over (the ramp otherwise eases from the old duty
+                // to the new curve); a fresh output is looked up again
+                Fan::Runtime rt = old->rt;
+                if (inputMoved)
+                {
+                    rt.path = n.rt.path; // just resolved, or "" (looked up on the tick)
+                    rt.lost = false;
+                    rt.haveIn = rt.haveOut = false;
+                    rt.lastInOk = false;
+                }
+                if (outputMoved)
+                {
+                    rt.outPath.clear();
+                    rt.host = Fan::Runtime::HNone;
+                    rt.saidGone = rt.saidRo = false;
+                }
+                n.rt = rt;
+            }
+            if (n.out == Fan::Host && n.kind != Fan::Board && n.rt.outPath.empty())
+                resolveOutput(n);
         }
 
-        return applyValues(edits, where);
+        // the list must still reach the phone: past the receiver's ceiling
+        // the answer to this edit (and every later one) would never arrive,
+        // leaving the phone on a revision the daemon no longer has. Room is
+        // kept for the "err" an answer may carry
+        std::vector<Fan> prev = std::move(fans_);
+        fans_ = std::move(next);
+        if (toJson().size() + ERR_ROOM > proto::DASH_FAN_CONFIG_MAX)
+        {
+            fans_ = std::move(prev);
+            return bad(where, "the fan list would be too long for the dashboard (" +
+                                  std::to_string(proto::DASH_FAN_CONFIG_MAX) + " bytes as JSON) — "
+                                  "shorten fan names, or remove a fan");
+        }
+        lastFrom_ = from;
+        return true;
+    }
+
+    // apply a phone's edit (the shapes in the header comment). Validated as a
+    // whole by applyList; `why` gets the phone's short reason on a refusal
+    // (the journal gets the full line from bad()).
+    bool applyJson(const json::Value& root, const std::string& where, std::string& why)
+    {
+        const json::Value* r = root.find("rev");
+        const json::Value* fan = root.find("fan");
+        const json::Value* edit = root.find("edit");
+        const json::Value* add = root.find("add");
+        const json::Value* del = root.find("del");
+
+        for (auto& m : root.members)
+            if (m.first != "rev" && m.first != "fan" && m.first != "edit" && m.first != "add" && m.first != "del")
+            {
+                why = "the edit wasn't understood";
+                return bad(where + "." + m.first, "unknown key");
+            }
+        int ops = (fan || edit ? 1 : 0) + (add ? 1 : 0) + (del ? 1 : 0);
+        if (ops != 1 || (fan && !edit) || (edit && !fan))
+        {
+            why = "the edit wasn't understood";
+            return bad(where, "expected one of {fan, edit}, {add} or {del}");
+        }
+        if (!r || !r->isString() || r->text != rev())
+        {
+            why = "the fan list changed on the host since the phone read it — look again and retry";
+            return bad(where, "stale edit (revision " + (r ? json::toString(*r) : std::string("none")) +
+                                  ", the list is at " + rev() + ")");
+        }
+
+        json::Value arr;
+        arr.type = json::Value::Type::Array;
+        std::vector<int> from;
+        for (size_t i = 0; i < fans_.size(); i++)
+        {
+            arr.items.push_back(configObject(fans_[i]));
+            from.push_back((int)i);
+        }
+
+        auto index = [&](const json::Value* v, int& k) {
+            if (!v->isNumber() || v->number != floor(v->number) || v->number < 0 ||
+                v->number >= (double)fans_.size())
+                return false;
+            k = (int)v->number;
+            return true;
+        };
+
+        int k = -1;
+        if (fan)
+        {
+            if (!index(fan, k))
+            {
+                why = "no such fan";
+                return bad(where + ".fan", "no such fan in the list");
+            }
+            std::vector<std::string> named;
+            if (!fromShort(*edit, arr.items[k], named, where + ".edit"))
+            {
+                why = "the edit wasn't understood";
+                return false;
+            }
+            fold(arr.items[k], named);
+        }
+        else if (add)
+        {
+            json::Value o;
+            o.type = json::Value::Type::Object;
+            std::vector<std::string> named;
+            if (!fromShort(*add, o, named, where + ".add"))
+            {
+                why = "the new fan wasn't understood";
+                return false;
+            }
+            arr.items.push_back(o);
+            from.push_back(-1);
+        }
+        else
+        {
+            if (!index(del, k))
+            {
+                why = "no such fan";
+                return bad(where + ".del", "no such fan in the list");
+            }
+            arr.items.erase(arr.items.begin() + k);
+            from.erase(from.begin() + k);
+        }
+
+        if (!applyList(arr, from, where))
+        {
+            why = lastBad_;
+            return false;
+        }
+        return true;
     }
 
     // a phone edit: parse, apply, write it into the config, and re-push the
-    // standalone part if that moved. False (with a journal line) changes
-    // nothing.
+    // standalone part if that moved. False (with a journal line, and the
+    // reason for the phone in err_) changes nothing.
     bool applyEdit(const std::string& text, std::vector<std::unique_ptr<Sink>>& sinks)
     {
         const std::string where = "fans (dashboard edit)";
 
-        if (!writable() || headers_.empty())
+        if (!writable() || !present_)
+        {
+            err_ = "the config file isn't writable";
             return bad(where, "refused — the config file is not writable, or has no fans block");
+        }
 
         json::Value root;
-        std::string err;
-        if (!json::parse(text, root, err) || !root.isObject())
-            return bad(where, "not a JSON object: " + err);
+        std::string perr;
+        if (!json::parse(text, root, perr) || !root.isObject())
+        {
+            err_ = "the edit wasn't understood";
+            return bad(where, "not a JSON object: " + perr);
+        }
 
         std::string before = standaloneKey();
-        if (!applyJson(root, where))
+        std::string why;
+        capture_ = true;
+        lastBad_.clear();
+        bool ok = applyJson(root, where, why);
+        capture_ = false;
+        if (!ok)
         {
+            err_ = why.empty() ? "refused" : why;
             fprintf(stderr, "fans: dashboard edit refused — nothing changed\n");
             return false;
         }
@@ -1364,17 +2025,21 @@ private:
         lastSent_ = -1e9; // send the new duties on the next tick, changed or not
 
         // the edit runs either way; a failed write is said by the writer and
-        // gets no answer, so the phone's timeout names the cause
-        return writeConfig();
+        // turns the dashboard read-only
+        if (!writeConfig())
+            err_ = "applied, but the config file couldn't be written — it lasts until a restart";
+        return true;
     }
 
     // the receiver's standalone settings as pushStandalone sends them: one
-    // record per header, a header not in the block left as FAN_NONE
+    // record per slot, an unused slot all 0xFF
     void standaloneBlob(uint8_t* p) const
     {
-        memset(p, proto::FAN_NONE, proto::FAN_STANDALONE_LEN);
-        for (auto& h : headers_)
-            h.wire().encode(p + h.slot * proto::FAN_HEADER_LEN);
+        for (int i = 0; i < CHANNELS; i++)
+            fanwire::Header::unused().encode(p + i * proto::FAN_HEADER_LEN);
+        for (auto& f : fans_)
+            if (f.slot >= 0)
+                f.wire().encode(p + f.slot * proto::FAN_HEADER_LEN);
     }
 
     // ...as one comparable string, for "did an edit move them"
@@ -1388,57 +2053,85 @@ private:
     // ---- writing an edit back into the config file ----
 
     // fold the running values into the block as parsed (every key the user
-    // wrote, in their order) and have the writer splice it over the block's
-    // bytes in the config file; the rest of the file is untouched. A failure
-    // is said and leaves the edit live until the next restart (the writer
-    // turns read-only, so the phone stops offering saves that can't stick).
+    // wrote, in their order; a fan that is new since gets the canonical
+    // order) and have the writer splice it over the block's bytes in the
+    // config file; the rest of the file is untouched. The list is rebuilt from
+    // the running fans, each continuing the file's object it came from (by
+    // position: an edit keeps it, an add appends, a delete drops it — the
+    // `from` map applyJson built). A failure is said and leaves the edit live
+    // until the next restart (the writer turns read-only, so the phone stops
+    // offering saves that can't stick).
     bool writeConfig()
     {
-        for (auto& h : headers_)
+        json::Value arr;
+        arr.type = json::Value::Type::Array;
+        for (size_t i = 0; i < fans_.size(); i++)
         {
-            json::Value& hv = cfgedit::member(block_, h.key);
-            if (!hv.isObject())
-                continue;
-            cfgedit::member(hv, "name") = cfgedit::string(h.name);
-            cfgedit::member(hv, "source") = cfgedit::string(h.source);
-            if (h.kind == Header::Fallback)
-                cfgedit::erase(hv, "curve");
+            const Fan& f = fans_[i];
+            json::Value fv;
+            fv.type = json::Value::Type::Object;
+            int src = i < lastFrom_.size() ? lastFrom_[i] : -1;
+            if (src >= 0 && (size_t)src < block_.items.size() && block_.items[src].isObject())
+                fv = block_.items[src];
+
+            cfgedit::member(fv, "name") = cfgedit::string(f.name);
+            cfgedit::member(fv, "output") = cfgedit::string(f.output);
+            cfgedit::member(fv, "input") = cfgedit::string(f.input);
+            if (!f.hasCurve())
+                cfgedit::erase(fv, "curve");
             else
             {
-                // a curve where the file had none goes after source, where a
+                // a curve where the file had none goes after input, where a
                 // hand would write it, not at the end
-                if (!hv.find("curve"))
-                    for (size_t i = 0; i < hv.members.size(); i++)
-                        if (hv.members[i].first == "source")
+                if (!fv.find("curve"))
+                    for (size_t k = 0; k < fv.members.size(); k++)
+                        if (fv.members[k].first == "input")
                         {
-                            hv.members.insert(hv.members.begin() + i + 1,
+                            fv.members.insert(fv.members.begin() + k + 1,
                                               std::make_pair(std::string("curve"), json::Value()));
                             break;
                         }
-                cfgedit::member(hv, "curve") = cfgedit::string(h.curveText);
+                cfgedit::member(fv, "curve") = cfgedit::string(f.curveText);
             }
-            cfgedit::member(hv, "boost") = h.boost < 0 ? json::Value() : cfgedit::number(h.boost);
-            cfgedit::member(hv, "fallback") = cfgedit::number(h.fallback);
-            // a tuning that stopped applying (the source moved) goes; one at
+            cfgedit::member(fv, "fallback") = cfgedit::number(f.fallback);
+            // no boost: null where the hand wrote the key, absent otherwise
+            // (a host output's may not even be null-less — loadFan takes both)
+            if (f.boost >= 0)
+                cfgedit::member(fv, "boost") = cfgedit::number(f.boost);
+            else if (fv.find("boost"))
+                cfgedit::member(fv, "boost") = json::Value();
+            // a tuning that stopped applying (the input moved) goes; one at
             // its default is written only where the hand already had it, so
             // a lean file stays lean
             for (auto& t : TUNINGS)
             {
-                if (!t.applies(h))
-                    cfgedit::erase(hv, t.key);
-                else if (hv.find(t.key) || h.*t.field != t.dflt)
-                    cfgedit::member(hv, t.key) = cfgedit::number(h.*t.field);
+                if (!t.applies(f))
+                    cfgedit::erase(fv, t.key);
+                else if (fv.find(t.key) || f.*t.field != t.dflt)
+                    cfgedit::member(fv, t.key) = cfgedit::number(f.*t.field);
             }
+            arr.items.push_back(fv);
         }
 
+        block_ = arr;
+        lastFrom_.clear();
+        for (size_t i = 0; i < fans_.size(); i++)
+            lastFrom_.push_back((int)i);
         return writer_->write({BLOCK}, block_, BLOCK);
     }
 
-    std::vector<Header> headers_;
+    std::vector<Fan> fans_;
+    bool present_ = false;
 
+    int stripPin_ = -1;      // the strip's data pin on the receiver (strip.pin)
     std::string sensors_;    // the top-level `sensors` spec (telemetry temp)
     json::Value block_;      // the fans block as written (writeConfig updates it)
+    std::vector<int> lastFrom_; // fans_[i] continues block_.items[lastFrom_[i]]
     cfgedit::Writer* writer_ = nullptr; // the config file's editor; null = read-only
+    pwmout::Claims* claims_ = nullptr;  // the host outputs' driver; null = never touch one
+    std::string err_;        // why the last edit was refused, for the next push (once)
+    std::string lastBad_;    // the last bad() while capture_ (the phone's short reason)
+    bool capture_ = false;
 
     double watchUntil_ = 0;    // a phone watches until this time (0 = none)
     std::string tempPath_;
@@ -1446,10 +2139,12 @@ private:
     bool tempOk_ = false;
     std::string lastTelem_;
     double lastTelemSent_ = -1e9;
-    bool warnedSize_ = false;
+    bool warnedSize_ = false, warnedTelem_ = false;
     std::string lastSensors_;
     double lastSensorsSent_ = -1e9;
     bool warnedSensors_ = false;
+    bool warnedOuts_ = false;        // host outputs left out of the catalogue (said once)
+    bool warnedSensorsSize_ = false; // the catalogue over the ceiling even trimmed (said once)
     std::map<std::string, bool> pwmSplit_; // chip -> its pwm outputs have differed this watch
 
     double lastTick_ = 0;

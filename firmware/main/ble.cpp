@@ -25,7 +25,9 @@
 #include "dash.hpp"
 #include "dbglog.hpp"
 #include "fan.hpp"
+#include "fanwire.hpp"
 #include "hostreq.hpp"
+#include "led_service.hpp"
 #include "link.hpp"
 #include "power_switch.hpp"
 #include "protocol.hpp"
@@ -33,7 +35,7 @@
 
 #define BLOG(fmt, ...) dbglog::line("ble: " fmt, ##__VA_ARGS__)
 
-// The GATT surface — one custom service, eleven characteristics:
+// The GATT surface — one custom service, thirteen characteristics:
 //
 //   control (write):        token(16) op(1) [args]. Token is the flash-time
 //                           shared secret, byte-for-byte (short tokens
@@ -41,22 +43,23 @@
 //                           0x01 = power on, 0x02 = graceful shutdown, 0x03 =
 //                           hard off (release PS_ON#: the remote form of
 //                           holding the button, for a crashed machine) — no
-//                           args. op 0x10 = set a fan header's standalone
-//                           record, args slot(1) (the fans layout's
-//                           position, 0-based) then the header's record in
-//                           CMD_FAN_STANDALONE's per-header layout
+//                           args. op 0x10 = set a fan slot's standalone
+//                           record, args slot(1) (0-based) then the slot's
+//                           record in CMD_FAN_STANDALONE's per-slot layout
 //                           (protocol.hpp FAN_HEADER_LEN bytes): its
+//                           output (a header of this board or a GPIO),
 //                           resting duty, boost and boost length, ramp,
-//                           and source — FAN_KIND_FALLBACK (the header runs
-//                           its fallback), FAN_KIND_GPIO with the input pin
-//                           and the (input %, duty %) curve this board runs
+//                           and input — FAN_KIND_FALLBACK (the fan runs its
+//                           fallback), FAN_KIND_GPIO with the input pin and
+//                           the (input %, duty %) curve this board runs
 //                           itself, or FAN_KIND_HOST (the fallback until a
-//                           daemon drives it). Applied and persisted by the
-//                           fan module without any daemon — what makes this
-//                           board a fan controller on its own. Rejected
-//                           (VALUE_ERR, reason in the debug log) for a slot
-//                           that isn't wired, a value out of range, a bad
-//                           curve or a pin this board can't read on. op 0x20 =
+//                           daemon drives it); a record with no output
+//                           removes the slot's fan. Applied and persisted by
+//                           the fan module without any daemon — what makes
+//                           this board a fan controller on its own. Rejected
+//                           (VALUE_ERR, reason in the debug log) for a value
+//                           out of range, a bad curve, or a pin this board
+//                           can't drive or read on. op 0x20 =
 //                           set the power switch's tunings, args the eight
 //                           bytes of proto::CMD_PWR_TUNING (hold ms, boot
 //                           timeout ms, sense low/high mV, LE u16s): applied
@@ -73,17 +76,21 @@
 //                           (VALUE_ERR, reason in the debug log) — the info
 //                           value lists the ones it can.
 //                           A wrong token is rejected with "write not
-//                           permitted" (TOKEN_ERR, below); a right power op
+//                           permitted" (TOKEN_ERR, below); a power op
+//                           (0x01-0x03, 0x20, 0x21) on a receiver with no
+//                           power switch with VALUE_ERR; a right power op
 //                           stages the request with the pwr task and
 //                           succeeds even if the state makes it moot (the
 //                           status characteristic is how a client sees what
 //                           actually happened).
-//   status (read + notify): one byte, pwr's coarse PSU state: 0 = off,
-//                           1 = booting, 2 = on. Notifies on change, so the
-//                           phone watches the power-on it asked for confirm
-//                           itself via the sense wire.
+//   status (read + notify): one byte, the host's coarse state: 0 = off,
+//                           1 = booting, 2 = on — pwr's PSU state, or on a
+//                           receiver with no power switch whether the
+//                           daemon is streaming (hostState). Notifies on
+//                           change, so the phone watches the power-on it
+//                           asked for confirm itself via the sense wire.
 //   fans (read + notify):   this board's own live view, FANS_LEN bytes
-//                           (layout at buildFans): per header the duty it
+//                           (layout at buildFans): per slot the duty it
 //                           applies and where it came from, the PSU state,
 //                           how old the daemon's telemetry is. Notified once
 //                           a second while subscribed.
@@ -95,18 +102,19 @@
 //   fancfg (read + write + notify):
 //                           the fan config as the daemon runs it — the last
 //                           CMD_FAN_CONFIG verbatim (JSON text; empty until
-//                           one arrives). A write is token(16) followed by a
-//                           partial edit (JSON text, the daemon's shape),
-//                           forwarded to the daemon as MSG_FAN_CONFIG; the
-//                           daemon's answering CMD_FAN_CONFIG notifies the
-//                           new value.
+//                           one arrives, and when longer than a GATT value's
+//                           512 bytes: the page characteristic reads it). A
+//                           write is token(16) followed by an edit (JSON
+//                           text, the daemon's shape), forwarded to the
+//                           daemon as MSG_FAN_CONFIG; the daemon's answering
+//                           CMD_FAN_CONFIG notifies the new value.
 //   fansa (read + notify):  this board's standalone fan settings as stored —
 //                           CMD_FAN_STANDALONE's layout (protocol.hpp): one
-//                           record per header with its fallback, boost and
-//                           boost length, ramp, source kind, and a gpio
-//                           header's pin and curve. What the page shows and
+//                           record per slot with its output, fallback, boost
+//                           and boost length, ramp, input kind, and a gpio
+//                           slot's pin and curve. What the page shows and
 //                           edits with no daemon around (op 0x10 writes one
-//                           header's record); notified when it changes.
+//                           slot's record); notified when it changes.
 //   stripcfg (read + write + notify):
 //                           the same for the strip: the last CMD_STRIP_CONFIG
 //                           (brightness, gamma, white balance, the file: rule
@@ -114,8 +122,9 @@
 //                           relayed as MSG_STRIP_CONFIG, answered by the
 //                           daemon's next CMD_STRIP_CONFIG.
 //   info (read):            build facts: firmware version string, free heap,
-//                           and the GPIOs a gpio:N fan source or the wake
-//                           input may read on.
+//                           the GPIOs a gpio:N fan input or the wake input
+//                           may read on, the board's header map, and the
+//                           GPIOs a gpio:N fan output may drive.
 //   sensors (read + notify):the daemon's sensor catalogue — the last
 //                           CMD_FAN_SENSORS verbatim (JSON text; empty until
 //                           one arrives): every hwmon temperature and pwm
@@ -134,6 +143,18 @@
 //                           the short_press command); a write is token(16) +
 //                           a partial edit relayed as MSG_PWR_CONFIG, answered
 //                           by the daemon's next CMD_PWR_CONFIG.
+//   page (read + write):    any of the daemon's payloads above, in pages —
+//                           a GATT value holds 512 bytes, the fan config and
+//                           the sensor catalogue can hold more (protocol.hpp
+//                           DASH_*_MAX). A write of [slot][page] (dash::Slot;
+//                           no token — these payloads are readable anyway)
+//                           picks the page; page 0, or another slot, takes a
+//                           snapshot of the payload, and every later page
+//                           serves the same snapshot, so the pages of one
+//                           read always belong together. A read is ver(1) = 1
+//                           slot(1) page(1) pages(1) len(2, the whole
+//                           payload's, LE) then that page's PAGE_DATA bytes
+//                           (fewer on the last).
 //
 // The 128-bit UUIDs are this project's own (random base, "bc250" spelled
 // into the tail); the web page must list the service UUID to find us.
@@ -141,7 +162,7 @@
 //   service a5f20001-8f11-4e0e-9b3a-0bc250e0c001, control ...0002,
 //   status ...0003, fans ...0004, fancfg ...0005, info ...0006, telem ...0007,
 //   stripcfg ...0008, fansa ...0009, sensors ...000A, pwr ...000B,
-//   pwrcfg ...000C
+//   pwrcfg ...000C, page ...000D
 namespace ble
 {
 static const uint32_t POLL_MS = 250; // policy task cadence
@@ -190,11 +211,12 @@ static const ble_uuid128_t FANSA_UUID = BC250_UUID(0x09);
 static const ble_uuid128_t SENSORS_UUID = BC250_UUID(0x0a);
 static const ble_uuid128_t PWR_UUID = BC250_UUID(0x0b);
 static const ble_uuid128_t PWRCFG_UUID = BC250_UUID(0x0c);
+static const ble_uuid128_t PAGE_UUID = BC250_UUID(0x0d);
 
 static const uint8_t OP_POWER_ON = 0x01;
 static const uint8_t OP_SHUTDOWN = 0x02;
 static const uint8_t OP_HARD_OFF = 0x03;
-static const uint8_t OP_FAN_HEADER = 0x10; // + slot(1) + one header's record (FAN_HEADER_LEN)
+static const uint8_t OP_FAN_HEADER = 0x10; // + slot(1) + one slot's record (FAN_HEADER_LEN)
 static const uint8_t OP_PWR_TUNING = 0x20; // + the CMD_PWR_TUNING payload (8)
 static const uint8_t OP_PWR_WAKE = 0x21;   // + the CMD_PWR_WAKE payload (1)
 static const uint16_t OP_FAN_HEADER_ARGS = 1 + proto::FAN_HEADER_LEN; // the longest args
@@ -300,6 +322,7 @@ enum ChrId
     C_SENSORS,
     C_PWR,
     C_PWRCFG,
+    C_PAGE,
     C_COUNT
 };
 static Chr g_chr[C_COUNT];
@@ -314,13 +337,25 @@ static void defineChr(ChrId id, const ble_uuid128_t* uuid, ble_gatt_access_fn* a
 }
 
 // policy task locals
-static int g_lastState = -2;   // last pwr::psuState() seen (-2 = never)
+static int g_lastState = -2;   // last hostState() seen (-2 = never)
 static uint16_t g_advItvl = 0; // interval the running advertisement was
                                // started with (0 = none), to restart it when
                                // the PSU state calls for the other pace
 static uint32_t g_lastPoll = 0;    // last 1 Hz notify of the fans and pwr values
 static uint32_t g_lastWatch = 0;   // last MSG_FAN_WATCH 1 sent
 static bool g_watching = false;    // the daemon has been told a phone watches
+
+// the host's coarse state as the status value reports it: 0 off, 1
+// booting, 2 on. The power switch's PSU state where there is one; without
+// it (the remote runs for the fans and the strip alone) all this board can
+// tell is whether the daemon is streaming, which reads as on or off.
+static int hostState()
+{
+    int st = pwr::psuState();
+    if (st >= 0)
+        return st;
+    return led::hostLive() ? 2 : 0;
+}
 
 // ---- the fans value ----
 
@@ -333,13 +368,13 @@ static bool g_watching = false;    // the daemon has been told a phone watches
 //             the link, bit5 telemetry fresh (younger than TELEM_FRESH_MS)
 //   psu(1): 0 off, 1 booting, 2 on
 //   telemAge(1): seconds since the daemon's last telemetry, 255 = none/stale
-//   per header ×6: state(1) duty(1) fallback(1) kind(1) in(1)
-//     state: bit0 wired, bits1-3 source (fan::SRC_*)
-//     duty: the duty this board applies (0xFF unwired)
+//   per slot ×6: state(1) duty(1) fallback(1) kind(1) in(1)
+//     state: bit0 driving a pin, bits1-3 source (fan::SRC_*)
+//     duty: the duty this board applies (0xFF: drives nothing)
 //     fallback: the resting duty in force — the control op 0x10's record
-//               sets it, so the page's slider shows what is stored (0xFF unwired)
-//     kind: the source kind in force (protocol.hpp FAN_KIND_*, 0xFF unwired)
-//     in: a gpio header's sampled input percent (0xFF = no reading)
+//               sets it, so the page's slider shows what is stored (0xFF: drives nothing)
+//     kind: the input kind in force (protocol.hpp FAN_KIND_*, 0xFF: drives nothing)
+//     in: a gpio slot's sampled input percent (0xFF = no reading)
 //   uptime(4): this board's seconds since reset
 static const uint16_t FANS_LEN = 4 + proto::FAN_CHANNELS * 5 + 4;
 
@@ -356,13 +391,13 @@ static uint16_t buildFans(uint8_t* p)
     bool haveT = age != 0xFFFFFFFFu;
     bool fresh = haveT && age < TELEM_FRESH_MS;
 
-    int st = pwr::psuState();
+    int st = hostState();
     uint16_t at = 0;
     p[at++] = 3;
     p[at++] = (s.active ? F_ACTIVE : 0) | (s.boosting ? F_BOOST : 0) |
               (s.hold ? F_HOLD : 0) | (s.live ? F_LIVE : 0) |
               (link::hostPresent() ? F_HOST : 0) | (fresh ? F_TELEM : 0);
-    p[at++] = st < 0 ? 0 : (uint8_t)st;
+    p[at++] = (uint8_t)st;
     p[at++] = !haveT || age >= 255000 ? 255 : (uint8_t)(age / 1000);
 
     for (int i = 0; i < proto::FAN_CHANNELS; i++)
@@ -444,6 +479,16 @@ static int ctrlAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     uint8_t op = buf[TOKEN_LEN];
     uint16_t args = len - TOKEN_LEN - 1;
 
+    // the power ops, on a receiver with no power switch: nothing to press
+    // or tune — refused, rather than accepted and silently dropped
+    bool powerOp = op == OP_POWER_ON || op == OP_SHUTDOWN || op == OP_HARD_OFF ||
+                   op == OP_PWR_TUNING || op == OP_PWR_WAKE;
+    if (powerOp && pwr::psuState() < 0)
+    {
+        BLOG("command 0x%02x refused — no power switch on this receiver", op);
+        return VALUE_ERR;
+    }
+
     if (op == OP_FAN_HEADER)
     {
         if (args != OP_FAN_HEADER_ARGS)
@@ -452,11 +497,16 @@ static int ctrlAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
         const char* why = nullptr;
         if (!fan::setHeader(a[0], a + 1, proto::FAN_HEADER_LEN, &why))
         {
-            BLOG("fan header%u record rejected — %s", a[0] + 1u, why ? why : "?");
+            BLOG("fan slot %u record rejected — %s", a[0], why ? why : "?");
             return VALUE_ERR;
         }
-        BLOG("fan header%u set from the phone: fallback %u%%, kind %u, gpio %u (%u points), ramp %u%%/s",
-             a[0] + 1u, a[1], a[5], a[6], a[7], a[4]);
+        fanwire::Header h = fanwire::Header::decode(a + 1);
+        if (!h.used())
+            BLOG("fan slot %u cleared from the phone", a[0]);
+        else
+            BLOG("fan slot %u set from the phone: output %s%u, fallback %u%%, kind %u, gpio %u (%u points), ramp %u%%/s",
+                 a[0], h.outKind == proto::FAN_OUT_HEADER ? "header" : "gpio:", h.out, h.fallback, h.kind,
+                 h.gpio, h.npts, h.ramp);
         return 0;
     }
 
@@ -512,8 +562,7 @@ static int statAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR)
         return BLE_ATT_ERR_UNLIKELY;
 
-    int st = pwr::psuState();
-    uint8_t b = st < 0 ? 0 : (uint8_t)st;
+    uint8_t b = (uint8_t)hostState();
     return os_mbuf_append(ctxt->om, &b, 1) == 0 ? 0
                                                 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
@@ -545,12 +594,62 @@ static uint16_t buildFansa(uint8_t* p) { return fan::standalone(p, proto::FAN_ST
 
 // the daemon's payloads, served verbatim (dash.hpp); none yet reads as an
 // empty value, which the page shows as "nothing from the daemon" rather than
-// as broken
+// as broken. One longer than a GATT value can hold reads as empty here too —
+// the page characteristic serves it (a page that knows it asks there first)
+static const uint16_t RAW_MAX = 512;
 static int serve(ble_gatt_access_ctxt* ctxt, dash::Slot slot)
 {
-    uint8_t b[dash::MAX_LEN];
+    uint8_t b[RAW_MAX];
     uint16_t n = dash::get(slot, b, sizeof b);
     return n == 0 || os_mbuf_append(ctxt->om, b, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
+// ---- the page characteristic (see the header comment) ----
+
+static const uint16_t PAGE_DATA = 500; // a page's payload bytes: header + this <= 512
+static uint8_t g_snap[dash::MAX_LEN];  // the snapshot the pages serve (host task only:
+static uint16_t g_snapLen = 0;         // access callbacks and GAP events run there)
+static int g_snapSlot = -1;            // -1 = none taken
+static uint8_t g_page = 0;
+
+static int pageAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR)
+    {
+        uint8_t a[2];
+        uint16_t len = 0;
+        if (ble_hs_mbuf_to_flat(ctxt->om, a, sizeof a, &len) != 0 || len != 2)
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        if (a[0] >= dash::SLOTS)
+            return VALUE_ERR;
+        // page 0 takes the snapshot; a later page of a slot other than the
+        // snapshot's is refused rather than served from a fresh one, which
+        // would stitch two versions of the value together
+        if (a[1] != 0 && a[0] != g_snapSlot)
+            return VALUE_ERR;
+        if (a[1] == 0)
+        {
+            g_snapLen = dash::get((dash::Slot)a[0], g_snap, sizeof g_snap);
+            g_snapSlot = a[0];
+        }
+        g_page = a[1];
+        return 0;
+    }
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR)
+        return BLE_ATT_ERR_UNLIKELY;
+
+    // a read before any write: an empty value (no slot picked)
+    if (g_snapSlot < 0)
+        return 0;
+    uint16_t pages = g_snapLen ? (uint16_t)((g_snapLen + PAGE_DATA - 1) / PAGE_DATA) : 1;
+    uint32_t from = (uint32_t)g_page * PAGE_DATA;
+    uint16_t n = from >= g_snapLen ? 0 : (uint16_t)(g_snapLen - from < PAGE_DATA ? g_snapLen - from : PAGE_DATA);
+    const uint8_t hdr[6] = {1, (uint8_t)g_snapSlot, g_page, (uint8_t)pages, (uint8_t)(g_snapLen & 0xFF),
+                            (uint8_t)(g_snapLen >> 8)};
+    if (os_mbuf_append(ctxt->om, hdr, sizeof hdr) != 0 ||
+        (n && os_mbuf_append(ctxt->om, g_snap + from, n) != 0))
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    return 0;
 }
 
 template <dash::Slot SLOT>
@@ -567,7 +666,8 @@ static int dashAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
 // header, the globals, or a few strip values, far under it.
 static int relayEdit(ble_gatt_access_ctxt* ctxt, uint8_t kind, const char* what)
 {
-    uint8_t buf[TOKEN_LEN + hostreq::MSG_MAX];
+    // static, not stack: half a kilobyte, and only the NimBLE host task runs this
+    static uint8_t buf[TOKEN_LEN + hostreq::MSG_MAX];
     uint16_t len = 0;
     if (ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof buf, &len) != 0 || len <= TOKEN_LEN + 2)
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -601,19 +701,24 @@ static int editAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void* arg)
     return relayEdit(ctxt, KIND, (const char*)arg);
 }
 
-// ver(1) = 2, version(32, NUL-padded; the app image's PROJECT_VER — the git
+// ver(1) = 3, version(32, NUL-padded; the app image's PROJECT_VER — the git
 // describe of the build), freeHeap(4), minFreeHeap(4), then since ver 2
-// inputPins(8): the GPIOs a gpio:N fan source or the wake input may read on
-// (fan::inputPins), little-endian, bit N = GPIO N. A ver-1 page stops at the
-// heap. The page re-reads this after moving the wake pin, the one thing that
-// changes it while a phone is connected.
+// inputPins(8): the GPIOs a gpio:N fan input or the wake input may read on
+// (fan::inputPins), little-endian, bit N = GPIO N; since ver 3 headerPins(6):
+// the board's header map, header n's GPIO at [n-1], 0xFF = no such header
+// (fan::headerPins), and outputPins(8): the GPIOs a gpio:N fan output may
+// drive (fan::outputPins), a mask like inputPins. A ver-3 page is also one
+// that pages (the page characteristic, the 25-byte fan record and its
+// two-byte msg frames came with it). The page re-reads this after the wake
+// pin or a fan's output moves, the things that change it while a phone is
+// connected.
 static int infoAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
 {
     if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR)
         return BLE_ATT_ERR_UNLIKELY;
 
-    uint8_t b[1 + 32 + 4 + 4 + 8] = {};
-    b[0] = 2;
+    uint8_t b[1 + 32 + 4 + 4 + 8 + proto::FAN_CHANNELS + 8] = {};
+    b[0] = 3;
     const esp_app_desc_t* d = esp_app_get_description();
     strncpy((char*)b + 1, d->version, 31);
     uint32_t heap = esp_get_free_heap_size();
@@ -626,12 +731,16 @@ static int infoAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     }
     for (int k = 0; k < 8; k++)
         b[41 + k] = (uint8_t)(pins >> (8 * k));
+    fan::headerPins(b + 49);
+    uint64_t outs = fan::outputPins();
+    for (int k = 0; k < 8; k++)
+        b[49 + proto::FAN_CHANNELS + k] = (uint8_t)(outs >> (8 * k));
     return os_mbuf_append(ctxt->om, b, sizeof b) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
 // the log name an editable view's relay uses (editAccess's arg)
 static const char* const EDIT_NAMES[C_COUNT] = {
-    nullptr, nullptr, nullptr, "fan", nullptr, nullptr, "strip", nullptr, nullptr, nullptr, "power"};
+    nullptr, nullptr, nullptr, "fan", nullptr, nullptr, "strip", nullptr, nullptr, nullptr, "power", nullptr};
 
 // NimBLE's own tables, filled from g_chr in start() with plain field
 // assignment: NimBLE's struct layouts have grown fields across IDF versions,
@@ -656,6 +765,7 @@ static int gapEvent(ble_gap_event* ev, void*)
 
     case BLE_GAP_EVENT_DISCONNECT:
         g_conn = BLE_HS_CONN_HANDLE_NONE;
+        g_snapSlot = -1; // the next phone takes its own snapshot
         // the policy task tells the daemon nobody is watching any more
         for (Chr& c : g_chr)
             c.sub = false;
@@ -791,7 +901,7 @@ static void dashboard(uint32_t now)
 // whole clientele), and notifies the status characteristic on state changes.
 static void loop()
 {
-    int st = pwr::psuState(); // 0/1/2; start() refused to run on -1
+    int st = hostState();
 
     if (st != g_lastState)
     {
@@ -833,15 +943,11 @@ void start()
     if (!loadConfig(g_cfg) || !g_cfg.enabled)
         return; // not opted in: the stack is never initialized, no RAM spent
 
+    // no power switch is fine: the fans and the strip are reached the same
+    // way, the power ops are refused (ctrlAccess), and the page hides what
+    // the pwr value says isn't there
     if (pwr::psuState() < 0)
-    {
-        // remote for a power switch that isn't there — likely a blecfg left
-        // over after PWR=off. Say so; silently doing nothing looks like a
-        // radio fault from the phone's side.
-        BLOG("power switch is off — remote disabled (flash PWR=on, or "
-             "BLE=off to silence this)");
-        return;
-    }
+        BLOG("no power switch on this receiver — remote without power control");
 
     if (nimble_port_init() != ESP_OK)
     {
@@ -879,6 +985,7 @@ void start()
     defineChr(C_PWR, &PWR_UUID, viewAccess<buildPwr, PWR_LEN>, RN);
     defineChr(C_PWRCFG, &PWRCFG_UUID, editAccess<dash::PWR_CONFIG, proto::MSG_PWR_CONFIG>, RWN,
               dash::PWR_CONFIG);
+    defineChr(C_PAGE, &PAGE_UUID, pageAccess, R | BLE_GATT_CHR_F_WRITE);
 
     for (int i = 0; i < C_COUNT; i++)
     {

@@ -53,7 +53,7 @@ const I = {
 };
 
 // ---- routing: the route IS the history entry ----
-// { tab, editor: null | slot (fans) | 'p' (power), sheet }
+// { tab, editor: null | a fan card's key ('f2', 's0', 'new') | 'p' (power), sheet }
 const TABS = ['power', 'fans', 'leds', 'receiver'];
 let route = { tab: 'power', editor: null, sheet: false };
 let setRouteState = null;
@@ -92,6 +92,30 @@ function Slider({ value, min = 0, max = 100, step = 1, live, done, disabled, lab
       onPointerCancel=${() => setLocal(null)} />
     ${label !== undefined && html`<span class="val">${label(v)}</span>`}
   </div>`;
+}
+
+// a number box that keeps what is typed while it has focus. A controlled
+// <input value> redraws the stored number on every render — and the page
+// redraws every second — so a box emptied to type a new value got its old
+// number back under the finger. This one shows the typed text until the box
+// is left, reports every value that parses (onValue(null) for an emptied box
+// where `blank` allows one), and on leaving shows the stored value again —
+// so an emptied or half-typed box falls back to it, and a clamped one shows
+// what was kept.
+function NumField({ value, onValue, min, max, step, placeholder, blank = false, round = false, disabled, aria }) {
+  const [text, setText] = useState(null); // null: follow `value`
+  const stored = value === null || value === undefined || Number.isNaN(value) ? '' : String(value);
+  return html`<input type="number" inputmode="decimal" min=${min} max=${max} step=${step} placeholder=${placeholder}
+    disabled=${disabled} aria-label=${aria} value=${text !== null ? text : stored}
+    onFocus=${() => setText(stored)}
+    onInput=${e => {
+      const t = e.target.value;
+      setText(t);
+      if (t === '') { if (blank) onValue(null); return; }
+      const n = parseFloat(t);
+      if (!Number.isNaN(n)) onValue(round ? Math.round(n) : n);
+    }}
+    onBlur=${() => setText(null)} />`;
 }
 
 const Switch = ({ on, change, disabled }) => html`<label class="sw">
@@ -156,8 +180,13 @@ function TokenCard() {
 }
 
 // ---- Power ----
+// a receiver whose pwr value says it has no power switch: the remote runs for
+// the fans and the strip alone, and the receiver refuses the power ops
+const noSwitch = () => B.connected() && !!S.pwr && !S.pwr.active;
+
 function PowerScreen() {
   const on = B.connected();
+  if (noSwitch()) return html`<div class="empty">No power switch on this receiver. Fans and LEDs are in their tabs.</div>`;
   const pending = !!S.device && S.attempt === S.device;
   let label, disabled = false, act = null;
   if (!hasBt() || !B.token()) { label = 'Connect'; disabled = true; }
@@ -240,8 +269,8 @@ function PowerEditor() {
         <h2>Wake input${route !== 'receiver' && wakeRoute === 'receiver' && html`<span class="r">receiver only</span>`}</h2>
         ${wakeOpts
           ? html`<label class="frow"><span>Pin</span>${wakeSelect}</label>`
-          : html`<label class="frow"><span>Pin</span><input type="number" min="0" max="63" step="1" placeholder="none" disabled=${wakeRo} value=${wake === null ? '' : wake}
-              onInput=${e => set({ wake: e.target.value === '' ? null : clamp(parseInt(e.target.value, 10) || 0, 0, 63) })} /><small>a free receiver pin, blank = none</small></label>`}
+          : html`<label class="frow"><span>Pin</span><${NumField} min=${0} max=${63} step=${1} placeholder="none" disabled=${wakeRo} value=${wake}
+              blank=${true} round=${true} onValue=${v => set({ wake: v === null ? null : clamp(v, 0, 63) })} /><small>a free receiver pin, blank = none</small></label>`}
         <div class="note">A 3.3 V pulse on this pin powers the host on and can do nothing else — an OpenPuck's ColdBoot output, for one (GPIO20 on the carrier's J11, with the puck's ground beside it). ${wakeOpts ? 'The list is the receiver\u2019s free pins.' : 'This receiver doesn\u2019t list its free pins; it refuses one it can\u2019t use.'}${route !== 'receiver' && wakeRoute === 'receiver' ? ' The host\u2019s daemon predates this setting, so the pin is kept on the receiver alone.' : ''}</div>
       </div>
       ${wires.length > 0 && html`<div class="card"><h2>Wiring<span class="r">set when flashing</span></h2>
@@ -272,65 +301,90 @@ function PowerSheet() {
 }
 
 // ---- Fans ----
-// what a row says under its name: the source, then what the header runs on
-// right now — the source's reading when the source is in force, otherwise
-// the thing the receiver runs instead (the chip names the same state). "no
-// reading" is only for a source that is in force and has none.
-function describe(slot, h, f) {
-  if (!h) return f && f.wired ? 'Not in the config' : '';
-  const what = { fallback: 'Fixed speed', gpio: `PWM input on GPIO${h.gpio}`, host: 'Host curve', temp: 'CPU temperature',
-                 hwmon: h.spec, pwm: `Board fan header ${h.spec}`, cpu_load: 'CPU load', gpu_load: 'GPU load' }[h.kind] ?? h.src;
-  if (h.kind === 'fallback') return what;
-  const chip = chipOf(h, f);
+// what a row says under its name: the output, the input, then what the fan
+// runs on right now — the input's reading when the input is in force,
+// otherwise the thing that runs it instead (the chip names the same state).
+// "no reading" is only for an input that is in force and has none.
+const INPUT_NAMES = { fallback: 'Fixed speed', host: 'Host curve', temp: 'CPU temperature', cpu_load: 'CPU load',
+                      gpu_load: 'GPU load', board: 'Board curve' };
+const inputName = c => c.kind === 'gpio' ? `PWM input on GPIO${c.gpio}` : c.kind === 'hwmon' ? c.spec
+  : c.kind === 'pwm' ? `Board fan header ${c.spec}` : INPUT_NAMES[c.kind] ?? c.src;
+const HOST_STATES = { gone: 'not found on this machine', ro: 'read-only driver — the board runs it', busy: 'not driven by this host',
+                      board: 'the board runs it' };
+function describe(c) {
+  const out = c.out.kind === 'parked' ? 'No output' : B.outLabel(c.out);
+  const what = `${out} · ${inputName(c)}`;
+  if (c.out.kind === 'parked') return what;
+  const f = B.liveOf(c), t = B.telemOf(c);
+  if (B.isReceiverOut(c.out) && f && !f.wired) return `${what} · not driven by the receiver`;
+  if (c.out.kind === 'host' && t && t.st && t.st !== 'host' && !(t.st === 'board' && c.kind === 'board')) return `${what} · ${HOST_STATES[t.st] || t.st}`;
+  if (c.kind === 'fallback') return what;
+  const chip = chipOf(c);
   if (chip) {
     const state = { hold: 'held at the last speed', boost: 'power-on boost', fallback: 'fallback speed' };
     return `${what} · ${state[chip[0]]}`;
   }
-  const now = B.inputOf(slot, h);
-  return `${what} · ${now === null ? 'no reading' : fmtIn(h, now)}`;
+  if (c.kind === 'board') return what;
+  const now = B.inputOf(c);
+  return `${what} · ${now === null ? 'no reading' : fmtIn(c, now)}`;
 }
 
-// the exception chip: only when the header is not doing what it is set up for
-function chipOf(c, f) {
+// the exception chip: only when the fan is not doing what it is set up for
+function chipOf(c) {
+  if (c.out.kind === 'host') {
+    const t = B.telemOf(c);
+    if (!t || !t.st || t.st === 'host' || (t.st === 'board' && c.kind === 'board')) return null;
+    return ['fallback', t.st === 'gone' ? 'no output' : t.st === 'ro' ? 'read-only' : t.st === 'busy' ? 'not driven' : 'board'];
+  }
+  const f = B.liveOf(c);
   if (!f || !f.wired) return null;
   if (f.hold) return ['hold', 'hold'];
   const src = B.SRC_NAMES[f.src];
   if (src === 'boost') return ['boost', 'boost'];
-  if (src === 'fallback' && c && !B.isFixed(c)) return ['fallback', 'fallback'];
+  if (src === 'fallback' && !B.isFixed(c)) return ['fallback', 'fallback'];
   return null;
 }
 
-function FanRow({ slot, open, toggle }) {
-  const f = S.fans && S.fans.h[slot];
-  const c = B.cardHeader(slot);
-  const name = (c && c.name) || `header${slot + 1}`;
-  const duty = f && f.wired && f.duty !== B.NONE ? f.duty : null;
-  const chip = chipOf(c, f);
-  const editable = !!c && (c.route === 'daemon' ? !!(S.cfg && S.cfg.editable) : true);
-  const hasCurve = !!(c && c.pts.length);
-  const barCls = chip ? chip[0] : '';
+// the duty a card runs right now: the receiver's for its outputs, the
+// daemon's telemetry for a host output (the board's own duty included)
+function dutyOf(c) {
+  if (B.isReceiverOut(c.out)) { const f = B.liveOf(c); return f && f.wired && f.duty !== B.NONE ? f.duty : null; }
+  const t = B.telemOf(c);
+  return t && t.duty !== undefined ? t.duty : null;
+}
+
+function FanRow({ c, open, toggle }) {
+  const duty = dutyOf(c);
+  const chip = chipOf(c);
+  const editable = c.route === 'daemon' ? !!(S.cfg && S.cfg.editable) : true;
+  const hasCurve = c.pts.length > 0 && !B.isFixed(c);
   return html`<div class="card fan ${open && hasCurve ? 'open' : ''}">
     <div class="head" onClick=${hasCurve ? toggle : null}>
-      <div class="nm"><span class="name">${name}</span>${chip && html`<span class="chip ${chip[0]}">${chip[1]}</span>`}</div>
+      <div class="nm"><span class="name">${c.name || B.outLabel(c.out)}</span>${chip && html`<span class="chip ${chip[0]}">${chip[1]}</span>`}</div>
       <span class="duty">${duty === null ? '—' : duty}<small>%</small></span>
-      ${editable ? html`<button class="cog" aria-label="Settings" onClick=${e => { e.stopPropagation(); go({ editor: slot }); }}><${Icon} d=${I.cog} sw=${1.8} /></button>` : html`<span class="cog"></span>`}
-      <div class="what">${describe(slot, c, f)}${c && c.route === 'daemon' && f && !f.wired ? ' · not wired on the receiver' : ''}</div>
-      <div class="bar ${barCls}"><i style=${`width: ${duty === null ? 0 : duty}%`}></i></div>
+      ${editable ? html`<button class="cog" aria-label="Settings" onClick=${e => { e.stopPropagation(); go({ editor: c.key }); }}><${Icon} d=${I.cog} sw=${1.8} /></button>` : html`<span class="cog"></span>`}
+      <div class="what">${describe(c)}</div>
+      <div class="bar ${chip ? chip[0] : ''}"><i style=${`width: ${duty === null ? 0 : duty}%`}></i></div>
     </div>
-    ${open && hasCurve && html`<${Curve} h=${c} now=${B.inputOf(slot, c)} />`}
+    ${open && hasCurve && html`<${Curve} h=${c} now=${B.inputOf(c)} />`}
   </div>`;
 }
 
 function FansScreen() {
   const [open, setOpen] = useState(() => new Set());
-  const slots = B.cardSlots();
-  const toggle = slot => setOpen(s => { const n = new Set(s); n.has(slot) ? n.delete(slot) : n.add(slot); return n; });
+  const toggle = key => setOpen(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n; });
   if (!B.connected() || !S.fansChr)
     return html`<div class="empty">${B.connected() ? 'This receiver has no fan control.' : 'Not connected.'}</div>`;
+  if (!B.fansCurrent())
+    return html`<div class="empty">This receiver runs older firmware. Update it (<code>make flash</code>) and the host's daemon (<code>make install</code>) to see and edit the fans here.</div>`;
+  const list = B.cards();
+  const ro = S.cfg && !S.cfg.editable;
+  const canAdd = S.cfg ? !ro : !!(S.fans && S.fans.active && B.newFan());
   return html`<div class="list">
-    ${!slots.length && html`<div class="empty">${S.fans && !S.fans.active ? 'No fan headers wired on this receiver.' : 'No fan settings yet.'}</div>`}
-    ${slots.map(slot => html`<${FanRow} key=${slot} slot=${slot} open=${open.has(slot)} toggle=${() => toggle(slot)} />`)}
-    ${S.cfg && !S.cfg.editable && html`<div class="empty">Settings are read-only right now.</div>`}
+    ${!list.length && html`<div class="empty">${S.fans && !S.fans.active && !S.cfg ? 'The fan controller is off on this receiver.' : 'No fans yet.'}</div>`}
+    ${list.map(c => html`<${FanRow} key=${c.key} c=${c} open=${open.has(c.key)} toggle=${() => toggle(c.key)} />`)}
+    ${canAdd && html`<button class="rowlink add" onClick=${() => go({ editor: 'new' })}><${Icon} d=${I.plus} size=${16} /><span>add a fan</span></button>`}
+    ${ro && html`<div class="empty">Settings are read-only right now.</div>`}
   </div>`;
 }
 
@@ -338,13 +392,15 @@ function FansScreen() {
 // x spans the curve's points with a margin (percent kinds always 0..100), y
 // is 0..100 duty; the polyline is flat beyond the end points, as the daemon
 // evaluates it. `now` marks the current input on the curve. While editing
-// the points drag: x stays between its neighbours, y in 0..100.
+// the points drag: x stays between its neighbours, y in 0..100. A temperature
+// axis stays within 0..TEMP_MAX, or dragging a point past the edge would
+// widen the axis under the finger and run away with it.
 const PAD = { l: 26, r: 8, t: 6, b: 16 }, W = 320, H = 120;
 function xDomain(h) {
   if (!B.isTempX(h)) return [0, 100];
-  const xs = h.pts.map(p => p.x);
+  const xs = h.pts.map(p => p.x).filter(Number.isFinite);
   let lo = Math.min(20, ...xs) - 5, hi = Math.max(90, ...xs) + 5;
-  return [Math.floor(lo / 10) * 10, Math.ceil(hi / 10) * 10];
+  return [Math.max(0, Math.floor(lo / 10) * 10), Math.min(B.TEMP_MAX, Math.ceil(hi / 10) * 10)];
 }
 const sx = (x, d) => PAD.l + (x - d[0]) / (d[1] - d[0]) * (W - PAD.l - PAD.r);
 const sy = y => PAD.t + (1 - y / 100) * (H - PAD.t - PAD.b);
@@ -362,7 +418,10 @@ function evalCurve(h, x) {
 function Curve({ h, now = null, editing = false, onChange }) {
   const svg = useRef(null), drag = useRef(null);
   const d = xDomain(h);
-  const pts = h.pts.map(p => [sx(p.x, d), sy(p.y)]);
+  // a point whose box is being retyped (blank for the moment) isn't drawn
+  const shown = h.pts.map((p, i) => ({ ...p, i })).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+  if (!shown.length) return html`<svg class="curve" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"></svg>`;
+  const pts = shown.map(p => [sx(p.x, d), sy(p.y)]);
   const line = [[PAD.l, pts[0][1]], ...pts, [W - PAD.r, pts[pts.length - 1][1]]];
   const step = B.isTempX(h) ? 10 : 25;
   const xt = []; for (let x = d[0]; x <= d[1]; x += step) xt.push(x);
@@ -374,13 +433,14 @@ function Curve({ h, now = null, editing = false, onChange }) {
   };
   const move = e => {
     if (drag.current === null || drag.current === undefined) return;
-    const i = drag.current, p = h.pts[i], [px, py] = pos(e);
-    const lo = i > 0 ? h.pts[i - 1].x + 0.5 : d[0], hi = i < h.pts.length - 1 ? h.pts[i + 1].x - 0.5 : d[1];
+    const i = drag.current, [px, py] = pos(e);
+    const prev = h.pts[i - 1], next = h.pts[i + 1];
+    const lo = prev && Number.isFinite(prev.x) ? prev.x + 0.5 : d[0], hi = next && Number.isFinite(next.x) ? next.x - 0.5 : d[1];
     const x = clamp(ux(px, d), lo, hi);
     onChange(i, { x: B.isTempX(h) ? Math.round(x * 2) / 2 : Math.round(x), y: Math.round(clamp(uy(py), 0, 100)) });
   };
   const end = () => { drag.current = null; };
-  const nowPt = now !== null && !editing ? [clamp(now, d[0], d[1]), evalCurve(h, now)] : null;
+  const nowPt = now !== null && !editing ? [clamp(now, d[0], d[1]), evalCurve({ pts: shown }, now)] : null;
   return html`<svg ref=${svg} class="curve ${editing ? 'editing' : ''}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"
       onPointerDown=${down} onPointerMove=${move} onPointerUp=${end} onPointerCancel=${end}>
     ${[0, 25, 50, 75, 100].map(y => html`<line key=${y} class="grid" x1=${PAD.l} x2=${W - PAD.r} y1=${sy(y)} y2=${sy(y)} />`)}
@@ -389,15 +449,15 @@ function Curve({ h, now = null, editing = false, onChange }) {
     <polyline class="line" points=${line.map(p => p.join(',')).join(' ')} />
     ${nowPt && html`<line class="now" x1=${sx(nowPt[0], d)} x2=${sx(nowPt[0], d)} y1=${PAD.t} y2=${H - PAD.b} />
       <circle class="nowpt" cx=${sx(nowPt[0], d)} cy=${sy(nowPt[1])} r="3.5" />`}
-    ${pts.map(([x, y], i) => html`<circle key=${i} class="pt" data-idx=${i} cx=${x} cy=${y} r=${editing ? 7 : 5} />`)}
+    ${pts.map(([x, y], k) => html`<circle key=${shown[k].i} class="pt" data-idx=${shown[k].i} cx=${x} cy=${y} r=${editing ? 7 : 5} />`)}
   </svg>`;
 }
 
 // ---- the fan editor ----
-// a starting curve for a source the header didn't have before
+// a starting curve for an input the fan didn't have before
 const defaultCurve = h => B.isTempX(h) ? [{ x: 40, y: 30 }, { x: 70, y: 100 }] : [{ x: 0, y: 20 }, { x: 100, y: 100 }];
-// the source changed kind: keep a curve whose x unit still fits, start a
-// fresh one otherwise, none for a fixed speed
+// the input changed kind: keep a curve whose x unit still fits, start a
+// fresh one otherwise, none for a fixed speed or the board's own curve
 function withKind(h, kind) {
   const wasTemp = B.isTempX(h), hadCurve = !B.isFixed(h);
   const n = { ...h, kind, pts: h.pts.map(p => ({ ...p })) };
@@ -408,23 +468,33 @@ function withKind(h, kind) {
   else if (kind === 'gpio') n.pts = n.pts.map(p => ({ x: Math.round(clamp(p.x, 0, 100)), y: p.y }));
   return n;
 }
+// the output changed: an input the new output can't have becomes a fixed
+// speed (a PWM input on a host output, the board's own curve anywhere but its
+// own output), and a host output drops the boost (the receiver's alone)
+function withOutput(h, output) {
+  let n = { ...h, output, out: B.outInfo(output) };
+  if (h.kind === 'board' && n.out.kind !== 'host') n = withKind(n, 'fallback');
+  if (h.kind === 'gpio' && n.out.kind === 'host') n = withKind(n, 'fallback');
+  if (n.out.kind === 'host') n.boost = B.NONE;
+  return n;
+}
 const fmtReading = (kind, v) => v === null ? '—' : kind === 'temp' || kind === 'hwmon' ? `${fmt1(v)} °C` : `${fmt1(v)} %`;
-// what a header reads right now, for the picker: a catalogue spec's reading
+// what a fan reads right now, for the picker: a catalogue spec's reading
 // for the hwmon kinds, the telemetry's otherwise
-const readingFor = (h, slot) => (h.kind === 'hwmon' || h.kind === 'pwm') ? B.sensorReading(h.spec) : B.readingOf(h.kind, slot);
+const readingFor = h => (h.kind === 'hwmon' || h.kind === 'pwm') ? B.sensorReading(h.spec) : B.readingOf(h.kind, h);
 // the picker's rows: the fixed kinds, then the catalogue (a row per sensor
 // and per board pwm output, picking fills the spec), then a row for a
 // temperature file (a typed path — the daemon lists /run/bc250's *_temp files
 // itself, anything else is named here), then an "other" row (the typed spec)
 // only when the catalogue can't stand in for typing: it was cut for size, the
-// header follows a spec it doesn't list, or a chip's pwm outputs are still
+// fan follows a spec it doesn't list, or a chip's pwm outputs are still
 // one grouped entry (following one of them by name)
 const inCatalogue = spec => !!(spec && S.sens && S.sens.some(e => e.spec === spec));
 const isFileSpec = spec => typeof spec === 'string' && spec.startsWith(B.FILE_PREFIX);
 const FILE_ROW = { label: 'Temperature file…', hint: 'a file another program keeps a temperature in',
                    placeholder: '/tmp/some_custom_temp_reading',
-                   help: 'A plain text file holding one number: a temperature in degrees, or in millidegrees the way sysfs writes them (1000 and up). Give the full path. This is for a reading some other program of yours publishes as a file; files under /run/bc250 named *_temp are already listed above. The reading shows once the header is saved and the daemon has read the file.' };
-function pickerRows(h, kinds, slot) {
+                   help: 'A plain text file holding one number: a temperature in degrees, or in millidegrees the way sysfs writes them (1000 and up). Give the full path. This is for a reading some other program of yours publishes as a file; files under /run/bc250 named *_temp are already listed above. The reading shows once the fan is saved and the daemon has read the file.' };
+function pickerRows(h, kinds) {
   const rows = [];
   const inCat = inCatalogue(h.spec);
   const typedFile = h.kind === 'hwmon' && isFileSpec(h.spec) && !inCat;
@@ -433,11 +503,12 @@ function pickerRows(h, kinds, slot) {
   for (const k of kinds) {
     if (k === 'hwmon' || k === 'pwm') continue;
     rows.push({ id: k, kind: k, label: B.SRC_KINDS[k].label, hint: B.SRC_KINDS[k].hint, disabled: k === 'host',
-                on: h.kind === k, value: fmtReading(k, B.readingOf(k, slot)) });
+                on: h.kind === k, value: fmtReading(k, B.readingOf(k, h)) });
   }
   if (kinds.includes('hwmon') && S.sens) {
     for (const e of S.sens) {
       const kind = e.pwm ? 'pwm' : 'hwmon';
+      if (kind === 'pwm' && h.out.kind === 'host' && e.spec === h.output) continue; // following its own output is the board's curve, above
       rows.push({ id: e.spec, kind, spec: e.spec, label: e.pwm ? `${e.chip} ${e.label}` : e.label, hint: e.pwm ? 'board fan header' : e.chip,
                   on: h.kind === kind && h.spec === e.spec, value: fmtReading(kind, e.value) });
     }
@@ -452,28 +523,55 @@ function pickerRows(h, kinds, slot) {
   return rows;
 }
 
-function FanEditor({ slot }) {
-  // the card's header as it was when the editor opened (or when it first
-  // showed up, on a deep link that outran the data)
+// the output picker's options: the board's headers, the receiver's free
+// pins, and (with a daemon) the host's pwm outputs it can drive, plus none —
+// each output another fan has is listed but can't be picked. The fan's own
+// output is always there, whatever the lists say
+function outputOptions(h, fkey) {
+  const daemon = h.route === 'daemon';
+  const taken = new Map(B.cards().filter(c => c.key !== fkey && c.output).map(c => [c.output, c.name || B.outLabel(c.out)]));
+  const opts = [];
+  const add = (v, label) => { if (!opts.some(o => o.v === v)) opts.push({ v, label: taken.has(v) ? `${label} (${taken.get(v)})` : label, dis: taken.has(v) }); };
+  if (daemon) add('', 'None — parked');
+  for (const n of B.headerList()) add(`header${n}`, `Header ${n}`);
+  const pins = S.info && S.info.outPins;
+  if (pins) for (const g of pins) add(`gpio:${g}`, `GPIO${g}`);
+  if (daemon && S.outs) for (const o of S.outs) if (o.writable || o.spec === h.output)
+    add(o.spec, `${o.spec.replace(':', ' ')} — ${o.duty} %${o.rpm !== null ? ` · ${o.rpm} rpm` : ''}${o.writable ? '' : ' (read-only)'}`);
+  if (!opts.some(o => o.v === h.output))
+    opts.push({ v: h.output, label: h.out.kind === 'parked' ? 'None — parked' : B.outLabel(h.out), dis: false });
+  return opts;
+}
+
+function FanEditor({ fkey }) {
+  // the card as it was when the editor opened (or when it first showed up,
+  // on a deep link that outran the data); 'new' starts from a blank fan
   const origRef = useRef(null);
-  if (!origRef.current) origRef.current = B.cardHeader(slot);
+  if (!origRef.current) origRef.current = fkey === 'new' ? B.newFan() : B.cardOf(fkey);
   const orig = origRef.current;
-  const [h, setH] = useState(() => orig && { ...orig, pts: orig.pts.map(p => ({ ...p })) });
-  useEffect(() => { if (!h && orig) setH({ ...orig, pts: orig.pts.map(p => ({ ...p })) }); }, [!!orig]);
+  const copy = o => o && { ...o, out: { ...o.out }, pts: o.pts.map(p => ({ ...p })) };
+  const [h, setH] = useState(() => copy(orig));
+  useEffect(() => { if (!h && orig) setH(copy(orig)); }, [!!orig]);
   const [open, setOpen] = useState(false);
   const [other, setOther] = useState(false); // "Other sensor…" or "Temperature file…" picked: the spec is typed, whatever the catalogue lists
   const dirty = () => JSON.stringify(h) !== JSON.stringify(orig);
   useEffect(() => { leaveGuard = () => !dirty() || confirm('Leave without saving?'); return () => { leaveGuard = null; }; });
   const set = patch => setH(x => ({ ...x, ...patch }));
-  const num = (k, v, lo, hi, round) => { const n = parseFloat(v); if (!isNaN(n)) set({ [k]: clamp(round ? Math.round(n) : n, lo, hi) }); };
-  // the receiver's free pins (plus the configured one, should it not be free), or null for a typed pin
+  // the receiver's free input pins (plus the configured one, should it not be free), or null for a typed pin
   const pins = S.info && S.info.pins;
   const pinOpts = h && pins && (pins.includes(h.gpio) ? pins : [...pins, h.gpio].sort((a, b) => a - b));
   const pinSelect = useSteadySelect(pinOpts ? `${pinOpts.join()}=${h.gpio}` : '', () => pinOpts && html`
           <select value=${h.gpio} onChange=${e => set({ gpio: +e.target.value })}>${pinOpts.map(g => html`<option key=${g} value=${g}>GPIO${g}</option>`)}</select>`);
-  if (!h) return html`<${Header} back="Fans" /><div class="empty">This header is gone.</div>`;
+  const outOpts = h ? outputOptions(h, fkey) : [];
+  const outSelect = useSteadySelect(h ? JSON.stringify([outOpts, h.output]) : '', () => h && html`
+          <select value=${h.output} onChange=${e => { const v = e.target.value; setH(x => withOutput(x, v)); }}>
+            ${outOpts.map(o => html`<option key=${o.v} value=${o.v} disabled=${o.dis}>${o.label}</option>`)}</select>`);
+  if (!h) return html`<${Header} back="Fans" /><div class="empty">${fkey === 'new' ? 'No free output for another fan.' : 'This fan is gone.'}</div>`;
   const daemon = h.route === 'daemon';
-  const kinds = daemon ? ['fallback', 'gpio', ...B.HOST_KINDS] : h.kind === 'host' ? ['host', 'fallback', 'gpio'] : ['fallback', 'gpio'];
+  const hostOut = h.out.kind === 'host';
+  const kinds = !daemon ? (h.kind === 'host' ? ['host', 'fallback', 'gpio'] : ['fallback', 'gpio'])
+    : hostOut ? ['board', 'fallback', ...B.HOST_KINDS]
+    : ['fallback', 'gpio', ...B.HOST_KINDS];
   const setPt = (i, p) => setH(x => { const pts = x.pts.map(q => ({ ...q })); pts[i] = { ...pts[i], ...p }; return { ...x, pts }; });
   const addPt = () => setH(x => {
     const p = x.pts.map(q => ({ ...q })), d = xDomain(x);
@@ -495,16 +593,27 @@ function FanEditor({ slot }) {
                  : (h.kind === 'hwmon' || h.kind === 'pwm') && h.spec ? h.spec : cur.label;
   const typed = (h.kind === 'hwmon' || h.kind === 'pwm') && (other || !curEntry); // a spec the catalogue doesn't list, or chosen to type
   const typedFile = typed && h.kind === 'hwmon' && isFileSpec(h.spec); // ... and it is a file path
-  return html`<${Header} back="Fans" title=${(orig && orig.name) || `header${slot + 1}`} />
+  const title = fkey === 'new' ? 'New fan' : (orig && orig.name) || B.outLabel(h.out);
+  const del = () => { if (confirm(`Delete ${title}? ${daemon ? 'It goes from the config.' : 'The receiver stops driving its output.'}`)) B.deleteFan(fkey); };
+  return html`<${Header} back="Fans" title=${title} />
     <div class="list">
-      ${daemon && html`<div class="card"><input class="text" type="text" maxlength="16" autocomplete="off" aria-label="Name" value=${h.name} onInput=${e => set({ name: e.target.value })} /></div>`}
+      ${daemon && html`<div class="card"><input class="text" type="text" maxlength=${B.NAME_CHARS} autocomplete="off" aria-label="Name" placeholder="name" value=${h.name} onInput=${e => set({ name: e.target.value })} /></div>`}
+      <div class="card">
+        <h2>Output</h2>
+        <label class="frow"><span>Drives</span>${outSelect}</label>
+        ${h.out.kind === 'gpio' && !(S.info && S.info.outPins) && html`<label class="frow"><span>Pin</span>
+          <${NumField} value=${h.out.num} min=${0} max=${48} step=${1} round=${true} onValue=${v => { if (v !== null) setH(x => withOutput(x, `gpio:${clamp(v, 0, 48)}`)); }} /><small>a free receiver pin</small></label>`}
+        <div class="note">${hostOut ? 'A fan header on the host itself, driven by its daemon. It goes back to the board’s own curve whenever the daemon stops.'
+          : h.out.kind === 'parked' ? 'Nothing: the fan keeps its settings and drives no output.'
+          : 'A header on the receiver, or one of its pins.'}</div>
+      </div>
       <div class="card">
         <button class="fold" onClick=${() => setOpen(o => !o)}>
           <h2>Follows</h2>
-          ${!open && html`<span class="pick">${curLabel}</span><span class="rd on">${fmtReading(h.kind, readingFor(h, slot))}</span>`}
+          ${!open && html`<span class="pick">${curLabel}</span><span class="rd on">${fmtReading(h.kind, readingFor(h))}</span>`}
           <${Icon} d=${open ? I.up : I.down} size=${18} />
         </button>
-        ${open && html`<div class="srcs">${pickerRows(h, kinds, slot).map(r => html`<button key=${r.id} class="src ${r.on ? 'on' : ''}" disabled=${r.disabled}
+        ${open && html`<div class="srcs">${pickerRows(h, kinds).map(r => html`<button key=${r.id} class="src ${r.on ? 'on' : ''}" disabled=${r.disabled}
             onClick=${() => { setH(x => { const n = withKind(x, r.kind);
                               if (r.spec) n.spec = r.spec;                                                                       // a listed sensor
                               else if (r.file) n.spec = isFileSpec(x.spec) && !inCatalogue(x.spec) ? x.spec : B.FILE_PREFIX;     // keep a path being typed, start an empty one otherwise
@@ -515,43 +624,47 @@ function FanEditor({ slot }) {
             <span class="rd">${r.value}</span></button>`)}</div>`}
         ${h.kind === 'gpio' && (pinOpts
           ? html`<label class="frow"><span>Pin</span>${pinSelect}</label>`
-          : html`<label class="frow"><span>Pin</span><input type="number" min="0" max="48" step="1" value=${h.gpio} onInput=${e => { const v = parseInt(e.target.value, 10); if (!isNaN(v)) set({ gpio: v }); }} /><small>a free receiver pin</small></label>`)}
+          : html`<label class="frow"><span>Pin</span><${NumField} value=${h.gpio} min=${0} max=${48} step=${1} round=${true} onValue=${v => { if (v !== null) set({ gpio: clamp(v, 0, 48) }); }} /><small>a free receiver pin</small></label>`)}
         ${typedFile ? html`<label class="frow"><span>file:</span>
           <input class="text" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder=${FILE_ROW.placeholder}
             value=${h.spec.slice(B.FILE_PREFIX.length)} onInput=${e => set({ spec: B.FILE_PREFIX + e.target.value.trim() })} /></label>
           <div class="note">${FILE_ROW.help}</div>`
         : typed && html`<label class="frow"><span>${h.kind === 'pwm' ? 'Header' : 'Sensor'}</span>
           <input class="text" type="text" autocomplete="off" placeholder=${cur.hint} value=${h.spec || ''} onInput=${e => set({ spec: e.target.value.trim() })} /></label>`}
+        ${h.kind === 'board' && html`<div class="note">The board runs this output with its own curve, as it would with no daemon at all. Pick an input to have the host run it instead.</div>`}
       </div>
-      ${h.kind === 'host' && html`<div class="card"><div class="note">This header follows a curve the host runs; with the host off it sits at its fallback speed. Pick Fixed speed or PWM input for something the receiver runs on its own.</div></div>`}
+      ${h.kind === 'host' && html`<div class="card"><div class="note">This fan follows a curve the host runs; with the host off it sits at its fallback speed. Pick Fixed speed or PWM input for something the receiver runs on its own.</div></div>`}
       ${!B.isFixed(h) && h.kind !== 'host' && html`<div class="card">
         <h2>Curve</h2>
         <${Curve} h=${h} editing=${true} onChange=${setPt} />
         <div class="pts">${h.pts.map((p, i) => html`<div key=${i} class="prow">
           <label>${i + 1}</label>
-          <input type="number" aria-label=${`point ${i + 1} ${B.isTempX(h) ? 'temperature' : 'input'}`} step=${B.isTempX(h) ? 0.5 : 1} value=${p.x} onInput=${e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setPt(i, { x: v }); }} /><span class="unit">${unit}</span>
-          <input type="number" aria-label=${`point ${i + 1} speed`} min="0" max="100" step="1" value=${p.y} onInput=${e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setPt(i, { y: v }); }} /><span class="unit">%</span>
+          <${NumField} aria=${`point ${i + 1} ${B.isTempX(h) ? 'temperature' : 'input'}`} step=${B.isTempX(h) ? 0.5 : 1} min=${0} max=${B.isTempX(h) ? B.TEMP_MAX : 100} value=${p.x} onValue=${v => setPt(i, { x: v === null ? v : clamp(v, 0, B.isTempX(h) ? B.TEMP_MAX : 100) })} /><span class="unit">${unit}</span>
+          <${NumField} aria=${`point ${i + 1} speed`} min=${0} max=${100} step=${1} value=${p.y} onValue=${v => setPt(i, { y: v })} /><span class="unit">%</span>
           ${h.pts.length > 1 ? html`<button class="x" aria-label="remove point" onClick=${() => rmPt(i)}>×</button>` : html`<span></span>`}
         </div>`)}</div>
         ${h.pts.length < B.MAX_POINTS && html`<button class="rowlink add" onClick=${addPt}><${Icon} d=${I.plus} size=${16} /><span>add a point</span></button>`}
-        <label class="frow"><span>Ramp down</span><input type="number" min="0" max="255" step="0.5" value=${h.ramp} onInput=${e => num('ramp', e.target.value, 0, 255)} /><small>%/s, 0 = at once</small></label>
-        ${B.hasHyst(h) && html`<label class="frow"><span>Hysteresis</span><input type="number" min="0" max="50" step="0.5" value=${h.hyst} onInput=${e => num('hyst', e.target.value, 0, 50)} /><small>°C before slowing down</small></label>`}
+        <label class="frow"><span>Ramp down</span><${NumField} min=${0} max=${255} step=${0.5} value=${h.ramp} onValue=${v => { if (v !== null) set({ ramp: clamp(v, 0, 255) }); }} /><small>%/s, 0 = at once</small></label>
+        ${B.hasHyst(h) && html`<label class="frow"><span>Hysteresis</span><${NumField} min=${0} max=${50} step=${0.5} value=${h.hyst} onValue=${v => { if (v !== null) set({ hyst: clamp(v, 0, 50) }); }} /><small>°C before slowing down</small></label>`}
       </div>`}
-      ${h.fallback !== null && h.fallback !== undefined && html`<div class="card">
+      ${h.kind !== 'board' && html`<div class="card">
         <h2>Fallback speed</h2>
         <${Slider} value=${h.fallback} live=${v => set({ fallback: v })} done=${v => set({ fallback: v })} label=${v => `${v} %`} />
-        <div class="note">What this header runs when nothing drives it: off, or before the host connects.</div>
+        <div class="note">${hostOut ? 'What this fan runs when its input can’t be read.'
+          : B.isFixed(h) ? 'The speed this fan runs at.'
+          : 'What this fan runs when its input can’t be read — and, on the receiver, whenever nothing drives it: off, or before the host connects.'}</div>
       </div>`}
-      ${daemon && html`<div class="card"><h2>Power-on boost</h2>
+      ${daemon && B.hasBoost(h) && html`<div class="card"><h2>Power-on boost</h2>
         <label class="frow"><span class="grow">Speed after power-on</span>
-          <input type="number" min="0" max="100" step="1" placeholder="—" value=${h.boost === B.NONE ? '' : h.boost}
-            onInput=${e => set({ boost: e.target.value === '' ? B.NONE : clamp(Math.round(+e.target.value), 0, 100) })} /><small>%</small></label>
+          <${NumField} min=${0} max=${100} step=${1} placeholder="—" round=${true} blank=${true} value=${h.boost === B.NONE ? null : h.boost}
+            onValue=${v => set({ boost: v === null ? B.NONE : clamp(v, 0, 100) })} /><small>%</small></label>
         ${B.hasBoostSecs(h) ? html`<label class="frow"><span class="grow">For the first</span>
-          <input type="number" min="0" max="255" step="1" value=${h.boostSecs} onInput=${e => num('boostSecs', e.target.value, 0, 255, true)} /><small>s</small></label>`
-        : html`<div class="note">Blank: this header starts at its fallback speed instead.</div>`}
+          <${NumField} min=${0} max=${255} step=${1} round=${true} value=${h.boostSecs} onValue=${v => { if (v !== null) set({ boostSecs: clamp(v, 0, 255) }); }} /><small>s</small></label>`
+        : html`<div class="note">Blank: this fan starts at its fallback speed instead.</div>`}
       </div>`}
       <div class="btns two"><button class="minor" onClick=${back}>Cancel</button>
-        <button class="primary" disabled=${saving} onClick=${() => B.saveHeader(slot, h)}>Save</button></div>
+        <button class="primary" disabled=${saving} onClick=${() => B.saveFan(fkey, h)}>${fkey === 'new' ? 'Add' : 'Save'}</button></div>
+      ${fkey !== 'new' && html`<button class="minor danger" disabled=${saving} onClick=${del}>Delete this fan</button>`}
     </div>`;
 }
 
@@ -628,7 +741,7 @@ function ReceiverScreen() {
   }
   if (S.fans) {
     rows.push(['Uptime', fmtUptime(S.fans.uptime)]);
-    rows.push(['Fan headers', S.fans.active ? `${S.fans.h.filter(h => h.wired).length} wired` : 'none']);
+    rows.push(['Fan outputs', S.fans.active ? `${S.fans.h.filter(h => h.wired).length} driven` : 'off']);
     rows.push(['Host link', S.fans.host ? (S.fans.telem ? 'connected' : 'connected, no telemetry') : 'absent']);
   }
   return html`<div class="list">
@@ -662,7 +775,7 @@ function App() {
   useEffect(() => { B.whenSaved(key => { if (route.editor === key) { skipGuard = true; back(); } }); }, []);
   const tokenBox = hasBt() && (S.editToken || !B.token());
   if (r.editor !== null && r.tab === 'fans')
-    return html`<div class="screen"><${FanEditor} key=${r.editor} slot=${r.editor} /></div>`;
+    return html`<div class="screen"><${FanEditor} key=${r.editor} fkey=${String(r.editor)} /></div>`;
   if (r.editor === 'p' && r.tab === 'power')
     return html`<div class="screen"><${PowerEditor} /></div>`;
   const body = r.tab === 'power' ? html`<${PowerScreen} />` : r.tab === 'fans' ? html`<${FansScreen} />`
@@ -673,17 +786,17 @@ function App() {
     ${tokenBox && html`<div class="list"><${TokenCard} /></div>`}
     ${body}
     <${TabBar} tab=${r.tab} />
-    ${r.sheet && B.connected() && S.psu >= 1 && html`<${PowerSheet} />`}
+    ${r.sheet && B.connected() && S.psu >= 1 && !noSwitch() && html`<${PowerSheet} />`}
   </div>`;
 }
 
-// the root entry: back from here leaves the app. ?tab=fans (&edit=<slot>,
-// &sheet; ?tab=power&edit=p) opens elsewhere — for the demo, and for a
-// bookmark straight to a tab
+// the root entry: back from here leaves the app. ?tab=fans (&edit=<card key>,
+// e.g. f1 or new; &sheet; ?tab=power&edit=p) opens elsewhere — for the demo,
+// and for a bookmark straight to a tab
 const q = new URLSearchParams(location.search);
 const ed = q.get('edit');
 go({ tab: TABS.includes(q.get('tab')) ? q.get('tab') : 'power', editor: null, sheet: false }, true);
 // an editor or the sheet deep-linked sits on top of its tab, so back has somewhere to go
-if (ed !== null || q.has('sheet')) go({ editor: ed === null ? null : ed === 'p' ? ed : parseInt(ed, 10), sheet: q.has('sheet') });
+if (ed !== null || q.has('sheet')) go({ editor: ed, sheet: q.has('sheet') });
 B.boot();
 render(html`<${App} />`, document.getElementById('app'));

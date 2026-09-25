@@ -26,9 +26,9 @@ static uint32_t g_lastSend = 0;
 static bool g_sent = false; // has this request gone out even once yet
 
 // the message queue (post/tick): a few fixed slots, oldest out first. Sized
-// for the dashboard's traffic — a config edit is ~200 bytes and rare, a watch
-// keepalive one byte every ten seconds — so a full queue means the link task
-// has stalled, not that the phone is fast.
+// for the dashboard's traffic — a config edit is a few hundred bytes and rare,
+// a watch keepalive one byte every ten seconds — so a full queue means the
+// link task has stalled, not that the phone is fast.
 static const int MSG_SLOTS = 3;
 struct Msg
 {
@@ -67,7 +67,7 @@ static void sendMessage()
     // static, not stack: only the link task ever runs this, and a queued
     // config edit is a couple of hundred bytes the led_rx stack needn't carry
     static Msg m;
-    static uint8_t f[4 + MSG_MAX + 1];
+    static uint8_t f[5 + MSG_MAX + 1];
     bool have;
     taskENTER_CRITICAL(&g_mux);
     have = g_msgCount > 0;
@@ -82,19 +82,21 @@ static void sendMessage()
     if (!have)
         return;
 
-    // SYNC0 MSG_SYNC kind(1) len(1) payload checksum — see protocol.hpp
+    // SYNC0 MSG_SYNC kind(1) len(2, little-endian) payload checksum — see
+    // protocol.hpp
     f[0] = proto::SYNC0;
     f[1] = proto::MSG_SYNC;
     f[2] = m.kind;
-    f[3] = (uint8_t)m.len;
-    uint8_t sum = m.kind ^ (uint8_t)m.len;
+    f[3] = (uint8_t)(m.len & 0xFF);
+    f[4] = (uint8_t)(m.len >> 8);
+    uint8_t sum = m.kind ^ f[3] ^ f[4];
     for (uint16_t i = 0; i < m.len; i++)
     {
-        f[4 + i] = m.payload[i];
+        f[5 + i] = m.payload[i];
         sum ^= m.payload[i];
     }
-    f[4 + m.len] = sum;
-    link::write(f, 5 + m.len);
+    f[5 + m.len] = sum;
+    link::write(f, 6 + m.len);
 }
 
 void request(uint8_t req)

@@ -7,4 +7,10 @@
 namespace led
 {
 void start();
+
+// whether the daemon is streaming: a live pixel frame within the host
+// timeout. The host-is-up signal for a receiver with no power switch to
+// watch the PSU with (ble.cpp) — the link can't say it on a UART, where
+// link::hostPresent() is always true.
+bool hostLive();
 } // namespace led

@@ -206,7 +206,7 @@ public:
             e += "}";
             if (j.size() + e.size() + 2 > WIRE_MAX)
             {
-                // a GATT attribute's ceiling: the phone sees the first scenes
+                // the receiver's buffer: the phone sees the first scenes
                 if (!warnedSize_)
                     fprintf(stderr, "strip: too many scene rules for the dashboard's %d bytes "
                                     "— showing the first %zu\n", WIRE_MAX,
@@ -221,7 +221,7 @@ public:
     }
 
 private:
-    static const int WIRE_MAX = 512; // a GATT attribute's ceiling = the receiver's buffer
+    static const int WIRE_MAX = proto::DASH_STRIP_CONFIG_MAX; // the receiver's buffer (the phone pages past 512)
 
     struct Scene
     {

@@ -22,7 +22,7 @@ bool load(nvs_handle_t nvs, const char* key, const char* baseKey, const uint8_t*
 {
     // the base is compared first, into a stack copy, so a mismatch (or a
     // blob of another length — an older firmware's layout) leaves out
-    // untouched. Sized for the largest override (the fans' 128-byte
+    // untouched. Sized for the largest override (the fans' 150-byte
     // standalone blob); only ever called from a feature's start().
     uint8_t saved[256];
     if (len > sizeof saved)

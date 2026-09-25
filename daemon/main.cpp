@@ -15,7 +15,9 @@
 #include "power_remote.hpp"
 #include "strip_remote.hpp"
 #include "motion.hpp"
+#include "pwmout.hpp"
 #include "rules.hpp"
+#include "sdnotify.hpp"
 #include "steam.hpp"
 #include "serial_sink.hpp"
 #include "virtual_sink.hpp"
@@ -221,10 +223,12 @@ static void usage(const char* prog)
             "                                         (power_on/shutdown) to the viewer\n"
             "       %s --list                         list available effects\n"
             "       %s --steam-status                 dump Steam download detection\n"
-            "       %s <config> --fan-status          dump the fan headers' sources and duties\n"
+            "       %s <config> --fan-status          dump the fans' inputs, outputs and duties\n"
             "       %s --config-get <config> <path>   print a config value\n"
-            "       %s --check <config>               validate a config without running it\n",
-            prog, prog, prog, prog, prog, prog, prog, prog);
+            "       %s --check <config>               validate a config without running it\n"
+            "       %s --release-fans                 hand every host fan output back to the\n"
+            "                                         board (the service's ExecStopPost)\n",
+            prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char** argv)
@@ -275,6 +279,13 @@ int main(int argc, char** argv)
     if (argc == 3 && strcmp(argv[1], "--check") == 0)
         return cfgcheck::run(argv[2]);
 
+    // ./led --release-fans: hand back every host fan output the claims record
+    // still holds (daemon/pwmout.hpp) — the unit's ExecStopPost, which runs
+    // after ANY stop, the ones no code of ours survives (a crash, SIGKILL, the
+    // watchdog) included
+    if (argc == 2 && strcmp(argv[1], "--release-fans") == 0)
+        return pwmout::releaseCommand();
+
     // ./led <config> --preview <slot>: record a receiver slot and play it back
     // to the sinks, exactly as the receiver will — so the viewer previews the
     // real recording (sequence, loop and hold included), not just the live
@@ -315,12 +326,20 @@ int main(int argc, char** argv)
     cfgedit::Writer cfgWriter;
     cfgWriter.open(argv[1]);
 
+    // the host's own fan outputs (daemon/pwmout.hpp): every pwmN_enable this
+    // daemon takes over goes through here, and is handed back here — on every
+    // return from main (its destructor), on a reload that drops it, and by the
+    // unit's ExecStopPost for the exits no code runs on. Declared before the
+    // controller that drives through it, so it outlives it. Opened below, once
+    // the link is up; --fan-status never gets it
+    pwmout::Claims claims;
+
     // the fan controller's half on this side (daemon/fans.hpp): the "fans"
-    // block, validated up front like the rules — a bad header stops the daemon
+    // block, validated up front like the rules — a bad fan stops the daemon
     // here rather than running the fans on a half-read config
     fans::Controller fanCtl;
 
-    if (!fanCtl.load(cfg, &cfgWriter))
+    if (!fanCtl.load(cfg, &cfgWriter, fanStatus ? nullptr : &claims))
         return 1;
 
     // ./led <config> --fan-status: what each header resolves to right now
@@ -382,10 +401,33 @@ int main(int argc, char** argv)
     if (previewMode)
         return runPreview(cfg, strip, sinks, argv[3]);
 
+    // the link is up (a port that won't open has exited above): this daemon
+    // may drive the host's fan outputs now — unless another one already does.
+    // The lock is taken on the first host output a fan drives (fans.hpp
+    // driveHost); only a record an earlier run left is handed back right away
+    if (pwmout::Claims::leftover())
+        claims.open();
+
+    std::unique_ptr<Effect> effect;
+
+    // while a recording streams (seconds, paced), the receiver sees no pixel
+    // frames and would blank the strip at its host timeout: re-send the last
+    // rendered frame between batches (same anim id, so no crossfade) — and
+    // keep systemd's watchdog fed, which a long upload would otherwise starve
+    auto keepalive = [&]()
+    {
+        sdnotify::watchdog();
+        if (!effect)
+            return; // nothing rendered yet: the canvas holds no frame
+        const std::vector<uint8_t>& frame = strip.endFrame();
+        for (auto& s : sinks)
+            s->send(frame);
+    };
+
     // record the power-on/shutdown effects and stream them for the receiver
     // to replay (the receiver renders nothing itself), and push the fans'
     // standalone settings
-    recordAndUpload(cfg, strip, sinks);
+    recordAndUpload(cfg, strip, sinks, keepalive);
     fanCtl.pushStandalone(sinks);
     pwrRemote.pushSettings(sinks);
     fanCtl.pushConfig(sinks); // for the BLE dashboard (daemon/fans.hpp)
@@ -409,19 +451,6 @@ int main(int argc, char** argv)
     double recordDue = 0; // 0 = nothing pending
     bool restartEffect = false; // a scene's settings changed under the running effect
     int activeRule = -1; // index into rules of the rule that started the effect (rules mode)
-    std::unique_ptr<Effect> effect;
-
-    // while a recording streams (seconds, paced), the receiver sees no pixel
-    // frames and would blank the strip at its host timeout: re-send the last
-    // rendered frame between batches (same anim id, so no crossfade)
-    auto keepalive = [&]()
-    {
-        if (!effect)
-            return; // nothing rendered yet: the canvas holds no frame
-        const std::vector<uint8_t>& frame = strip.endFrame();
-        for (auto& s : sinks)
-            s->send(frame);
-    };
 
     // live reload (README "Configuration"): the file's mtime as loaded, and as
     // last seen by the watch in the rules loop. A dashboard edit the fan
@@ -435,6 +464,10 @@ int main(int argc, char** argv)
     auto fansTick = [&]()
     {
         double now = now_seconds();
+
+        // every pass of either loop comes through here: systemd's watchdog
+        // sees the loop alive (rate-limited inside)
+        sdnotify::watchdog();
 
         uint8_t kind;
         std::vector<uint8_t> payload;
@@ -572,6 +605,7 @@ int main(int argc, char** argv)
                 return 1;
         }
 
+        claims.releaseAll();
         notifyShutdown();
         return 0;
     }
@@ -609,7 +643,7 @@ int main(int argc, char** argv)
         fans::Controller freshFans;
         std::vector<Rule> freshRules;
         if (!fresh.load(cfgPath) || !cfgcheck::retiredKeys(fresh) ||
-            !freshFans.load(fresh, &cfgWriter) || !loadRules(fresh, freshRules))
+            !freshFans.load(fresh, &cfgWriter, &claims) || !loadRules(fresh, freshRules))
         {
             fprintf(stderr, "config: reload failed — keeping the running config; "
                             "fix the file and save again\n");
@@ -795,6 +829,10 @@ int main(int argc, char** argv)
         }
     }
 
+    // the host's fan outputs go back to the board first — they are ours only
+    // while this loop runs (the destructor would too; saying it here keeps
+    // the order plain)
+    claims.releaseAll();
     notifyShutdown();
     return 0;
 }

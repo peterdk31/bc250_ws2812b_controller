@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "protocol.hpp"
 #include "util.hpp"
 
 namespace dash
@@ -18,11 +19,14 @@ struct Entry
     uint32_t ms = 0; // millis() of the last arrival, 0 = never
 };
 
-static uint8_t g_fanCfg[512];
-static uint8_t g_fanTel[384];
-static uint8_t g_stripCfg[512];
-static uint8_t g_fanSens[512];
-static uint8_t g_pwrCfg[256];
+static uint8_t g_fanCfg[proto::DASH_FAN_CONFIG_MAX];
+static uint8_t g_fanTel[proto::DASH_FAN_TELEM_MAX];
+static uint8_t g_stripCfg[proto::DASH_STRIP_CONFIG_MAX];
+static uint8_t g_fanSens[proto::DASH_FAN_SENSORS_MAX];
+static uint8_t g_pwrCfg[proto::DASH_PWR_CONFIG_MAX];
+
+static_assert(proto::DASH_FAN_CONFIG_MAX <= MAX_LEN && proto::DASH_FAN_SENSORS_MAX <= MAX_LEN,
+              "MAX_LEN is the largest slot");
 
 static Entry g_slots[SLOTS] = {
     {g_fanCfg, sizeof g_fanCfg},
@@ -33,7 +37,7 @@ static Entry g_slots[SLOTS] = {
 };
 
 // one lock for all of them: the writers are a single task, the readers a
-// 250 ms poll, and a copy is a few hundred bytes
+// 250 ms poll and the phone's page reads, and a copy is at most 2 KB
 static portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 
 void set(Slot slot, const uint8_t* payload, uint16_t len)
@@ -41,12 +45,15 @@ void set(Slot slot, const uint8_t* payload, uint16_t len)
     if (slot >= SLOTS)
         return;
     Entry& e = g_slots[slot];
-    if (len == 0 || len > e.cap)
+    // an empty payload clears the slot: the daemon has nothing there (a
+    // config with no fans block), which the phone shows as it shows "no daemon"
+    if (len > e.cap)
         return;
 
     uint32_t now = millis();
     taskENTER_CRITICAL(&g_mux);
-    memcpy(e.buf, payload, len);
+    if (len)
+        memcpy(e.buf, payload, len);
     e.len = len;
     e.seq++;
     e.ms = now ? now : 1;

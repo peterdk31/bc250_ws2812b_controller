@@ -699,4 +699,11 @@ void start()
     // to influence the LEDs should queue to this task, not poke its state.
     xTaskCreate(taskMain, "led_rx", 6144, nullptr, 5, nullptr);
 }
+
+bool hostLive()
+{
+    // read from another task: a bool and an aligned 32-bit word, each read
+    // whole, and a torn pair only misjudges one poll
+    return hostSeen && millis() - lastFrameMs <= HOST_TIMEOUT_MS;
+}
 } // namespace led

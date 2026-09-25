@@ -60,39 +60,48 @@
         "name": "BC250",
         "token": ""
     },
-    "fans": {
-        "header1": {
+    "vram_temps": false,
+    "vram_temps_interval_ms": 3000,
+    "fans": [
+        {
             "name": "pump",
-            "source": "fallback",
+            "output": "header1",
+            "input": "fallback",
+            "fallback": 65,
             "boost": 100,
-            "boost_seconds": 5,
-            "fallback": 65
+            "boost_seconds": 5
         },
-        "header2": {
+        {
             "name": "radiator",
-            "source": "temp",
+            "output": "header2",
+            "input": "temp",
             "curve": "45:35 60:55 75:100",
             "hysteresis": 3,
             "ramp": 5,
-            "boost": null,
             "fallback": 100
         },
-        "header3": {
+        {
             "name": "exhaust",
-            "source": "gpio:0",
+            "output": "header3",
+            "input": "gpio:0",
             "curve": "0:25 100:80",
             "ramp": 0,
-            "boost": null,
             "fallback": 100
         },
-        "header4": {
+        {
             "name": "intake",
-            "source": "gpu_load",
+            "output": "header4",
+            "input": "gpu_load",
             "curve": "0:20 40:20 100:60",
-            "boost": null,
             "fallback": 60
+        },
+        {
+            "name": "board fan",
+            "output": "nct6686:pwm2",
+            "input": "",
+            "fallback": 100
         }
-    },
+    ],
     "strip": {
         "leds": 33,
         "pin": 4,

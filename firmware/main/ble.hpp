@@ -10,6 +10,9 @@
 // power on, the graceful ask-the-host shutdown, and the hold's hard cut (for
 // a machine that crashed: the one moment a remote power button earns its
 // keep) — and a status characteristic (read/notify) with the coarse PSU state.
+// Optional: on a receiver with no power switch the power ops are refused and
+// the status reports whether the daemon is streaming instead (led::hostLive),
+// so the dashboard alone still reaches a phone.
 //
 // The *dashboard* (fan.hpp "the BLE dashboard's view"): what each fan header
 // runs and why, the daemon's readings while it is up (CPU temperature and
@@ -34,13 +37,14 @@
 // — a board that hasn't opted in spends no RAM on this.
 //
 // Runs as its own task beside the NimBLE host task; its seams into the rest
-// of the firmware are pwr::psuState() / pwr::remoteRequest() for the remote,
+// of the firmware are pwr::psuState() / pwr::remoteRequest() for the remote
+// (led::hostLive() standing in for the first without a power switch),
 // and fan::snapshot() / dash::get() plus hostreq::post() for the dashboard. Removing the feature is deleting ble.*
 // and unhooking those lines.
 namespace ble
 {
-// bring the feature up (no-op unless blecfg enables it AND the power switch
-// is active — there is nothing to remote-control without it). Called from
-// app_main last: it is the slowest bring-up and the least critical.
+// bring the feature up (no-op unless blecfg enables it; the power switch is
+// optional, see above). Called from app_main last: it is the slowest
+// bring-up and the least critical.
 void start();
 } // namespace ble

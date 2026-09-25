@@ -46,12 +46,14 @@ STRIP_PIN ?= $(or $(shell $(CONFIG_GET) strip.pin 2>/dev/null),4)
 # once the receiver reboots — it cuts the machine's power — so only an
 # explicit "enabled": false may do it (pwrcfg.py exits 3 for "no block").
 
-# The fans' standalone part (which headers there are, each one's fallback
-# duty, boost and boost length, ramp, and a "gpio:N" header's input pin and
-# curve, which the receiver runs itself) is what fancfg holds; host curves
-# and the hysteresis are the daemon's. The header → GPIO map is the carrier board's (tools/pincheck.py
-# FAN_PINS; "pins" in the block overrides it for a hand-wired build). Each
-# encoder's --list-pins feeds the other's collision check below.
+# The fans' standalone part (the fans on receiver outputs — each one's output,
+# fallback duty, boost and boost length, ramp, and a "gpio:N" input's pin and
+# curve, which the receiver runs itself) is what fancfg holds, along with the
+# board's header → GPIO map (tools/pincheck.py FAN_PINS; a hand-wired build
+# names its pins as "gpio:N" outputs instead); host curves, the hysteresis
+# and the fans on host outputs are the daemon's. Every output moves at
+# runtime too (the daemon's push, the phone). Each encoder's --list-pins
+# feeds the other's collision check below.
 FAN_PINS_USED = $(if $(CONFIG),$(shell python3 tools/fancfg.py --config "$(CONFIG)" --target $(TARGET) --list-pins 2>/dev/null))
 
 
@@ -66,7 +68,7 @@ PWR_PINS_USED = $(if $(CONFIG),$(shell python3 tools/pwrcfg.py --config "$(CONFI
 comma := ,
 FAN_AVOID = $(foreach p,$(subst $(comma), ,$(PWR_PINS_USED)),--avoid "$(p):claimed by the power switch (the config's power_switch block)") \
 	$(if $(KNOWN),--avoid-hard)
-PWR_AVOID = $(foreach p,$(subst $(comma), ,$(FAN_PINS_USED)),--avoid "$(p):a fan header's output or a gpio source's input (the config's fans block)") \
+PWR_AVOID = $(foreach p,$(subst $(comma), ,$(FAN_PINS_USED)),--avoid "$(p):a fan's output or gpio input (the config's fans block)") \
 	$(if $(KNOWN),--avoid-hard)
 flash flash-source: KNOWN := 1
 
@@ -115,6 +117,7 @@ DOCKER_USER = $(if $(filter docker,$(CONTAINER)),--user $${SUDO_UID:-$$(id -u)}:
 IDF_GENERATED = firmware/managed_components firmware/dependencies.lock
 
 HEADERS = daemon/output/strip.hpp daemon/config_loader.hpp daemon/config_check.hpp daemon/fans.hpp vendor/json.hpp \
+          daemon/pwmout.hpp daemon/sdnotify.hpp common/fancurve.hpp common/fanwire.hpp \
           daemon/config_edit.hpp daemon/strip_remote.hpp daemon/power_remote.hpp \
           daemon/effects/effect.hpp daemon/rules/condition.hpp daemon/color/color.hpp \
           daemon/sources/hwmon.hpp daemon/sources/pmbus.hpp daemon/sources/smu.hpp daemon/sources/steam.hpp \
@@ -207,6 +210,9 @@ uninstall:
 	rm -f /etc/udev/rules.d/99-led-controller.rules
 	rm -f /etc/modules-load.d/led-controller.conf
 	rm -rf /etc/led-controller
+	@# the host fan outputs' claims record (daemon/pwmout.hpp): the stop above
+	@# ran ExecStopPost, which handed every output back and emptied it
+	rm -rf /var/lib/led-controller
 	systemctl daemon-reload
 	-udevadm control --reload-rules
 
@@ -337,12 +343,12 @@ FANCFG_OFF = $(call part_off,fancfg)
 FANCFG_BIN = firmware/dist/fancfg.bin
 # companion to PWRCFG_RESOLVE for the fan controller: encode the config's
 # "fans" block into $(FANCFG_BIN) and set $$fan to the extra offset+file pair
-# for esptool write_flash. Always, when there is a config to read (no block or
-# no header = written off); with no config at all the chip's fancfg is
-# left alone. As with pwrcfg.py, fancfg.py is the only place a mistake can be
-# caught — the firmware silently treats a bad pin as "not wired" and that fan
-# just never spins — so it validates the block like the daemon does, and the
-# pins against the chip and the other features.
+# for esptool write_flash. Always, when there is a config to read (no block =
+# written off); with no config at all the chip's fancfg is left alone. As
+# with pwrcfg.py, fancfg.py is where a mistake is caught before it reaches the
+# board — the receiver refuses a pin it can't drive and that fan just never
+# spins — so it validates the block like the daemon does, and the pins
+# against the chip and the other features.
 FANCFG_RESOLVE = fan=""; \
 	if [ -n "$(CONFIG)" ]; then \
 		[ -n "$(FANCFG_OFF)" ] || { echo "no fancfg offset found in firmware/partitions.csv"; exit 1; }; \

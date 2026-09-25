@@ -98,7 +98,7 @@ static const Field TOP[] = {
     {"shutdown", Kind::Obj, "the shutdown recording: an effect or a sequence"},
     {pwrcfg::Remote::BLOCK, Kind::Obj, "the ATX power switch"},
     {"ble_remote", Kind::Obj, "the phone's power button and dashboard"},
-    {fans::Controller::BLOCK, Kind::Obj, "the PWM fan headers"},
+    {fans::Controller::BLOCK, Kind::Any, "the fans: [ { name, output, input, ... }, ... ]"}, // shape: the owner's (its message names the old one)
     {stripcfg::Remote::BLOCK, Kind::Obj, "the LED strip: { leds, pin, reverse, brightness, gamma, white_balance }"},
     {"crossfade_ms", Kind::Int, "the dissolve between effects, 0..65535 ms"},
     {"frame_ms", Kind::Int, "the default frame period every effect reads"},
