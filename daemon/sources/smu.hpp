@@ -286,11 +286,20 @@ public:
 private:
     static constexpr double WANT_S = 15;    // poll while asked within this long
     static constexpr int RETRY_MS = 30000;  // between patch attempts while it fails
-    static constexpr int MAILBOX_MS = 1000; // a command's own timeout — generous
+    static constexpr int MAILBOX_MS = 5000; // a command's own timeout, the reference's
                                             // (a healthy SMU answers in ms; this
-                                            // only bites a wedged one, and the
-                                            // poller it blocks is detached)
-    static constexpr int LOST_AFTER = 5;    // failed sweeps in a row = give up until re-asked
+                                            // only bites a wedged one, and one that
+                                            // does is never commanded again — lost_)
+    static constexpr int LOST_AFTER = 5;    // sweeps in a row with a rejected chip = re-patch
+
+    // why the SMU is never commanded again this run: a mailbox command timed
+    // out or its window I/O failed. The SMU may still be executing that
+    // command, so a new one could overwrite its arguments mid-flight — the
+    // reference refuses further commands the same way. A restart clears it;
+    // a reboot is the safe reset.
+    static constexpr const char* LOST_WHY =
+        "an SMU command timed out or failed — VRAM temperatures stay off until the "
+        "daemon restarts (reboot to be safe)";
 
     Reader() = default;
 
@@ -343,7 +352,7 @@ private:
             double now = mono();
             if (now - wantedAt_.load() < WANT_S)
             {
-                if (!patched_)
+                if (!patched_ && !lost_)
                 {
                     // patch() reads the chips once itself, so no sweep follows
                     if (now - lastTry >= RETRY_MS / 1000.0)
@@ -363,16 +372,23 @@ private:
     }
 
     // read all eight chips through the installed handler into local arrays;
-    // returns false if any chip's mailbox failed (a lost SMU, distinct from a
-    // chip whose code is merely out of range). A code is a temperature only in
-    // the daemon's usual plausible range (> 0 °C); 80 saturates at 120.
+    // returns false if any chip's read was rejected (the SMU answered, but not
+    // with a code — distinct from a code merely out of range). A mailbox that
+    // did not answer at all sets lost_ and ends the sweep there: the rest
+    // would each wait out the timeout holding the lock the GPU governor
+    // shares. A code is a temperature only in the daemon's usual plausible
+    // range (> 0 °C); 80 saturates at 120.
     bool readChips(float* c, bool* ok)
     {
+        for (int i = 0; i < CHIP_COUNT; i++)
+            ok[i] = false, c[i] = 0;
         bool allOk = true;
         for (int i = 0; i < CHIP_COUNT; i++)
         {
             uint32_t code = 0, ret = 0;
-            if (message(Q3, MSG_READ_CHIP, {(uint32_t)i}, &ret, &code) && ret == RET_OK)
+            if (!message(Q3, MSG_READ_CHIP, {(uint32_t)i}, &ret, &code))
+                return false;
+            if (ret == RET_OK)
             {
                 // the code is the reply's low byte; the rest of the dword is
                 // not zero, so an unmasked word never lands in 0..80 (the
@@ -382,11 +398,7 @@ private:
                 c[i] = ok[i] ? t : 0;
             }
             else
-            {
-                ok[i] = false;
-                c[i] = 0;
                 allOk = false;
-            }
         }
         return allOk;
     }
@@ -401,20 +413,27 @@ private:
         }
     }
 
-    // one periodic read; drop the patch after too many failed sweeps so the
-    // next ask re-patches (a lost SMU is not silently trusted)
+    // one periodic read; a lost SMU is dropped for good, and after too many
+    // sweeps with rejected reads the patch is dropped so the next ask
+    // re-patches (a handler the SMU no longer runs is not silently trusted)
     void sweep()
     {
         float c[CHIP_COUNT];
         bool ok[CHIP_COUNT];
         bool allOk = readChips(c, ok);
         storeChips(c, ok);
+        if (lost_)
+        {
+            fprintf(stderr, "smu: %s\n", LOST_WHY);
+            drop(LOST_WHY);
+            return;
+        }
         fails_ = allOk ? 0 : fails_ + 1;
         if (fails_ >= LOST_AFTER)
         {
-            fprintf(stderr, "smu: the SMU stopped answering — will re-patch when next asked\n");
+            fprintf(stderr, "smu: the SMU keeps rejecting chip reads — will re-patch when next asked\n");
             lastLogged_ = "\x01"; // let the re-patch outcome log afresh
-            drop("the SMU stopped answering");
+            drop("the SMU kept rejecting chip reads");
         }
     }
 
@@ -434,6 +453,13 @@ private:
             readChips(c, chok);
             storeChips(c, chok);
             fails_ = 0;
+        }
+        // a command that timed out anywhere in the attempt outranks the step
+        // that noticed it
+        if (lost_)
+        {
+            ok = false;
+            why = LOST_WHY;
         }
         {
             std::lock_guard<std::mutex> g(m_);
@@ -557,8 +583,12 @@ private:
     bool message(const Mailbox& mb, uint32_t msg, std::initializer_list<uint32_t> args,
                  uint32_t* ret, uint32_t* arg0)
     {
-        if ((int)args.size() > mb.argCount)
+        if (lost_ || (int)args.size() > mb.argCount)
             return false;
+        // every failure past this point leaves the mailbox in an unknown
+        // state — possibly a command still executing — so it marks the SMU
+        // lost and nothing is sent to it again
+        lost_ = true;
         Bus::Guard lk = bus_.guard();
         if (!bus_.writeReg(mb.rsp, 0))
             return false;
@@ -579,6 +609,7 @@ private:
                     *ret = status;
                 if (arg0 && !bus_.readReg(mb.arg, arg0))
                     return false;
+                lost_ = false;
                 return true;
             }
             if (mono() >= deadline)
@@ -645,6 +676,12 @@ private:
                             memcpy(got[pass], page, n * 4);
                         else
                             ok = false;
+                        // a transfer that never answered may still land: the
+                        // SMU holds this page's physical address, so the page
+                        // is never handed back to the kernel for reuse (one
+                        // leaked page, at most once — the SMU is lost now)
+                        if (lost_)
+                            return false;
                     }
                     if (ok && memcmp(got[0], got[1], n * 4) == 0)
                         memcpy(out, got[0], n * 4);
@@ -715,6 +752,7 @@ private:
     std::atomic<int> intervalMs_{DEFAULT_INTERVAL_MS};
     Bus bus_;                  // poller-only
     int fails_ = 0;            // poller-only
+    bool lost_ = false;        // poller-only; sticky, see LOST_WHY
     std::string lastLogged_ = "\x01"; // poller-only; a sentinel so the first outcome always logs
 
     std::mutex m_;
