@@ -374,7 +374,10 @@ private:
             uint32_t code = 0, ret = 0;
             if (message(Q3, MSG_READ_CHIP, {(uint32_t)i}, &ret, &code) && ret == RET_OK)
             {
-                float t = codeToC(code);
+                // the code is the reply's low byte; the rest of the dword is
+                // not zero, so an unmasked word never lands in 0..80 (the
+                // reference masks the same way)
+                float t = codeToC(code & 0xFF);
                 ok[i] = t > 0;
                 c[i] = ok[i] ? t : 0;
             }

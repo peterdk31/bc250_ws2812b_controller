@@ -336,6 +336,15 @@ int main(int argc, char** argv)
             std::string why = smu::Reader::get().status();
             printf("  vram_temps: %s\n",
                    why.empty() ? "SMU patched, reading the GDDR6 chips" : why.c_str());
+            // and what each source reads, so "patched but no reading" shows
+            for (int i = 0; why.empty() && i < smu::SOURCE_COUNT; i++)
+            {
+                float v;
+                if (smu::Reader::get().temp(i, v))
+                    printf("    %-14s %.0f °C\n", smu::SOURCES[i].label, v);
+                else
+                    printf("    %-14s no reading\n", smu::SOURCES[i].label);
+            }
         }
         return 0;
     }
