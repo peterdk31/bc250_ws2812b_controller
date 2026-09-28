@@ -217,17 +217,15 @@ def main():
     oy = g.J11Y[-1] + 2.7
     text(bx0 - 1.0, oy, 'OpenPuck:  017 → J11 pin 8 (GPIO20)', 0.9, C_GPIO, 'rm', True)
     text(bx0 - 1.0, oy + 1.5, 'GND → J11 pin 7 (GND)', 0.9, C_GND, 'rm', True)
-    text(bx0 - 1.0, oy + 3.0, 'BAT → J14 pin 1 or 2 (5VSB)', 0.9, C_5VSB, 'rm', True)
+    text(bx0 - 1.0, oy + 3.0, 'BAT → J14 pin 5 or 6 (5VSB)', 0.9, C_5VSB, 'rm', True)
     text(bx0 - 1.0, oy + 4.4, "the puck's USB cable stays intact", 0.75, C_DIM, 'rm')
 
-    # J14: the optional power breakout — one line per row in the left margin, like J11
-    text(bx0 - 1.0, g.j14_xy(1)[1] - 2.2, 'J14  optional 2×3 power breakout  ·  each row = one rail on both pins', 0.9,
-         C_TXT, 'rm', True)
-    for pin in (1, 3, 5):
+    # J14: the optional power breakout — each column's rail above it
+    for pin in (2, 4, 6):
         n = g.J14_NET[pin]
-        y = g.j14_xy(pin)[1]
-        text(bx0 - 1.0, y, f'{pin}+{pin + 1}: {n}', 0.95, net_color(n), 'rm', True)
-        dr.line([P(bx0 - 0.6, y), P(g.J14_X0 - 0.9, y)], fill=(120, 120, 120, 160), width=1)
+        x, y = pad('J14', pin)
+        text(x, y - 1.6, {'3.3V': '3V3'}.get(n, n), 0.7, net_color(n), 'mm', True)
+    text(g.j14_xy(3)[0], g.J14_YB + 1.7, 'J14 PWR · 2 pins per rail', 0.62, C_TXT, 'mm', True)
 
     # J1: the PSU header — front row labelled above (the plug zone is tracks
     # only), rear row below the board edge
@@ -256,15 +254,16 @@ def main():
         text(x, y - 2.75, lab, 0.72, net_color(g.NETS[('J3', str(pin))]), 'mm', True)
     text(g.VH_X[1], g.VH_Y - 4.15, 'J3  STRIP  JST-VH · pin 1 ▷ = 3.3V · 3 A', 0.72, C_TXT, 'mm', True)
 
-    # fans: pin roles above each header, the header's name and GPIO below it
+    # fans: pin roles above each header's pins, the header's name and GPIO
+    # under it
     for k in range(4):
         gp = g.FAN_ORDER[k]
         for pin, lab in ((4, 'PWM'), (3, 'T'), (2, '12V'), (1, 'G')):
             x, y = g.fan_pin(k, pin)
             n = g.NETS.get((f'J{5 + k}', str(pin)))
-            text(x, y - 3.55, lab, 0.75, net_color(n) if n else C_DIM, 'mm', True)
+            text(x, y - 1.75, lab, 0.62, net_color(n) if n else C_DIM, 'mm', True)
         x1, y = g.FAN_POS[k]
-        text(x1 - 1.5 * g.FAN_P, y + 3.9, f'J{5 + k} FAN{k + 1} · {gp} · header{k + 1}', 0.68, C_GPIO, 'mm')
+        text(x1 + 1.5 * g.FAN_P, y + 1.9, f'J{5 + k} FAN{k + 1} · {gp}', 0.62, C_GPIO, 'mm', True)
 
     # J9 button: below the board edge
     for pin, lab in ((1, '1 ▷ 12V  ring LED +'), (2, '2: GND  ring LED −'), (3, '3: NO → GPIO1'), (4, '4: C = GND')):
@@ -274,17 +273,16 @@ def main():
     text(pad('J9', 2)[0] + 1.25, cy, 'J9 BUTTON', 0.8, C_TXT, 'mm', True, stroke=False)
     text((g.mf_xy(6)[0] + g.mf_xy(10)[0]) / 2, cy, 'J1 rear row · at the board edge · latch side', 0.8, C_TXT,
          'mm', True, stroke=False)
-    text(g.Q1_G, cy, 'Q1 2N7000', 0.8, C_TXT, 'mm', True, stroke=False)
 
-    # Q1 / R1
-    for pin, lab in ((1, 'S: GND'), (2, 'G ← GPIO3'), (3, 'D: PS_ON#')):
+    # Q1 / R1: inside column C (J9's pin labels take the space under the board)
+    for pin, lab in ((1, 'S'), (2, 'G'), (3, 'D')):
         x, y = pad('Q1', pin)
-        vtext(x, by1 + 0.6, lab, 0.8, net_color(g.NETS.get(('Q1', str(pin)))), top=True, bold=True)
-    text((g.R1_P1[0] + g.R1_P2[0]) / 2, g.R1_Y - 1.9, 'R1 100 kΩ', 0.72, C_PSON)
-    text(g.Q1_G, g.Q1_Y - 2.4, 'Q1', 0.72, C_PSON)
+        text(x, y - 1.35, lab, 0.62, net_color(g.NETS.get(('Q1', str(pin)))), 'mm', True)
+    text(g.Q1_G, g.Q1_Y + 1.75, 'Q1 2N7000: S GND · G ← GPIO3 · D → PS_ON#', 0.55, C_PSON, 'mm', True)
+    text((g.R1_P1[0] + g.R1_P2[0]) / 2, g.R1_Y - 1.5, 'R1 100 kΩ', 0.62, C_PSON)
 
     # ---- title, legend, notes ----------------------------------------------
-    text(bx0, by0 - 6.2, 'BC-250 carrier  rev D  —  pinout, top view', 2.2, C_TXT, 'lm', True, stroke=False)
+    text(bx0, by0 - 6.2, 'BC-250 carrier  rev E  —  pinout, top view', 2.2, C_TXT, 'lm', True, stroke=False)
     text(bx0, by0 - 3.2, f'{bx1 - bx0:g} × {by1 - by0:g} mm.  ▷ / ■ on the silkscreen = pin 1.  '
          'Red = front copper, blue = back copper.', 1.0, C_DIM, 'lm', stroke=False)
 
@@ -300,11 +298,11 @@ def main():
 
     notes = [
         'Rails: 12V and 3.3V are PSU main rails, dead while the machine is off. 5VSB is standby and feeds the '
-        'module (and an OpenPuck on J14) at all times. The rails have their own header, J14, above the GPIOs on J11.',
+        'module (and an OpenPuck on J14) at all times. The rails have their own header, J14, beside the PSU header, away from the GPIOs on J11.',
         "The C3 module's USB VBUS is tied to its 5V pin, so cut the red wire in the MODULE's USB cable (README, "
         "Power switch). The puck's cable stays whole.",
-        'Q1: flat face per the silkscreen outline, pins D G S left to right; R1 is its 100 kΩ gate pull-down.',
-        'Fan headers J5–J8: lock ramp (over G · 12V · T) toward the TOP edge, pin 1 (G) is the RIGHT pin, tach unconnected.',
+        'Q1: flat face per the silkscreen outline, pins S G D left to right; R1 is its 100 kΩ gate pull-down.',
+        'Fan headers J5–J8: stacked down the left edge, pins G · 12V · T · PWM left to right; lock ramp (over G · 12V · T) facing down, tach unconnected.',
         'config.json  power_switch.pins: ps_on 3 · button 1 · button_gnd null · sense 2 · led 8 · wake 20 (null '
         'without a puck).  fans.header1..4 = FAN1..4.  strip.pin 4.',
     ]

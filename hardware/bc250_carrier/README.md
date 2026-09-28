@@ -1,15 +1,22 @@
-# BC-250 carrier board (rev C)
+# BC-250 carrier board (rev D)
 
 An 80 × 34.5 mm two-layer carrier for the ESP32-C3 Super Mini that runs the
 receiver firmware in the BC-250. It replaces the loose wiring for the
 [power switch](../../README.md#power-switch), the WS2812B strip and the
-[fans](../../README.md#fans) with one board: the Super Mini solders flat onto
-it, the PSU's own 10-pin Mini-Fit Jr plug goes straight onto a right-angle
-header and lies flat over the board, the strip leaves through a 10 A JST-VH,
-the illuminated power button plugs into a 4-pin JST-XH, and the sense wire
-solders to a single pin. An optional 2 × 8 pin header along the left edge
-breaks out the three rails (two pins each) and the module's five spare
-GPIOs, each beside a ground pin.
+[fans](../../README.md#fans) with one board: the Super Mini plugs into two
+sockets on it, the PSU's own 10-pin Mini-Fit Jr plug goes straight onto a
+right-angle header and lies flat over the board, the strip leaves through a
+10 A JST-VH, and the illuminated power button plugs into a 4-pin JST-XH. A
+2 × 6 pin header along the left edge (J11) takes the sense wire and breaks
+out the module's five spare GPIOs, each beside a ground pin; the three
+rails have a 2 × 3 header of their own (J14) in the top left corner above
+it, a row apart, so the rails and the GPIOs never share a header.
+
+A second layout of the same board, **[rev E](../bc250_carrier_e/README.md)**,
+puts every connector left of the PSU header, the PSU header at the
+right-hand end and the module right beside it, with the four fans stacked
+down the left edge (75.8 × 34.5 mm). Same parts, nets and firmware; pick
+either.
 
 ![Annotated pinout of the carrier: every pad labelled with its rail, GPIO and role, connector orientation, the OpenPuck wake hookup on J11](pinout.png)
 
@@ -27,15 +34,17 @@ capacitors or series resistors — the wired-up prototype works without them.
 KiCad's own DRC through its Python module), renders `out/preview.png` and
 exports the board to `out/zoom-top.pdf` / `out/zoom-bottom.pdf`, the
 schematic to `out/schematic.pdf`, the BOM to `out/bom.xml`; gerbers and
-drill files land in `out/gerbers/` with a JLCPCB-ready zip beside them.
+drill files land in `out/gerbers/`, and `fab.py` turns them plus the parts
+list into one order-ready folder per fab under `out/fab/` (JLCPCB, PCBWay:
+gerber zip, BOM, pick-and-place; see Ordering).
 
 ## Layout
 
 Three columns, left to right:
 
 - **The Super Mini**, USB-C at the top edge, with the button connector and
-  the sense pin under its antenna end and the optional breakout header along
-  the board's left edge.
+  the sense and GPIO header (J11) along the board's left edge and the power
+  header (J14) above it in the top left corner.
 - **The PSU header** on the bottom edge, a right-angle Mini-Fit Jr whose
   mating face points *up* the board. The PSU plug slides on from above and
   lies flat over the middle of the board; its wires leave over the top edge.
@@ -45,14 +54,39 @@ Three columns, left to right:
   than the solder mask, because the plug body rides about 1.3 mm above the
   board and the wires drape over the rest. Keep it that way if you edit.
 - **The strip VH** at the top right, the four fan headers as a 2 × 2 block
-  under it, the MOSFET and its resistor along the bottom edge. The fan
-  headers are KF2510 parts with a 12.7 × 5.8 mm body, the same size as a PC
-  fan plug, so the block is spaced for the plugs: columns 13.2 mm apart, rows
-  9.6 mm apart (3.8 mm between the bodies for the plugs' latches, which face
-  down the board on all four).
+  under it, the MOSFET and its resistor along the bottom edge. A PC fan plug
+  body is 12.7 × 5.8 mm (the Molex header itself is 10.4 × 6.0), so the block
+  is spaced for the plugs: columns 13.2 mm apart, rows 9.6 mm apart (3.8 mm
+  between the plugs). The headers' friction ramps face up the board, toward
+  the strip connector, on all four; the silkscreen draws each ramp over its
+  three pins (G, 12V, T) so the plug's latch side is obvious.
 
 Rev B was 80 × 55 mm with a vertical PSU header on the right edge; rev C is
 37 % smaller in area and the PSU cable no longer sticks out of the side.
+
+Rev D is rev C made for hand soldering, after a board whose PSU stuck on (a
+solder bridge in Q1's 1.27 mm footprint put PS_ON# onto GPIO3):
+
+- **0.5 mm from every solder pad** to copper of any other net (rev C: 0.2),
+  0.3 mm track to track. Q1 is on the wide TO-92 footprint.
+- **The back is where every joint is made, so 12 V never runs past a pad of
+  5VSB, GATE or a GPIO there.** The button LED's 12 V left the PSU
+  header's row gap altogether (it now runs above the front row, over 1 mm
+  from every header pad), GATE moved to the front (under the header's
+  housing) and PS_ON# to the back: a bridge on the back can now only switch
+  or trip the PSU, never feed 12 V into the module.
+- **Rails and GPIOs on separate headers**: J11 carries the sense wire and
+  the spare GPIOs, each with a GND beside it; J14, above it with an empty
+  row between, carries 5VSB, 3.3V and 12 V (two pins each, top to bottom;
+  12 V's row is 4.6 mm, pin centre to pin centre, above J11's SENSE/GND
+  row, where rev C had them 2.54 mm apart). No rail track runs beside the module
+  socket's pins any more: 3.3V and 12 V come up the left edge past J11's
+  GND pins only, one per layer, and 12 V has the back to itself there.
+- **Three mounting holes**: the top left one (H1) is gone, its corner is
+  J14's. H2, H3 and H4 keep their places and names.
+- **The sense wire goes on J11** (pin 2, GND beside it) instead of a lone
+  pin.
+- **A ground fill on both layers**, stitched with ground vias (see below).
 
 ## The PSU header
 
@@ -103,16 +137,17 @@ measured. If it turns out mirrored, the fix is one line in `MF_NET`.
 
 | ref | part | footprint |
 |---|---|---|
-| U1 | ESP32-C3 Super Mini | 2 × 8 through-hole, 2.54 mm pitch, 15.24 mm row spacing |
-| Q1 | 2N7000 N-MOSFET | TO-92 |
+| U1 | ESP32-C3 Super Mini | not soldered: plugs into J12 + J13, pins down, USB-C at the board edge |
+| J12, J13 | Super Mini sockets, left and right column | 1 × 8 female header, 2.54 mm, 5.7 mm low profile (ShouHan PM2.54-1x8PZZ-H5.7), 15.24 mm apart |
+| Q1 | 2N7000 N-MOSFET | TO-92, wide: 2.54 mm between the legs (bend them out) |
 | R1 | 100 kΩ | axial, 7.62 mm pitch |
 | J1 | PSU in: 3.3V, 5VSB, PS_ON#, +12 V, GND | Molex Mini-Fit Jr 5569-10A2, 2 × 5 right-angle header with pegs (takes the PSU's 10-pin plug) |
 | J3 | strip out: 3.3V, DIN, GND | JST-VH B3P-VH, 3.96 mm, 10 A contacts |
 | J9 | power button: 12V, GND (ring LED), NO, C (switch) | JST-XH 4-pin (B4B-XH-A) |
-| J10 | sense: TPMS1 pin 9 | one 2.54 mm pin (or solder the wire in) |
-| J11 | optional: 3.3V, 5VSB, 12V (two pins each), then GPIO8, GPIO9, GPIO20, GPIO21, GPIO0 each with a GND beside it | 2 × 8 2.54 mm pin header, normally left off |
-| J5–J8 | four 4-pin PWM fan headers | KF2510 4-pin straight header with friction-lock ramp (Ckmtw W-2510S04P-0000; pads are KiCad's Molex KK-254 footprint, so a Molex 47053-1000 fits too) |
-| H1–H4 | M3 mounting holes | 3.2 mm, 73.6 × 28.1 mm spacing |
+| J11 | SENSE (TPMS1 pin 9 → GPIO2), then GPIO8, GPIO9, GPIO20, GPIO21, GPIO0, each with a GND beside it | 2 × 6 2.54 mm pin header, cut from a 2 × 8 (or solder the sense wire straight into pin 2) |
+| J14 | optional: 5VSB, 3.3V, 12 V, two pins each | 2 × 3 2.54 mm pin header, cut from a 2 × 8 |
+| J5–J8 | four 4-pin PWM fan headers | Molex 47053-1000, the KK 254 4-circuit header the 4-wire PC fan spec names: friction-lock ramp over circuits 1–3 only, so the fan plug's latch wall clears it (KiCad's Molex KK-254 footprint) |
+| H2–H4 | M3 mounting holes (three: top right, bottom left, bottom right) | 3.2 mm, 73.6 × 28.1 mm spacing; rev C's top left H1 is gone, so a case standoff there must go too |
 
 Matching housings: VHR-3N with SVH-21T-P1.1 crimps for the strip (20 AWG
 wire for 3 A); XHP-4 with SXH-001T-P0.6 for the button.
@@ -124,8 +159,9 @@ wire for 3 A); XHP-4 with SXH-001T-P0.6 for the button.
 | PSU J1 | see the table above | the FSP500-30AS 10-pin plug, straight on |
 | STRIP J3 | 1 `3.3V`, 2 `DIN`, 3 `GND` | the WS2812B strip. 3.3V is the PSU's 3.3 V rail straight through; DIN is GPIO4 |
 | BUTTON J9 | 1 `12V`, 2 `GND`, 3 `NO`, 4 `C` | the illuminated button: 1–2 feed its ring LED (a 12 V LED, i.e. one with its own resistor — the pins are the raw 12 V rail), 3–4 are the switch: `NO` → GPIO1, `C` is a **real ground**. Use the normally-open terminal: the firmware sees a press as the contact closing, and the NC terminal makes the PSU click on and off (Jul 2026) |
-| SENSE J10 | 1 `SNS` | BC-250 TPMS1 pin 9 (the main 3.3 V rail) → GPIO2; single wire, the ground is shared through the PSU |
-| J11 | rows top to bottom, outer pin (odd, nearest the board edge) / inner pin (even): 1+2 `3.3V`, 3+4 `5VSB`, 5+6 `12V`, 7 `GND` / 8 `GPIO8`, 9 `GND` / 10 `GPIO9`, 11 `GND` / 12 `GPIO20`, 13 `GND` / 14 `GPIO21`, 15 `GND` / 16 `GPIO0` | optional breakout: the three rails straight from the PSU header on two pins each (see the current budget below), then every GPIO the board leaves unused with a ground beside it. GPIO8 is also the module's blue LED. GPIO8 and GPIO9 are ESP32-C3 strapping pins: leave them high or floating at reset (GPIO9 low at reset enters download mode). GPIO0 is a plain GPIO on the C3. GPIO20 is the pin for an OpenPuck's wake pulse (`power_switch.pins.wake`, README "Power switch"): the puck's `017` straight to pin 12, puck GND to pin 11, and the puck's BAT to a 5VSB pin (3 or 4). GPIO0, GPIO20 and GPIO21 are the pins a `gpio:N` fan source can read a PWM signal on (the BC-250's own fan header's PWM and GND, two wires, to the GPIO and the GND beside it — never the header's +12 V; see the main README's Fans); 20 and 21 are also the J5 UART candidates, so GPIO0 first |
+| SENSE, J11 pin 2 | `SENSE` | BC-250 TPMS1 pin 9 (the main 3.3 V rail) → GPIO2. One wire does it (the ground is shared through the PSU); pin 1 beside it is a GND if you want a two-wire plug |
+| J11 | rows top to bottom, outer pin (odd, nearest the board edge) / inner pin (even): 1 `GND` / 2 `SENSE`, 3 `GND` / 4 `GPIO8`, 5 `GND` / 6 `GPIO9`, 7 `GND` / 8 `GPIO20`, 9 `GND` / 10 `GPIO21`, 11 `GND` / 12 `GPIO0` | the sense wire (above), then every GPIO the board leaves unused with a ground beside it. GPIO8 is also the module's blue LED. GPIO8 and GPIO9 are ESP32-C3 strapping pins: leave them high or floating at reset (GPIO9 low at reset enters download mode). GPIO0 is a plain GPIO on the C3. GPIO20 is the pin for an OpenPuck's wake pulse (`power_switch.pins.wake`, README "Power switch"): the puck's `017` to pin 8, puck GND to pin 7, and the puck's BAT to J14's 5VSB (pin 5). GPIO0, GPIO20 and GPIO21 are the pins a `gpio:N` fan source can read a PWM signal on (the BC-250's own fan header's PWM and GND, two wires, to the GPIO and the GND beside it — never the header's +12 V; see the main README's Fans); 20 and 21 are also the J5 UART candidates, so GPIO0 first |
+| J14 | rows top to bottom, both pins of a row one rail: 1+2 `5VSB`, 3+4 `3.3V`, 5+6 `12V` | optional power breakout, straight off the rails: 5VSB from the module's 5V pad (the puck's BAT goes here), 3.3V from the PSU header's pin 6, 12 V from its pin 4. The GND beside it is J11's outer column. Pin names are on the back |
 | FAN1 J5 … FAN4 J8 | 1 `G`, 2 `12V`, 3 `T`, 4 `PWM` | standard 4-pin fan pinout, tach unconnected |
 
 The fan headers are mounted rotated, so on the board their pins read
@@ -147,23 +183,88 @@ The fan block's 12 V is split: a 1.5 mm top-layer track feeds the left column
 each good for two fans or a fan and an AIO pump with margin (about 2.7 A per
 column at a 10 °C rise; a pump is 0.3–1 A, a fan 0.1–0.5 A).
 
-J11's rails are sized for about 2 A each, not for the PSU's full output.
-The button LED's and J11's 12 V (1.2 mm) leaves the header through the gap
-between its pin rows, runs along the bottom edge under the connectors and
-climbs the strip between J11 and the module on the bottom layer; J11's 3.3V
-(0.9 mm — the most that fits between the mounting holes and the board edge)
-takes the same gap and the bottom edge a little lower, then climbs the left
-edge; its 5VSB (1.0 mm) comes from the module's 5V pad over the top of the
-module and down the same strip on the top layer. The 5VSB trunk from the
-header to the module is 1.5 mm, since everything J11 draws flows through it.
+J14's 3.3V and 12 V are 0.75 mm tracks, the most that fits between J11's
+outer pads and the board edge with 0.5 mm to the pads: about 1.5 A each. Its
+5VSB is 1.0 mm, about 2 A. None of them is the PSU's full output. 3.3V goes
+west off the PSU header's pin 6 along the bottom edge and up the left edge
+on the front; 12 V goes up out of the header's pin 4 into the plug zone,
+west above the front row, drops to the back through a via beside the 3 A
+return, comes down past the header's left end and runs the same bottom and
+left edges on the back, where it passes nothing but J11's GND pins; the
+button LED (10–30 mA) taps it on the way. 5VSB comes off the module's 5V
+pad over the module's USB end. Both edge rails pass the bottom-left screw
+(H3) between the hole and the board edge, under its head on the solder
+mask, as rev C's 3.3V did: a plastic screw or a nylon washer there if the
+standoff is metal.
+
+**Ground fill.** Both copper layers are filled with GND wherever nothing
+else runs, 0.5 mm from every other net and from the board edge, with
+thermal spokes on every ground pad so the pads still take solder, and no
+sliver narrower than 0.5 mm. Ground vias stitch the two layers every 5 mm
+or so. The fill gives every signal a return path right under it (the fan
+PWM and strip data lines, the GPIOs), lowers the ground's resistance for the
+fans and the strip, and ties every ground pin in more than one way. It
+stays out of the antenna zone under the module's end, and islands that
+reach no ground are removed.
 
 ## Ordering
 
-Two orders, one shipment: JLCPCB makes the board, LCSC (its sister shop)
-supplies every part except the Super Mini, and LCSC's checkout offers to
-combine the parcel with a JLCPCB order.
+Three ways, from most to least finished. `make` writes an order folder per
+fab under `out/fab/`: `bc250_carrier-gerbers.zip` (gerbers and drill files,
+what the fab's PCB upload takes), `bom.csv` (the parts to fit, in that fab's
+own column layout) and `cpl.csv` (where they go). Everything on the board is
+through-hole. The parts are the LCSC numbers in the table below; `fab.py`
+holds the per-fab layouts (a `PROVIDERS` table, one entry per fab). Whichever
+route, the strip and button **plugs** (JST housings and crimp contacts, the
+last four lines of the table) are not board parts: order them from LCSC
+separately, or from anyone carrying JST VH and XH.
 
-1. **Board.** `make` leaves `out/bc250_carrier-gerbers.zip`; upload it at
+The Super Mini is not soldered. It plugs into two 1 × 8 low-profile sockets
+(J12, J13), which are ordinary stocked parts, so an assembled board from
+either fab is complete: buy any ESP32-C3 Super Mini **with the pins
+soldered** (AliExpress lists them that way; pins point down, away from the
+components) and push it in, USB-C at the board edge as the silkscreen
+between the sockets says. It comes out again for reflashing or replacement.
+
+### Assembled by PCBWay
+
+1. pcbway.com → PCB Instant Quote → upload `out/fab/pcbway/bc250_carrier-gerbers.zip`
+   (it also carries `assembly-top.pdf` / `assembly-bottom.pdf` as the assembly
+   drawing). 2 layers, 1.6 mm, 1 oz, any colour. Add **Assembly service**:
+   turnkey (PCBWay sources the parts), through-hole, top side, from 1 board.
+2. Upload `out/fab/pcbway/bom.csv` and `cpl.csv` (PCBWay's own template
+   columns). Every line has the manufacturer part number and, in the notes,
+   its LCSC number and link, so sourcing is a lookup. J11 and J14 are left
+   off (`NOT_ASSEMBLED`): cut them from two 2 × 8 headers and solder them
+   yourself.
+3. PCBWay reviews by hand and quotes after that (parts, a per-order assembly
+   setup and per-joint labour). Answer their orientation questions from the
+   silkscreen and `pinout.png`: the fan headers' lock ramp, the VH/XH housing
+   walls, Q1's flat face and J1's mating face are all drawn.
+
+### Assembled by JLCPCB
+
+1. jlcpcb.com → upload `out/fab/jlcpcb/bc250_carrier-gerbers.zip`. PCB
+   defaults; turn on **PCB Assembly**, *Standard* (through-hole parts need
+   it, *Economic* is SMD-only), top side, minimum 2 assembled boards.
+2. Upload `out/fab/jlcpcb/bom.csv` and `cpl.csv`. All seven lines are
+   "extended" parts (a small per-part loading fee each) and were in JLCPCB's
+   library with stock on 18 Sep 2026. J11 and J14 are left off
+   (`NOT_ASSEMBLED`): cut them from two 2 × 8 headers and solder them yourself.
+3. Check the placement preview. JLCPCB's part-orientation data does not
+   always agree with KiCad's rotation for through-hole connectors; the fan
+   headers' lock ramp, the VH/XH housing walls, Q1's flat face and J1's
+   mating face must match the silkscreen. Rotate a part in the preview if not.
+4. Note the order number and buy the plugs at lcsc.com (below) shipped
+   together with it.
+
+### Bare board, everything soldered by you
+
+Two orders, one shipment: JLCPCB makes the board, LCSC (its sister shop)
+supplies every part (the Super Mini itself comes from wherever you like),
+and LCSC's checkout offers to combine the parcel with a JLCPCB order.
+
+1. **Board.** Upload `out/fab/jlcpcb/bc250_carrier-gerbers.zip` at
    jlcpcb.com. Defaults are fine: 2 layers, 1.6 mm, 1 oz, any colour, no
    assembly. Note the JLCPCB order number.
 2. **Parts.** `out/lcsc_parts.csv` is the shopping list, one line per LCSC
@@ -181,19 +282,24 @@ combine the parcel with a JLCPCB order.
 | C22365658 | DLL-5569-10AW, Mini-Fit Jr 2×5 4.2 mm **right-angle** header (Molex 5569-10A2 clone, no pegs) | J1 | 1 | 5 |
 | C160316 | JST B3P-VH(LF)(SN), 3.96 mm 3-pin, 10 A | J3 | 1 | 5 |
 | C594232 | JST B4B-XH-A-G, 2.5 mm 4-pin (gold flash) | J9 | 1 | 5 |
-| C2337 | BOOMELE 2.54-1*40P, 1×40 pin header strip (break off 1 pin for J10) | J10 | 1 | 5 |
-| C124382 | Ckmtw B-2100S32P-B110, 2×16 pin header (cut to 2×8), optional | J11 | 1 | 5 |
-| C140769 | Ckmtw W-2510S04P-0000, KF2510 4-pin straight header with lock ramp | J5–J8 | 4 | 10 |
+| C68234 | BOOMELE 2.54-2*8P, 2×8 pin header: cut one to 2×6 (J11), one to 2×3 (J14, optional) | J11, J14 | 2 | 5 |
+| C240840 | Molex 47053-1000, KK 254 4-circuit fan header, ramp over circuits 1–3 | J5–J8 | 4 | 5 |
+| C55218878 | ShouHan PM2.54-1x8PZZ-H5.7, 1×8 female header, 5.7 mm low profile (Super Mini socket) | J12, J13 | 2 | 5 |
 | C157899 | JST VHR-3N housing | strip plug | 1 | 10 |
 | C160349 | JST SVH-21T-P1.1 crimp contact, 18–22 AWG | strip plug (3 + spares) | 5 | 100 |
 | C144403 | JST XHP-4 housing | button plug | 1 | 20 |
 | C140573 | JST SXH-001T-P0.6 crimp contact, 22–28 AWG | button plug (4 + spares) | 6 | 100 |
 
 Every number, name, stock and minimum order above was checked against
-LCSC's product data on 8 Sep 2026, and the J1 and fan-header datasheets
-were read against the footprints. Do **not** substitute BOOMELE 2.54-4AS
-(C41927) for the fan headers: despite its listing it is a fully shrouded
-2.54 mm wafer (CJT A2541 style) that a PC fan plug cannot enter.
+LCSC's product data on 8 Sep 2026 (18 Sep 2026: the two pin headers
+re-picked as one-piece parts, the fan headers swapped for the Molex part, the
+module sockets added, and every line confirmed in JLCPCB's assembly
+library), and the J1 datasheet was read against the footprint. Two fan
+header substitutes **not** to make: BOOMELE 2.54-4AS (C41927) is, despite
+its listing, a fully shrouded 2.54 mm wafer (CJT A2541 style) that a PC fan
+plug cannot enter; Ckmtw W-2510S04P (C140769, the rev C first-order part)
+mates, but its friction ramp runs the full four positions and a PC fan
+plug's latch wall lands on it, so it had to be cut down.
 
 The whole list is a few dollars; the minimum orders are what set the
 quantities (the two crimp contacts come in bags of 100). The PSU header mates with the PSU's own plug and the fan headers
@@ -204,11 +310,14 @@ squeeze the insulation tabs with pliers. Use 20 AWG for the strip wires.
 
 Two things to check when the parts arrive, before soldering:
 
-- **Fan headers.** A PC fan plug is a KF2510-family housing, so it mates
-  with the W-2510S04P; the header's lock ramp sets which way round the plug
-  goes. Before powering a fan, put a meter on the header and confirm the
-  fan's black wire lands on the pad marked `G` and yellow/red on `12V`. If
-  the plug only fits the other way round, change the fan headers' rotation
+- **Fan headers.** The Molex 47053-1000 is the header the 4-wire PC fan
+  spec names: its friction-lock ramp covers circuits 1–3 and the fan plug's
+  latch hooks over it, with the plug's wall beside circuit 4. It is the same
+  KK 254 family as the KF2510 header the first rev C boards carried, ramp on
+  the same side, so the plugs go on the same way round, now without cutting
+  the ramp down. Before powering a fan, put a meter on the header and confirm
+  the fan's black wire lands on the pad marked `G` and yellow/red on `12V`.
+  If the plug only fits the other way round, change the fan headers' rotation
   from 180 to 0 in `generate.py` (`PARTS`, the `J5..J8` loop) and re-order,
   or re-pin the fan plug.
 - **The PSU header** orientation, as described above.
@@ -218,7 +327,7 @@ Two things to check when the parts arrive, before soldering:
 Everything is the config's: the shipped `power_switch` block already has this
 board's pins (`ps_on` 3, `button` 1, `button_gnd` null — the button's second
 pin is a real GND, not GPIO21 — `sense` 2, `led` 8, `wake` null, or 20 with an
-OpenPuck on J11), and `header1..header4` in
+OpenPuck on J11 pin 8), and `header1..header4` in
 the `fans` block are FAN1..FAN4 (GPIO 5, 6, 7, 10). Set `enabled` on what you
 use, then:
 
@@ -258,46 +367,90 @@ host-presence detection all still work.
   module's top edge is 3.9 mm inside the board edge, so a USB-C plug's
   overmould hangs over the carrier — it clears, there is nothing under it.
 - **Antenna.** The module's ceramic antenna sits at the end away from the
-  USB-C. The carrier keeps a copper-free zone under it and has no ground pour
-  at all, so BLE range is whatever the Super Mini manages on its own.
+  USB-C. The carrier keeps a copper-free zone under it: no tracks, and the
+  ground fill stops at its edge (the fill under the rest of the module is on
+  the back only), so BLE range is whatever the Super Mini manages on its own.
 - **The PSU header** solders with its housing over the front pin row and its
   face pointing up the board; the two pegs snap into the 3 mm holes. Nothing
   may be placed in the plug zone in front of it.
-- **J11** is optional: leave it off unless you need a rail or a spare GPIO.
-  It sits in the strip between the board's left edge and the module's left
-  pin column, so that column has no pin names printed (the right column's
-  names orient the module); the header's own pin names are printed on the
-  **back** of the board, under the module, readable with the board flipped
-  (`2x 3.3V` means both pins of that row).
-  Its rows sit half a pitch below the module's so its plastic clears the
-  corner screw head; a 5.5 mm head fits, a washer does not. The same goes
-  for the button connector J9 and the screw at H3: 0.75 mm from a 5.6 mm
-  pan head, no room for a washer. (KiCad's DRC flags both as courtyard
-  overlaps because the stock M3 footprint draws a 6.9 mm courtyard; `drc.py`
-  reports those and does not fail on them.)
+- **J11** carries the sense wire (pin 2) and the spare GPIOs; J14 the rails.
+  Cut a 2 × 8 pin header to 2 × 6 for J11 and another to 2 × 3 for J14 (or
+  leave J14 off, and solder the sense wire straight into J11 pin 2 if you do
+  not want a header at all). J11 sits in the strip between the board's left
+  edge and the module's left pin column, so that column has no pin names
+  printed (the right column's names orient the module); both headers' pin
+  names are printed on the **back** of the board, readable with the board
+  flipped. The button connector J9 sits 0.75 mm from a 5.6 mm pan head on
+  H3, no room for a washer. (KiCad's DRC flags that as a courtyard
+  overlap because the stock M3 footprint draws a 6.9 mm courtyard; `drc.py`
+  reports it and does not fail on it.)
 - Q1's flat face follows the silkscreen outline (pins D, G, S left to right
-  as printed); R1 has no polarity.
+  as printed); R1 has no polarity. Q1 sits on the wide TO-92 footprint, so
+  bend its outer legs out to the 2.54 mm holes. The stock 1.27 mm footprint
+  left 0.3 mm between the gate and drain pads, and a bridge there puts
+  PS_ON# straight onto GPIO3: the PSU stays on whatever the firmware does,
+  and with the MOSFET removed it clicks as the pin changes state. If a
+  board behaves like that, meter PS_ON# (J1 pin 8) to Q1's middle hole
+  with everything unplugged; it must read open.
+
+## Before the first power-up
+
+A few meter checks catch every fault the hand-soldered boards have had so
+far. Do them with the Super Mini out of its sockets and nothing plugged in:
+no PSU, fans, strip or button. Pin numbers are the PSU header's (J1: edge row
+3.3V GND PS_ON GND GND = pins 6–10, inner row 3.3V GND 5VSB 12V 12V = pins
+1–5, left to right). Measure resistance, red probe on the first point; the
+first row in diode mode, which is what shows a reversed Q1.
+
+| red probe | black probe | expect | a low reading means |
+|---|---|---|---|
+| PS_ON (pin 8) | GND (pin 7) | open (diode mode: no reading) | a bridge to ground; a diode drop (~0.5 V) means **Q1 is fitted backwards**. Either way the PSU will stay on |
+| PS_ON (pin 8) | Q1's middle hole (gate) | open | a bridge at Q1: GPIO3 drives PS_ON directly, the PSU sticks on or clicks |
+| Q1's middle hole (gate) | GND (pin 7) | about 100 kΩ | 0 Ω: gate bridged to ground; open: R1 not soldered |
+| 12V (pin 4) | GND (pin 2), 3.3V (pin 1), 5VSB (pin 3), PS_ON (pin 8) | open, each | a bridge under the header: the PSU trips or feeds 12 V into the rest |
+| 5VSB (pin 3) | GND (pin 2) | open | a 5VSB short: the PSU's standby supply ticks, the module can burn |
+| 3.3V (pin 1) | GND (pin 2) | open | a strip-rail short |
+
+Then power up in two steps. First plug in the PSU **without** the Super Mini:
+the PSU must stay silent and off, and the socket's 5V pin (top of the right
+column) reads about 5 V. Unplug the PSU, fit the module, plug the PSU back
+in. Look at the back of the header and Q1 under a bright light before each
+step; that is where the bridges were.
+
+The header's 3.3V and GND pins sit on wide copper that pulls heat away, so
+they take longer to wet than the others: a larger tip or a few seconds more
+there, and check that the solder has flowed round the whole pin.
 
 ## Editing
 
 The whole design is `generate.py`: parts, nets, placement and every track.
 Edit it and run `make`, which regenerates the KiCad files, runs `check.py`
-(copper clearance ≥ 0.2 mm, edge ≥ 0.3 mm, no track copper in the antenna
-zone, every net one connected piece — pads are checked as their true
+(copper ≥ 0.5 mm from any other part's solder pad — the board is hand
+soldered — and ≥ 0.3 mm track to track, edge ≥ 0.3 mm, no track copper in
+the antenna zone, every net one connected piece — pads are checked as their true
 rectangles, which is what lets tracks pass between the header's pads), runs
 KiCad's real DRC through `drc.py` (the `pcbnew` Python module; fails on any
-error except the two mounting-hole courtyard overlaps above), renders
-`out/preview.png` (a quick Pillow drawing of the layout, no KiCad needed)
+error except the mounting-hole courtyard overlap above), renders
+`out/preview.png` plus `out/preview-F.png` / `out/preview-B.png` (one copper
+layer each; a quick Pillow drawing of the layout and, when `pcbnew` is there,
+the ground fill)
 and exports `out/`. The KiCad files are ordinary KiCad 7 files too — open
 `bc250_carrier.kicad_pro` and edit in the GUI if you prefer; then the
 generator no longer describes the board, so pick one.
 
-The board has two vias (both on GATE, which has to hop over a vertical on
-each layer); they are listed in `VIAS` and treated as two-layer pads by the
-check. Everything else changes layer through the through-hole pads. The
-button's ground reaches the module's GND pad up the module's right side, just
-outside the antenna zone, so the gap between the header's pin rows is free
-for the LED's 12 V.
+`make generate` runs `generate.py` and then `fill.py`, which fills the
+ground zones with KiCad's own filler, drops a stitching via wherever both
+layers' fill has room for one (at least 5 mm apart, 0.5 mm clear of every
+other hole), and fills again. The fill and the stitches are not in
+`generate.py`'s geometry, so `check.py` does not see them; KiCad's DRC does,
+and fails on anything left unconnected.
+
+The design's own vias are listed in `VIAS` and treated as two-layer pads by
+the check: two on GATE (it hops a vertical on each layer) and one where the
+12 V for the button LED and J14 drops to the back beside the 3 A return.
+Everything else changes layer through the through-hole pads. The button's
+ground reaches the module's GND pad up the module's right side, just outside
+the antenna zone.
 
 KiCad 7's `kicad-cli` cannot run DRC or ERC (those came with KiCad 8); the
 DRC comes from `drc.py` instead, ERC has no stand-in. The remaining DRC
@@ -305,7 +458,7 @@ warnings are silkscreen text touching footprint outlines by hundredths of a
 millimetre.
 
 Fab settings: 2 layers, 1.6 mm, 1 oz copper, min track 0.5 mm, min
-clearance 0.2 mm, min drill 0.5 mm (the vias) — any board house's cheapest
+clearance 0.3 mm, min drill 0.5 mm (the vias) — any board house's cheapest
 tier. Stock symbols and footprints are copied from the local KiCad install
 (`KICAD_SHARE=/usr/share/kicad`), so the project opens without extra
 libraries.

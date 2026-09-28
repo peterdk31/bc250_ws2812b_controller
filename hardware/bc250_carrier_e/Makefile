@@ -13,8 +13,8 @@
 # Needs python3 and kicad-cli 7 (KICAD_SHARE points at KiCad's share dir,
 # /usr/share/kicad by default, for the stock symbols and footprints).
 
-PCB = bc250_carrier.kicad_pcb
-SCH = bc250_carrier.kicad_sch
+PCB = bc250_carrier_e.kicad_pcb
+SCH = bc250_carrier_e.kicad_sch
 OUT = out
 CLI ?= kicad-cli
 BOARDS ?= 10         # boards to order: sizes out/lcsc_parts.csv

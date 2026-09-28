@@ -5,7 +5,7 @@
   (paper "A4")
   (title_block
     (title "BC-250 carrier")
-    (rev "D")
+    (rev "E")
     (comment 1 "ESP32-C3 Super Mini carrier: power switch, WS2812B strip, 4 PWM fans")
   )
   (lib_symbols
@@ -1062,7 +1062,7 @@
         )
       )
     )
-    (symbol "Connector_Generic:Conn_02x08_Odd_Even"
+    (symbol "Connector_Generic:Conn_02x06_Odd_Even"
       (pin_names
         (offset 1.016)
         hide
@@ -1070,15 +1070,15 @@
       (in_bom yes)
       (on_board yes)
       (property "Reference" "J"
-        (at 1.27 10.16 0)
+        (at 1.27 7.62 0)
         (effects
           (font
             (size 1.27 1.27)
           )
         )
       )
-      (property "Value" "Conn_02x08_Odd_Even"
-        (at 1.27 -12.7 0)
+      (property "Value" "Conn_02x06_Odd_Even"
+        (at 1.27 -10.16 0)
         (effects
           (font
             (size 1.27 1.27)
@@ -1112,7 +1112,7 @@
           hide
         )
       )
-      (property "ki_description" "Generic connector, double row, 02x08, odd/even pin numbering scheme (row 1 odd numbers, row 2 even numbers), script generated (kicad-library-utils/schlib/autogen/connector/)"
+      (property "ki_description" "Generic connector, double row, 02x06, odd/even pin numbering scheme (row 1 odd numbers, row 2 even numbers), script generated (kicad-library-utils/schlib/autogen/connector/)"
         (at 0 0 0)
         (effects
           (font
@@ -1130,18 +1130,7 @@
           hide
         )
       )
-      (symbol "Conn_02x08_Odd_Even_1_1"
-        (rectangle
-          (start -1.27 -10.033)
-          (end 0 -10.287)
-          (stroke
-            (width 0.1524)
-            (type default)
-          )
-          (fill
-            (type none)
-          )
-        )
+      (symbol "Conn_02x06_Odd_Even_1_1"
         (rectangle
           (start -1.27 -7.493)
           (end 0 -7.747)
@@ -1209,36 +1198,14 @@
           )
         )
         (rectangle
-          (start -1.27 7.747)
-          (end 0 7.493)
-          (stroke
-            (width 0.1524)
-            (type default)
-          )
-          (fill
-            (type none)
-          )
-        )
-        (rectangle
-          (start -1.27 8.89)
-          (end 3.81 -11.43)
+          (start -1.27 6.35)
+          (end 3.81 -8.89)
           (stroke
             (width 0.254)
             (type default)
           )
           (fill
             (type background)
-          )
-        )
-        (rectangle
-          (start 3.81 -10.033)
-          (end 2.54 -10.287)
-          (stroke
-            (width 0.1524)
-            (type default)
-          )
-          (fill
-            (type none)
           )
         )
         (rectangle
@@ -1307,19 +1274,8 @@
             (type none)
           )
         )
-        (rectangle
-          (start 3.81 7.747)
-          (end 2.54 7.493)
-          (stroke
-            (width 0.1524)
-            (type default)
-          )
-          (fill
-            (type none)
-          )
-        )
         (pin passive line
-          (at -5.08 7.62 0)
+          (at -5.08 5.08 0)
           (length 3.81)
           (name "Pin_1"
             (effects
@@ -1337,7 +1293,7 @@
           )
         )
         (pin passive line
-          (at 7.62 -2.54 180)
+          (at 7.62 -5.08 180)
           (length 3.81)
           (name "Pin_10"
             (effects
@@ -1355,7 +1311,7 @@
           )
         )
         (pin passive line
-          (at -5.08 -5.08 0)
+          (at -5.08 -7.62 0)
           (length 3.81)
           (name "Pin_11"
             (effects
@@ -1373,7 +1329,7 @@
           )
         )
         (pin passive line
-          (at 7.62 -5.08 180)
+          (at 7.62 -7.62 180)
           (length 3.81)
           (name "Pin_12"
             (effects
@@ -1391,79 +1347,7 @@
           )
         )
         (pin passive line
-          (at -5.08 -7.62 0)
-          (length 3.81)
-          (name "Pin_13"
-            (effects
-              (font
-                (size 1.27 1.27)
-              )
-            )
-          )
-          (number "13"
-            (effects
-              (font
-                (size 1.27 1.27)
-              )
-            )
-          )
-        )
-        (pin passive line
-          (at 7.62 -7.62 180)
-          (length 3.81)
-          (name "Pin_14"
-            (effects
-              (font
-                (size 1.27 1.27)
-              )
-            )
-          )
-          (number "14"
-            (effects
-              (font
-                (size 1.27 1.27)
-              )
-            )
-          )
-        )
-        (pin passive line
-          (at -5.08 -10.16 0)
-          (length 3.81)
-          (name "Pin_15"
-            (effects
-              (font
-                (size 1.27 1.27)
-              )
-            )
-          )
-          (number "15"
-            (effects
-              (font
-                (size 1.27 1.27)
-              )
-            )
-          )
-        )
-        (pin passive line
-          (at 7.62 -10.16 180)
-          (length 3.81)
-          (name "Pin_16"
-            (effects
-              (font
-                (size 1.27 1.27)
-              )
-            )
-          )
-          (number "16"
-            (effects
-              (font
-                (size 1.27 1.27)
-              )
-            )
-          )
-        )
-        (pin passive line
-          (at 7.62 7.62 180)
+          (at 7.62 5.08 180)
           (length 3.81)
           (name "Pin_2"
             (effects
@@ -1481,7 +1365,7 @@
           )
         )
         (pin passive line
-          (at -5.08 5.08 0)
+          (at -5.08 2.54 0)
           (length 3.81)
           (name "Pin_3"
             (effects
@@ -1499,7 +1383,7 @@
           )
         )
         (pin passive line
-          (at 7.62 5.08 180)
+          (at 7.62 2.54 180)
           (length 3.81)
           (name "Pin_4"
             (effects
@@ -1517,7 +1401,7 @@
           )
         )
         (pin passive line
-          (at -5.08 2.54 0)
+          (at -5.08 0 0)
           (length 3.81)
           (name "Pin_5"
             (effects
@@ -1535,7 +1419,7 @@
           )
         )
         (pin passive line
-          (at 7.62 2.54 180)
+          (at 7.62 0 180)
           (length 3.81)
           (name "Pin_6"
             (effects
@@ -1553,7 +1437,7 @@
           )
         )
         (pin passive line
-          (at -5.08 0 0)
+          (at -5.08 -2.54 0)
           (length 3.81)
           (name "Pin_7"
             (effects
@@ -1571,7 +1455,7 @@
           )
         )
         (pin passive line
-          (at 7.62 0 180)
+          (at 7.62 -2.54 180)
           (length 3.81)
           (name "Pin_8"
             (effects
@@ -1589,7 +1473,7 @@
           )
         )
         (pin passive line
-          (at -5.08 -2.54 0)
+          (at -5.08 -5.08 0)
           (length 3.81)
           (name "Pin_9"
             (effects
@@ -2298,87 +2182,6 @@
         )
       )
     )
-    (symbol "Mechanical:MountingHole"
-      (pin_names
-        (offset 1.016)
-      )
-      (in_bom yes)
-      (on_board yes)
-      (property "Reference" "H"
-        (at 0 5.08 0)
-        (effects
-          (font
-            (size 1.27 1.27)
-          )
-        )
-      )
-      (property "Value" "MountingHole"
-        (at 0 3.175 0)
-        (effects
-          (font
-            (size 1.27 1.27)
-          )
-        )
-      )
-      (property "Footprint" ""
-        (at 0 0 0)
-        (effects
-          (font
-            (size 1.27 1.27)
-          )
-          hide
-        )
-      )
-      (property "Datasheet" "~"
-        (at 0 0 0)
-        (effects
-          (font
-            (size 1.27 1.27)
-          )
-          hide
-        )
-      )
-      (property "ki_keywords" "mounting hole"
-        (at 0 0 0)
-        (effects
-          (font
-            (size 1.27 1.27)
-          )
-          hide
-        )
-      )
-      (property "ki_description" "Mounting Hole without connection"
-        (at 0 0 0)
-        (effects
-          (font
-            (size 1.27 1.27)
-          )
-          hide
-        )
-      )
-      (property "ki_fp_filters" "MountingHole*"
-        (at 0 0 0)
-        (effects
-          (font
-            (size 1.27 1.27)
-          )
-          hide
-        )
-      )
-      (symbol "MountingHole_0_1"
-        (circle
-          (center 0 0)
-          (radius 1.27)
-          (stroke
-            (width 1.27)
-            (type default)
-          )
-          (fill
-            (type none)
-          )
-        )
-      )
-    )
     (symbol "bc250_carrier:ESP32-C3_SuperMini"
       (pin_names
         (offset 1.016)
@@ -2756,7 +2559,7 @@
     (in_bom yes)
     (on_board yes)
     (dnp no)
-    (uuid "30454db3-4166-402f-87e1-8e632fd7afd2")
+    (uuid "eda898b3-04b0-494c-bab5-ce433f466164")
     (property "Reference" "J12"
       (at 106.68 86.36 0)
       (effects
@@ -2792,31 +2595,31 @@
       )
     )
     (pin "1"
-      (uuid "c64cc8c1-edc5-485d-9633-b023a0bb4f42")
+      (uuid "2f01a005-45a5-4f91-ab69-6902f034c139")
     )
     (pin "2"
-      (uuid "19112126-50d4-46a4-a771-e2fd125b4f01")
+      (uuid "1f5ff351-293d-4c5d-8035-9e07ffb5af3c")
     )
     (pin "3"
-      (uuid "247fe527-9896-44a8-95b6-cf3aaca93c22")
+      (uuid "78a7c5f1-4c82-4d7e-b1e2-3ca504ba9c5e")
     )
     (pin "4"
-      (uuid "dcf1e161-a2de-41d6-bb66-a2418c101e44")
+      (uuid "20833201-8ed4-47a6-8b9b-6bea76928e98")
     )
     (pin "5"
-      (uuid "5d103f47-dfd2-4f5d-84fd-1110febfb1b7")
+      (uuid "09775682-d1ea-4fff-8916-bb252c04b30c")
     )
     (pin "6"
-      (uuid "5d024e19-fa20-4567-94d3-49566e365637")
+      (uuid "f224da35-aeac-46c0-b5ef-a0a4f2ce7599")
     )
     (pin "7"
-      (uuid "b330b2a2-6341-4b86-80bb-efc58166b7ff")
+      (uuid "fadd3d92-9f97-49ca-b076-7eac89abf977")
     )
     (pin "8"
-      (uuid "8af50dd1-2160-4741-bd31-2a659edeb6bf")
+      (uuid "1d3d0e13-228d-4b62-8a8d-50317a2f446f")
     )
     (instances
-      (project "bc250_carrier"
+      (project "bc250_carrier_e"
         (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
           (reference "J12")
           (unit 1)
@@ -2833,7 +2636,7 @@
       (width 0)
       (type default)
     )
-    (uuid "9bab296a-6456-49a0-9314-1afb7626d60c")
+    (uuid "f08d83ae-35f6-495d-b094-830ebff54017")
   )
   (label "FAN_GPIO5"
     (at 95.25 88.9 180)
@@ -2844,7 +2647,7 @@
       )
       (justify right bottom)
     )
-    (uuid "bd1994ec-bff5-4095-87ff-d989ff610d1a")
+    (uuid "240aa59b-cef9-420a-8977-6344a1d46162")
   )
   (wire
     (pts
@@ -2855,7 +2658,7 @@
       (width 0)
       (type default)
     )
-    (uuid "029b3c71-264d-4bb3-a92c-b71dbc989a55")
+    (uuid "56154023-2de3-48b7-af61-ea20d428a521")
   )
   (label "FAN_GPIO6"
     (at 95.25 91.44 180)
@@ -2866,7 +2669,7 @@
       )
       (justify right bottom)
     )
-    (uuid "04a4f08b-9804-42b9-968f-19a212eb907f")
+    (uuid "983f6d34-cecf-4103-847a-d1254efc668d")
   )
   (wire
     (pts
@@ -2877,7 +2680,7 @@
       (width 0)
       (type default)
     )
-    (uuid "d0c98035-6ae9-4be8-be17-377bf2f5731d")
+    (uuid "7820f2f7-ba0c-40ae-8224-c771cf3efc99")
   )
   (label "FAN_GPIO7"
     (at 95.25 93.98 180)
@@ -2888,7 +2691,7 @@
       )
       (justify right bottom)
     )
-    (uuid "cd805755-dc67-4580-8d2e-74a6e190b5df")
+    (uuid "01a66f4e-ef3f-48fa-b31d-8f92642f7599")
   )
   (wire
     (pts
@@ -2899,7 +2702,7 @@
       (width 0)
       (type default)
     )
-    (uuid "441aa9cc-ddbe-4447-9401-26e0b8fd5d1e")
+    (uuid "504616b1-5b66-4f7c-8400-f62183b884e2")
   )
   (label "GPIO8"
     (at 95.25 96.52 180)
@@ -2910,7 +2713,7 @@
       )
       (justify right bottom)
     )
-    (uuid "a0491a30-fb45-4628-baf3-3800d253e4a8")
+    (uuid "742ade7d-fed3-4b2c-a70e-3612ca8867f7")
   )
   (wire
     (pts
@@ -2921,7 +2724,7 @@
       (width 0)
       (type default)
     )
-    (uuid "3d77aba5-7660-4682-8709-5aea878be681")
+    (uuid "e7f5da9e-85eb-425c-b3a8-953b653a89c8")
   )
   (label "GPIO9"
     (at 95.25 99.06 180)
@@ -2932,7 +2735,7 @@
       )
       (justify right bottom)
     )
-    (uuid "761339bd-3846-4b05-85b8-6d5949a9f904")
+    (uuid "76638366-8430-4532-b682-1c0aab621861")
   )
   (wire
     (pts
@@ -2943,7 +2746,7 @@
       (width 0)
       (type default)
     )
-    (uuid "eac0c662-c0bb-499b-9543-7f19e68b6f0f")
+    (uuid "dac7054b-ddbd-4605-9027-795e0060ba6d")
   )
   (label "FAN_GPIO10"
     (at 95.25 101.6 180)
@@ -2954,7 +2757,7 @@
       )
       (justify right bottom)
     )
-    (uuid "ec7240bd-2749-4e94-98fa-2e3880cf0739")
+    (uuid "c75a3aa6-2da7-4142-9ffe-815d506e26a2")
   )
   (wire
     (pts
@@ -2965,7 +2768,7 @@
       (width 0)
       (type default)
     )
-    (uuid "05c7b8ec-7695-4f3c-8198-661bd8701cc6")
+    (uuid "71a98cb0-8f2a-4c2b-89ee-67ba43918752")
   )
   (label "GPIO20"
     (at 95.25 104.14 180)
@@ -2976,7 +2779,7 @@
       )
       (justify right bottom)
     )
-    (uuid "7c4cc6a3-a9bf-4572-91f5-3d9e107fabcd")
+    (uuid "e1eeccf9-bcdf-4147-bd4f-7f706dfe40b3")
   )
   (wire
     (pts
@@ -2987,7 +2790,7 @@
       (width 0)
       (type default)
     )
-    (uuid "68a06339-8ddc-4846-bfcd-6c4121b9dcf9")
+    (uuid "3b95925f-0578-469d-aef0-50c7e6644463")
   )
   (label "GPIO21"
     (at 95.25 106.68 180)
@@ -2998,7 +2801,7 @@
       )
       (justify right bottom)
     )
-    (uuid "8a64ecea-2cc6-44fc-96f7-7f8c48f6691e")
+    (uuid "7a938bd2-98f2-49f3-a26a-2c80658e6a67")
   )
   (symbol
     (lib_id "Connector_Generic:Conn_01x08")
@@ -3007,7 +2810,7 @@
     (in_bom yes)
     (on_board yes)
     (dnp no)
-    (uuid "96126114-6707-4509-b2f7-fbe7da07696d")
+    (uuid "07899afd-10a7-4ad1-9df1-3f6932810db8")
     (property "Reference" "J13"
       (at 201.93 86.36 0)
       (effects
@@ -3043,31 +2846,31 @@
       )
     )
     (pin "1"
-      (uuid "1f8f22ff-9314-4976-88b3-666f9567f1bf")
+      (uuid "b3767d2b-cc79-40a1-8560-c7465835e28d")
     )
     (pin "2"
-      (uuid "2fc6bc20-5848-4e91-a645-d02a030440de")
+      (uuid "9fb6a946-217f-4936-bcad-9dc042ed1988")
     )
     (pin "3"
-      (uuid "4f470c02-2e72-430b-bf59-d08e0bc187eb")
+      (uuid "116b455f-2ff9-4f88-9c38-755c3f59b4b8")
     )
     (pin "4"
-      (uuid "553ff1e5-a3fe-4af5-ab4e-46a19148c5e0")
+      (uuid "47edd3b2-8a5c-42d0-8831-1589d23b5939")
     )
     (pin "5"
-      (uuid "f0ee246d-a891-4cb9-bddb-01a2e44c0fa9")
+      (uuid "d9d96d8b-9c7e-475d-b673-d92d8ebd5a44")
     )
     (pin "6"
-      (uuid "8a94d936-ad0a-4c77-bf37-881669098db0")
+      (uuid "8f8c4bce-eed5-4a09-8f55-cb29c15ce732")
     )
     (pin "7"
-      (uuid "5e71c417-6993-4136-ae7f-5bed810ef60f")
+      (uuid "9aa2c86a-5c13-4c77-b693-f5cd0713925f")
     )
     (pin "8"
-      (uuid "dfe0c37a-7511-4f2f-819c-5f17634c3925")
+      (uuid "8e93c103-b8be-4405-adfa-ed525b413168")
     )
     (instances
-      (project "bc250_carrier"
+      (project "bc250_carrier_e"
         (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
           (reference "J13")
           (unit 1)
@@ -3084,7 +2887,7 @@
       (width 0)
       (type default)
     )
-    (uuid "6be16090-e26c-4665-91b0-86ef001c1e64")
+    (uuid "261bd198-3344-43d7-8758-9e1bcb4b6916")
   )
   (label "5VSB"
     (at 190.5 88.9 180)
@@ -3095,7 +2898,7 @@
       )
       (justify right bottom)
     )
-    (uuid "d8df2ed4-0467-4352-9364-8e12326fc1dc")
+    (uuid "02bb6d67-287f-4128-a5c3-63db4e793872")
   )
   (wire
     (pts
@@ -3106,7 +2909,7 @@
       (width 0)
       (type default)
     )
-    (uuid "28b430e6-255c-47d8-84aa-0acf4ddeb476")
+    (uuid "2eb6319b-d4b8-47a0-adc3-9fba884ef2b7")
   )
   (label "GND"
     (at 190.5 91.44 180)
@@ -3117,11 +2920,11 @@
       )
       (justify right bottom)
     )
-    (uuid "e1afdcbf-ac0d-477e-8362-3ea95e0002d9")
+    (uuid "839fa0c4-7881-446d-891d-07935097b8c3")
   )
   (no_connect
     (at 195.58 93.98)
-    (uuid "6f4b66a4-b6c0-49e1-bbee-cf8f27b3c632")
+    (uuid "96bef1e7-4324-407d-8f0f-7603115e7ce0")
   )
   (wire
     (pts
@@ -3132,7 +2935,7 @@
       (width 0)
       (type default)
     )
-    (uuid "2f04628b-9802-4d50-9d51-f6242c0bba38")
+    (uuid "a1242b04-636d-4c30-9708-bd9bafc84b7c")
   )
   (label "DIN"
     (at 190.5 96.52 180)
@@ -3143,7 +2946,7 @@
       )
       (justify right bottom)
     )
-    (uuid "ed77431c-0ad3-4571-946d-88942a350aee")
+    (uuid "7a653765-3ff7-4995-aa6f-a858bdcd1827")
   )
   (wire
     (pts
@@ -3154,7 +2957,7 @@
       (width 0)
       (type default)
     )
-    (uuid "817d8479-9bfc-4dc8-b713-efeb71c42065")
+    (uuid "82288ba2-1f73-4d4d-84ab-42c6c44877a9")
   )
   (label "GATE"
     (at 190.5 99.06 180)
@@ -3165,7 +2968,7 @@
       )
       (justify right bottom)
     )
-    (uuid "2a1c6c2b-e89b-4837-8025-bed74c9bee4c")
+    (uuid "699838b7-b4ba-4205-a3de-38b8e07511db")
   )
   (wire
     (pts
@@ -3176,7 +2979,7 @@
       (width 0)
       (type default)
     )
-    (uuid "cef75318-4ba8-4276-b7d5-58f160d9230e")
+    (uuid "66a5bcfc-8d9f-4556-a15b-70df1d04f01a")
   )
   (label "SENSE"
     (at 190.5 101.6 180)
@@ -3187,7 +2990,7 @@
       )
       (justify right bottom)
     )
-    (uuid "73048c5c-add9-4b5b-9bf9-8e3bbd75becd")
+    (uuid "f3fd70e9-6891-44af-bb67-c8f95e18d382")
   )
   (wire
     (pts
@@ -3198,7 +3001,7 @@
       (width 0)
       (type default)
     )
-    (uuid "dffa7d5c-6270-4208-90c6-03980e1ec3cb")
+    (uuid "f35812c8-65f1-4638-b6ff-cb79ee8ac735")
   )
   (label "BTN"
     (at 190.5 104.14 180)
@@ -3209,7 +3012,7 @@
       )
       (justify right bottom)
     )
-    (uuid "7dc689de-8252-4377-a66d-20507331676f")
+    (uuid "3513706f-ccab-4580-88a0-2c28f15dc47e")
   )
   (wire
     (pts
@@ -3220,7 +3023,7 @@
       (width 0)
       (type default)
     )
-    (uuid "24fdb2f0-2072-4ab4-97d1-f06ef7c71b0e")
+    (uuid "933bf67c-f0e9-4c0e-abc8-c13b7b5def6b")
   )
   (label "GPIO0"
     (at 190.5 106.68 180)
@@ -3231,7 +3034,7 @@
       )
       (justify right bottom)
     )
-    (uuid "9a58f4f1-d0eb-4b1b-b42d-a76d77af3703")
+    (uuid "5c5753ba-ad01-4594-839a-c8e6ba1be10c")
   )
   (symbol
     (lib_id "Connector_Generic:Conn_01x10")
@@ -3240,7 +3043,7 @@
     (in_bom yes)
     (on_board yes)
     (dnp no)
-    (uuid "990ca86b-ab63-4594-a59b-ab4fe19c7006")
+    (uuid "3e9b588b-69e4-4092-aae3-013795ad1471")
     (property "Reference" "J1"
       (at 62.23 48.26 0)
       (effects
@@ -3276,37 +3079,37 @@
       )
     )
     (pin "1"
-      (uuid "cf0e62b6-1bec-40e2-b2c5-388422cb3ea0")
+      (uuid "86f9a820-039f-40ef-918e-13d00dcc522c")
     )
     (pin "10"
-      (uuid "8836da0d-8a11-4e88-b2ff-255c628db3cf")
+      (uuid "3b171137-ae70-4650-97ed-497e721dfae5")
     )
     (pin "2"
-      (uuid "197ef9a7-057f-4e17-826b-e70bc8d30acd")
+      (uuid "4ee2ba16-8177-4d6d-ba4d-f00c81eb7987")
     )
     (pin "3"
-      (uuid "ed71c42d-0292-44b6-bbdd-c35ee0aa87fb")
+      (uuid "b764ce86-d042-4b50-8b00-d0c7fbacdf9f")
     )
     (pin "4"
-      (uuid "5a099ae7-458d-4d8e-91c3-3edbd0676391")
+      (uuid "7819672d-737e-40b1-9f97-43220885413b")
     )
     (pin "5"
-      (uuid "93e71dfa-b590-4cef-8ff2-7e0b619852a5")
+      (uuid "b0c53da0-53a0-48d1-b4c2-de89d74e61b9")
     )
     (pin "6"
-      (uuid "b1173adb-6343-4098-a542-4291197670f8")
+      (uuid "67592da4-dd8d-40a6-8f85-b5e91b5b5355")
     )
     (pin "7"
-      (uuid "433eb6fb-ed4b-499f-ac5d-d03d0edbf068")
+      (uuid "9e857210-ceb7-460e-8966-0dc1a9cfeb58")
     )
     (pin "8"
-      (uuid "fa4b9951-21b5-4cca-9cae-6b22fb31a1d6")
+      (uuid "d7909cf5-f802-4d71-b12f-4b40af07e60e")
     )
     (pin "9"
-      (uuid "36aefa79-6934-44cf-8259-32f9e02f7684")
+      (uuid "5ecf93ec-3e00-4834-a54c-96ef0ae4c86c")
     )
     (instances
-      (project "bc250_carrier"
+      (project "bc250_carrier_e"
         (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
           (reference "J1")
           (unit 1)
@@ -3323,7 +3126,7 @@
       (width 0)
       (type default)
     )
-    (uuid "a647b296-67c4-437d-bd04-9ffb6c1fc584")
+    (uuid "0e78645c-4cf0-49a6-8690-031ad66033ba")
   )
   (label "3.3V"
     (at 50.8 50.8 180)
@@ -3334,7 +3137,7 @@
       )
       (justify right bottom)
     )
-    (uuid "28eac434-b493-4f9a-8554-08a9344ba737")
+    (uuid "63ce6baa-61bf-463a-981d-943ce30e132f")
   )
   (wire
     (pts
@@ -3345,7 +3148,7 @@
       (width 0)
       (type default)
     )
-    (uuid "e23075df-b2f9-4a33-9675-c55924639c8a")
+    (uuid "f38277fc-6e4b-45bf-b362-a3e7bb4bcc7f")
   )
   (label "GND"
     (at 50.8 73.66 180)
@@ -3356,7 +3159,7 @@
       )
       (justify right bottom)
     )
-    (uuid "0ab1d3e2-dd10-4871-bf78-c6ad5dace388")
+    (uuid "b70510b4-a783-4b43-bc50-505fb05b77ba")
   )
   (wire
     (pts
@@ -3367,7 +3170,7 @@
       (width 0)
       (type default)
     )
-    (uuid "bce07bf8-9e19-469f-83f6-3c9eb2782a90")
+    (uuid "2470b6f5-46c5-4f4b-9887-a65400e8bde4")
   )
   (label "GND"
     (at 50.8 53.34 180)
@@ -3378,7 +3181,7 @@
       )
       (justify right bottom)
     )
-    (uuid "3e344968-6b60-4ef1-a301-0357914516cc")
+    (uuid "e6fc5452-cc02-4fdd-a819-bfe56fff4bf5")
   )
   (wire
     (pts
@@ -3389,7 +3192,7 @@
       (width 0)
       (type default)
     )
-    (uuid "5b7dc52f-28cc-435f-a6f4-3ff869e66610")
+    (uuid "0d69b3e4-05ff-4b40-97f6-88d25a7e2e5c")
   )
   (label "5VSB"
     (at 50.8 55.88 180)
@@ -3400,7 +3203,7 @@
       )
       (justify right bottom)
     )
-    (uuid "c9de6c6c-6e62-4f7f-a8da-94962f3543b2")
+    (uuid "791b611f-39a7-4a97-996a-ba02efc1a922")
   )
   (wire
     (pts
@@ -3411,7 +3214,7 @@
       (width 0)
       (type default)
     )
-    (uuid "02f9ed59-bbc5-4b49-ac06-bebdb70c8696")
+    (uuid "ca88560f-9aff-4cfa-9430-670d2f125651")
   )
   (label "12V"
     (at 50.8 58.42 180)
@@ -3422,7 +3225,7 @@
       )
       (justify right bottom)
     )
-    (uuid "84cd565f-02eb-4ed8-a606-8e01449c3b75")
+    (uuid "70d17cf1-f38f-4b9c-93c2-162a8255d2c0")
   )
   (wire
     (pts
@@ -3433,7 +3236,7 @@
       (width 0)
       (type default)
     )
-    (uuid "4a24d72d-8eb5-4cdf-92ab-0f43ac02aa55")
+    (uuid "af1b94c2-01c0-48fa-bfb6-6c56899609f3")
   )
   (label "12V"
     (at 50.8 60.96 180)
@@ -3444,7 +3247,7 @@
       )
       (justify right bottom)
     )
-    (uuid "238f73ce-49b5-43d4-aa4d-861d1a898de7")
+    (uuid "3f053988-8a8f-4262-829b-0d476221a807")
   )
   (wire
     (pts
@@ -3455,7 +3258,7 @@
       (width 0)
       (type default)
     )
-    (uuid "7aeba912-0c32-4be7-a654-8a9b63193af9")
+    (uuid "66681e91-22e8-4132-b54a-5f20e5029f24")
   )
   (label "3.3V"
     (at 50.8 63.5 180)
@@ -3466,7 +3269,7 @@
       )
       (justify right bottom)
     )
-    (uuid "514b3e88-c6bd-4f2d-95f8-cd9aa6269d1e")
+    (uuid "7dbc153e-fb5e-4f75-9572-76d91ffbd8e3")
   )
   (wire
     (pts
@@ -3477,7 +3280,7 @@
       (width 0)
       (type default)
     )
-    (uuid "04e97a2f-f580-40de-9058-e305969d8b35")
+    (uuid "6ac279ad-448a-42f7-91af-d94f6a723ac8")
   )
   (label "GND"
     (at 50.8 66.04 180)
@@ -3488,7 +3291,7 @@
       )
       (justify right bottom)
     )
-    (uuid "aa56b59b-fdd3-4116-a161-0a883a5d7003")
+    (uuid "19f95d23-674f-482d-a929-b53c8a6188f5")
   )
   (wire
     (pts
@@ -3499,7 +3302,7 @@
       (width 0)
       (type default)
     )
-    (uuid "ad9045eb-c725-4a3b-8613-cca61c12e17e")
+    (uuid "63f7b525-97f3-4d1e-82b8-63070ea5188d")
   )
   (label "PS_ON#"
     (at 50.8 68.58 180)
@@ -3510,7 +3313,7 @@
       )
       (justify right bottom)
     )
-    (uuid "ed889883-e082-4b2d-b6d8-48d9c777ec4d")
+    (uuid "e490355c-5837-48b1-ba83-64ad61430803")
   )
   (wire
     (pts
@@ -3521,7 +3324,7 @@
       (width 0)
       (type default)
     )
-    (uuid "37113da0-d0c7-4d9b-849e-27a2a82b21b0")
+    (uuid "32b17853-83bb-423a-a218-3fb746b3f6d5")
   )
   (label "GND"
     (at 50.8 71.12 180)
@@ -3532,7 +3335,7 @@
       )
       (justify right bottom)
     )
-    (uuid "fbfecdb6-1a16-4ed7-b9ad-eac28d7cd0bd")
+    (uuid "e24872c8-6ea8-4c82-8f6a-e275acdde0a6")
   )
   (symbol
     (lib_id "Connector_Generic:Conn_01x03")
@@ -3541,7 +3344,7 @@
     (in_bom yes)
     (on_board yes)
     (dnp no)
-    (uuid "b4ff7225-f36d-457e-b555-016f6327f385")
+    (uuid "6e88ed6e-f67b-46bd-b621-85a51a464566")
     (property "Reference" "J3"
       (at 62.23 86.36 0)
       (effects
@@ -3577,16 +3380,16 @@
       )
     )
     (pin "1"
-      (uuid "32961668-9c9f-496b-9a3c-d0265dcbbd07")
+      (uuid "e9a023e4-ea37-485b-a895-663f8ec56771")
     )
     (pin "2"
-      (uuid "b14e1c9e-b0ba-4525-a085-b169da2b9f38")
+      (uuid "aa88af96-a743-419d-9338-f4a5aa4aa298")
     )
     (pin "3"
-      (uuid "701ba0b7-fbde-446e-a94c-5f4e87092401")
+      (uuid "b724a217-e0bc-44b8-b776-307285ff15bb")
     )
     (instances
-      (project "bc250_carrier"
+      (project "bc250_carrier_e"
         (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
           (reference "J3")
           (unit 1)
@@ -3603,7 +3406,7 @@
       (width 0)
       (type default)
     )
-    (uuid "ea46a91a-4c09-485b-9de6-38403d394c9b")
+    (uuid "9d7d20c7-cdc1-439c-b489-f6b379d4c5f4")
   )
   (label "3.3V"
     (at 50.8 88.9 180)
@@ -3614,7 +3417,7 @@
       )
       (justify right bottom)
     )
-    (uuid "2a034c2a-0219-4e9c-ad88-176f4b5a2657")
+    (uuid "a3885143-a4aa-4c39-9c1d-c84800dba12f")
   )
   (wire
     (pts
@@ -3625,7 +3428,7 @@
       (width 0)
       (type default)
     )
-    (uuid "80d7a2a8-49c9-4956-b387-475b3a5fdc78")
+    (uuid "15df5f06-77a8-4748-8421-84d067c40360")
   )
   (label "DIN"
     (at 50.8 91.44 180)
@@ -3636,7 +3439,7 @@
       )
       (justify right bottom)
     )
-    (uuid "4819224c-af69-4ebf-abd3-e72ea815dbf1")
+    (uuid "dabef836-2ccf-45f9-b5b7-bd23888b92b0")
   )
   (wire
     (pts
@@ -3647,7 +3450,7 @@
       (width 0)
       (type default)
     )
-    (uuid "ea507fb9-c4d6-4f58-8984-13352e0bbf1e")
+    (uuid "5c8dbc6c-01f8-4380-a616-b461dff7bc1c")
   )
   (label "GND"
     (at 50.8 93.98 180)
@@ -3658,7 +3461,7 @@
       )
       (justify right bottom)
     )
-    (uuid "73811b27-d22b-4d28-a60c-4a9e3934447d")
+    (uuid "f7e966e7-b44e-4d3a-b8ba-1505de301bf2")
   )
   (symbol
     (lib_id "Connector_Generic:Conn_01x04")
@@ -3667,7 +3470,7 @@
     (in_bom yes)
     (on_board yes)
     (dnp no)
-    (uuid "67b19af4-9392-4407-ac18-5545695dea83")
+    (uuid "c8569b23-7a5c-4b32-be4a-97cba3296a03")
     (property "Reference" "J9"
       (at 62.23 106.68 0)
       (effects
@@ -3703,19 +3506,19 @@
       )
     )
     (pin "1"
-      (uuid "3afae7fa-b0af-476e-a4c5-e0a19321bce6")
+      (uuid "07d5d493-c4f1-4a1a-a08b-2e1adec81db4")
     )
     (pin "2"
-      (uuid "abf5d7d5-1311-471e-9f28-a5c26fd36789")
+      (uuid "8d2f908c-ccbe-435d-bbdc-162f1bc8f17e")
     )
     (pin "3"
-      (uuid "6a8b9215-dc9b-45a0-a4b7-b1631c867041")
+      (uuid "77549eb1-e9c1-400f-a977-fbb37893f8a4")
     )
     (pin "4"
-      (uuid "d02e5838-f589-4823-b993-a728365f7e11")
+      (uuid "26615580-cb44-42d8-80b6-5c88310becae")
     )
     (instances
-      (project "bc250_carrier"
+      (project "bc250_carrier_e"
         (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
           (reference "J9")
           (unit 1)
@@ -3732,7 +3535,7 @@
       (width 0)
       (type default)
     )
-    (uuid "a331288d-4fb3-40f1-9028-13c846e68131")
+    (uuid "b9546b8b-4914-4ee4-9a98-ca791295875d")
   )
   (label "12V"
     (at 50.8 109.22 180)
@@ -3743,7 +3546,7 @@
       )
       (justify right bottom)
     )
-    (uuid "eed461f1-98d6-4c6e-a0e0-bb834f5a21e8")
+    (uuid "8e59d348-e3fe-4089-942c-715d32f91141")
   )
   (wire
     (pts
@@ -3754,7 +3557,7 @@
       (width 0)
       (type default)
     )
-    (uuid "a1b878b2-5a9b-4812-890d-1c486f10c076")
+    (uuid "76d71f6d-3b42-43df-babe-b3e25a4191cc")
   )
   (label "GND"
     (at 50.8 111.76 180)
@@ -3765,7 +3568,7 @@
       )
       (justify right bottom)
     )
-    (uuid "611c4189-eec3-47e6-9516-e4179cfddf70")
+    (uuid "86745a7e-fdc9-4cbf-83ab-baafef2d1fa4")
   )
   (wire
     (pts
@@ -3776,7 +3579,7 @@
       (width 0)
       (type default)
     )
-    (uuid "70b2cb96-c2c2-4597-8ad4-142c4803bc1d")
+    (uuid "deb60b25-7305-4a68-b3cc-7b487b540fe9")
   )
   (label "BTN"
     (at 50.8 114.3 180)
@@ -3787,7 +3590,7 @@
       )
       (justify right bottom)
     )
-    (uuid "117e60e0-2ece-422d-8ec7-7ec375573a0b")
+    (uuid "ac3e00d2-1ca5-4a21-872a-0e34128966d4")
   )
   (wire
     (pts
@@ -3798,7 +3601,7 @@
       (width 0)
       (type default)
     )
-    (uuid "9b35fd56-b2f1-4b41-ad7c-6956c985ae23")
+    (uuid "323789ca-11fc-4518-bf79-370732b89a92")
   )
   (label "GND"
     (at 50.8 116.84 180)
@@ -3809,18 +3612,18 @@
       )
       (justify right bottom)
     )
-    (uuid "3ed102cb-5629-4a80-8b1f-f65a3b315d7c")
+    (uuid "c9c9cc1c-23df-43cf-9524-14f3b23edc22")
   )
   (symbol
-    (lib_id "Connector_Generic:Conn_02x08_Odd_Even")
+    (lib_id "Connector_Generic:Conn_02x06_Odd_Even")
     (at 27.94 111.76 0)
     (unit 1)
     (in_bom yes)
     (on_board yes)
     (dnp no)
-    (uuid "799562d0-879d-4fda-b89e-a1960dbd7863")
+    (uuid "cfed26e2-5238-4678-9fce-324135586010")
     (property "Reference" "J11"
-      (at 29.21 101.6 0)
+      (at 29.21 104.14 0)
       (effects
         (font
           (size 1.27 1.27)
@@ -3828,7 +3631,7 @@
       )
     )
     (property "Value" "SENSE+GPIO/GND"
-      (at 29.21 124.46 0)
+      (at 29.21 121.92 0)
       (effects
         (font
           (size 1.27 1.27)
@@ -3854,187 +3657,49 @@
       )
     )
     (pin "1"
-      (uuid "3ea8176d-1f4e-43fd-8339-383b727b5c51")
+      (uuid "f957032a-c11c-4e27-9dfe-1ef97051d0f2")
     )
     (pin "10"
-      (uuid "c48c329a-aa78-455b-97cf-1772cec97013")
+      (uuid "24914fe2-2e60-445c-83b6-4ca33cf5c015")
     )
     (pin "11"
-      (uuid "d592f77d-1d93-4974-9a5a-c93746481382")
+      (uuid "ccf00e02-5ff4-449c-901d-3b46a4e415f6")
     )
     (pin "12"
-      (uuid "fc0e2789-be04-446b-8ffc-5269d045219a")
-    )
-    (pin "13"
-      (uuid "6a696053-110f-4fc6-9d02-ef41f7d4cc02")
-    )
-    (pin "14"
-      (uuid "4295f2a0-303c-46d0-8595-d3a24b9aaae7")
-    )
-    (pin "15"
-      (uuid "20dcf191-e418-419c-90dc-0684c32c099d")
-    )
-    (pin "16"
-      (uuid "ce14f256-9375-4141-bb88-dc49820a1ed4")
+      (uuid "c9082305-0fe2-48d3-b310-5a4917a25d0f")
     )
     (pin "2"
-      (uuid "b6d31cb2-9c67-4809-bdae-6fe31d3c23a7")
+      (uuid "6347d62b-55df-4a44-8a33-62960d7d2db6")
     )
     (pin "3"
-      (uuid "be8e4c1c-1fc7-48cd-80e9-99d38e41d911")
+      (uuid "a4b3015d-493f-43eb-af8d-6d75f60af0a3")
     )
     (pin "4"
-      (uuid "e28441a6-bbb8-4706-8949-ef4c40abf35c")
+      (uuid "d5770bcf-2f62-4216-9db4-2bce96265b20")
     )
     (pin "5"
-      (uuid "f7cae360-11a1-4e3a-8224-0bda3ac0eb8c")
+      (uuid "47821855-4f89-4218-8464-a790f77716a9")
     )
     (pin "6"
-      (uuid "5bfe77ce-8922-42c0-aa6e-6067e78e3d97")
+      (uuid "f78ba9be-4257-4a24-bc62-07b32f37d7d8")
     )
     (pin "7"
-      (uuid "7a0b4698-748d-4b7a-9eee-3e4ac7b1de9f")
+      (uuid "af1a2f27-2f43-42d7-98fe-d8bc3f65c6c8")
     )
     (pin "8"
-      (uuid "fe17d141-38ca-44bb-837b-22a6c7b7b41a")
+      (uuid "bdf329af-71a9-445c-a407-42a88322fd88")
     )
     (pin "9"
-      (uuid "2e08629e-4e60-4f8b-ac75-11a673a27eb7")
+      (uuid "6d75ced6-c19a-482d-b078-31d08f1bb8a1")
     )
     (instances
-      (project "bc250_carrier"
+      (project "bc250_carrier_e"
         (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
           (reference "J11")
           (unit 1)
         )
       )
     )
-  )
-  (wire
-    (pts
-      (xy 22.86 104.14)
-      (xy 17.78 104.14)
-    )
-    (stroke
-      (width 0)
-      (type default)
-    )
-    (uuid "1d4a9232-4cfb-4bb3-bf55-4e632ff135ec")
-  )
-  (label "GND"
-    (at 17.78 104.14 180)
-    (fields_autoplaced)
-    (effects
-      (font
-        (size 1.27 1.27)
-      )
-      (justify right bottom)
-    )
-    (uuid "4c80758c-2e32-43ae-9a63-0b38ff096aff")
-  )
-  (wire
-    (pts
-      (xy 35.56 114.3)
-      (xy 40.64 114.3)
-    )
-    (stroke
-      (width 0)
-      (type default)
-    )
-    (uuid "3bfeac34-b533-47d0-a091-03baa4a76cbb")
-  )
-  (label "GPIO21"
-    (at 40.64 114.3 0)
-    (fields_autoplaced)
-    (effects
-      (font
-        (size 1.27 1.27)
-      )
-      (justify left bottom)
-    )
-    (uuid "57d06239-7119-4d37-bd92-e7e503b77d7e")
-  )
-  (wire
-    (pts
-      (xy 22.86 116.84)
-      (xy 17.78 116.84)
-    )
-    (stroke
-      (width 0)
-      (type default)
-    )
-    (uuid "669a20c5-67cb-4a50-9bbe-b4f339c46b32")
-  )
-  (label "GND"
-    (at 17.78 116.84 180)
-    (fields_autoplaced)
-    (effects
-      (font
-        (size 1.27 1.27)
-      )
-      (justify right bottom)
-    )
-    (uuid "6138f0f8-0670-4d78-81bf-0be7ed2f6b50")
-  )
-  (wire
-    (pts
-      (xy 35.56 116.84)
-      (xy 40.64 116.84)
-    )
-    (stroke
-      (width 0)
-      (type default)
-    )
-    (uuid "26e43e29-94ba-449f-ab42-44b131856fe7")
-  )
-  (label "GPIO0"
-    (at 40.64 116.84 0)
-    (fields_autoplaced)
-    (effects
-      (font
-        (size 1.27 1.27)
-      )
-      (justify left bottom)
-    )
-    (uuid "d72f35c6-bc8f-4171-94d7-68f278e3072c")
-  )
-  (no_connect
-    (at 22.86 119.38)
-    (uuid "13513374-7f8c-4c8d-abdc-0efce0d9b8c8")
-  )
-  (no_connect
-    (at 35.56 119.38)
-    (uuid "e1a33d89-469f-462a-be5d-9789e42869f3")
-  )
-  (no_connect
-    (at 22.86 121.92)
-    (uuid "dd7f4700-4ac3-4f7d-83c7-24ec1c799d2c")
-  )
-  (no_connect
-    (at 35.56 121.92)
-    (uuid "06a45441-a1cd-4c6f-a98b-5dcc4e5f37ab")
-  )
-  (wire
-    (pts
-      (xy 35.56 104.14)
-      (xy 40.64 104.14)
-    )
-    (stroke
-      (width 0)
-      (type default)
-    )
-    (uuid "0f168eef-4b2b-4c65-87a5-333103f9e431")
-  )
-  (label "SENSE"
-    (at 40.64 104.14 0)
-    (fields_autoplaced)
-    (effects
-      (font
-        (size 1.27 1.27)
-      )
-      (justify left bottom)
-    )
-    (uuid "8880a2ca-245c-49be-8c54-c8a120f034ec")
   )
   (wire
     (pts
@@ -4045,7 +3710,7 @@
       (width 0)
       (type default)
     )
-    (uuid "b9da11c1-f241-4d9c-9817-8c51685e876f")
+    (uuid "0292fd31-7670-4e94-a0ed-469aeddee901")
   )
   (label "GND"
     (at 17.78 106.68 180)
@@ -4056,7 +3721,73 @@
       )
       (justify right bottom)
     )
-    (uuid "2033eb39-8fb5-41c5-9efd-c19f63644cba")
+    (uuid "6374c0be-3fa8-4ad9-b15d-63cc2557ee2d")
+  )
+  (wire
+    (pts
+      (xy 35.56 116.84)
+      (xy 40.64 116.84)
+    )
+    (stroke
+      (width 0)
+      (type default)
+    )
+    (uuid "ad4db33a-b7c1-48c2-a93d-1542b31c67ed")
+  )
+  (label "GPIO21"
+    (at 40.64 116.84 0)
+    (fields_autoplaced)
+    (effects
+      (font
+        (size 1.27 1.27)
+      )
+      (justify left bottom)
+    )
+    (uuid "1faa4fdf-4746-407c-8ab5-fc2be6890b65")
+  )
+  (wire
+    (pts
+      (xy 22.86 119.38)
+      (xy 17.78 119.38)
+    )
+    (stroke
+      (width 0)
+      (type default)
+    )
+    (uuid "a73cf48a-d24d-4acf-8745-97bd8edb0a75")
+  )
+  (label "GND"
+    (at 17.78 119.38 180)
+    (fields_autoplaced)
+    (effects
+      (font
+        (size 1.27 1.27)
+      )
+      (justify right bottom)
+    )
+    (uuid "10192491-8e66-4f29-adec-aa5e02626a02")
+  )
+  (wire
+    (pts
+      (xy 35.56 119.38)
+      (xy 40.64 119.38)
+    )
+    (stroke
+      (width 0)
+      (type default)
+    )
+    (uuid "96f0ba5f-9b67-4103-af11-43fb5dd330ea")
+  )
+  (label "GPIO0"
+    (at 40.64 119.38 0)
+    (fields_autoplaced)
+    (effects
+      (font
+        (size 1.27 1.27)
+      )
+      (justify left bottom)
+    )
+    (uuid "be152edf-8b4f-4aaa-b367-b949a508159d")
   )
   (wire
     (pts
@@ -4067,9 +3798,9 @@
       (width 0)
       (type default)
     )
-    (uuid "9e7084d2-db9b-46cf-9be7-f8fe4f7b3535")
+    (uuid "07593641-1736-45f3-8dbb-9a2095030187")
   )
-  (label "GPIO8"
+  (label "SENSE"
     (at 40.64 106.68 0)
     (fields_autoplaced)
     (effects
@@ -4078,7 +3809,7 @@
       )
       (justify left bottom)
     )
-    (uuid "e6bdedf9-f1ba-4727-9593-9bfd3d65e50b")
+    (uuid "7e21ccb4-b5ee-4594-a304-1f0f3ec77413")
   )
   (wire
     (pts
@@ -4089,7 +3820,7 @@
       (width 0)
       (type default)
     )
-    (uuid "b3ae47ca-347e-4dfc-b2ea-1b94c20a94ca")
+    (uuid "23c72789-c89f-4e91-8d67-812c52eb60ad")
   )
   (label "GND"
     (at 17.78 109.22 180)
@@ -4100,7 +3831,7 @@
       )
       (justify right bottom)
     )
-    (uuid "9992873b-66d8-4a8f-9cb6-428c9e018ad1")
+    (uuid "9c751eb6-050a-4b6f-87e8-66b360147d6f")
   )
   (wire
     (pts
@@ -4111,9 +3842,9 @@
       (width 0)
       (type default)
     )
-    (uuid "8599f248-281f-4bc3-b4b1-0a0abf96b7da")
+    (uuid "f660bf73-0b2b-489e-9ad2-6ae5c6d3de45")
   )
-  (label "GPIO9"
+  (label "GPIO8"
     (at 40.64 109.22 0)
     (fields_autoplaced)
     (effects
@@ -4122,7 +3853,7 @@
       )
       (justify left bottom)
     )
-    (uuid "38388b1e-34eb-4a52-8a9f-632a05037a36")
+    (uuid "65fb0221-163f-4380-8cac-032afbb6024b")
   )
   (wire
     (pts
@@ -4133,7 +3864,7 @@
       (width 0)
       (type default)
     )
-    (uuid "9722ae58-21f1-4bf1-bfd8-4142d0e035f2")
+    (uuid "b67a0969-74f0-431d-a7a1-b35631186989")
   )
   (label "GND"
     (at 17.78 111.76 180)
@@ -4144,7 +3875,7 @@
       )
       (justify right bottom)
     )
-    (uuid "f3fc0017-5b01-4ce9-ac76-4e03909b18f8")
+    (uuid "e009ab8b-dcac-4ccd-b148-e19139e5af86")
   )
   (wire
     (pts
@@ -4155,9 +3886,9 @@
       (width 0)
       (type default)
     )
-    (uuid "a43ca73a-2abc-4216-9664-07618522bd9d")
+    (uuid "63eebee8-3811-4f6a-95be-78f8575bf581")
   )
-  (label "GPIO20"
+  (label "GPIO9"
     (at 40.64 111.76 0)
     (fields_autoplaced)
     (effects
@@ -4166,7 +3897,7 @@
       )
       (justify left bottom)
     )
-    (uuid "9a3cce8a-1218-4c9d-a526-204ef6d7466b")
+    (uuid "646b4a3b-bf39-4f37-8f85-eeda45cf4e40")
   )
   (wire
     (pts
@@ -4177,7 +3908,7 @@
       (width 0)
       (type default)
     )
-    (uuid "12407a4c-bc42-4a45-8424-01b7e6941c95")
+    (uuid "a8726a4a-e60f-4574-9290-fd757ab85f68")
   )
   (label "GND"
     (at 17.78 114.3 180)
@@ -4188,7 +3919,51 @@
       )
       (justify right bottom)
     )
-    (uuid "4f1e852f-ca52-4d59-ab88-a0adcbcd0a61")
+    (uuid "0adb2e96-aeed-44ab-bd8b-73cd7e7f4822")
+  )
+  (wire
+    (pts
+      (xy 35.56 114.3)
+      (xy 40.64 114.3)
+    )
+    (stroke
+      (width 0)
+      (type default)
+    )
+    (uuid "3a3d68d1-00c3-45fd-a02b-39e133d338eb")
+  )
+  (label "GPIO20"
+    (at 40.64 114.3 0)
+    (fields_autoplaced)
+    (effects
+      (font
+        (size 1.27 1.27)
+      )
+      (justify left bottom)
+    )
+    (uuid "ae0d1ec8-ce27-406d-93e4-70865f95f482")
+  )
+  (wire
+    (pts
+      (xy 22.86 116.84)
+      (xy 17.78 116.84)
+    )
+    (stroke
+      (width 0)
+      (type default)
+    )
+    (uuid "d3bab128-8ab2-4075-9bc6-a5f4e9fba1a2")
+  )
+  (label "GND"
+    (at 17.78 116.84 180)
+    (fields_autoplaced)
+    (effects
+      (font
+        (size 1.27 1.27)
+      )
+      (justify right bottom)
+    )
+    (uuid "2be355a4-33d6-4128-b4f7-5f594ae5ce82")
   )
   (symbol
     (lib_id "Connector_Generic:Conn_02x03_Odd_Even")
@@ -4197,7 +3972,7 @@
     (in_bom yes)
     (on_board yes)
     (dnp no)
-    (uuid "c4be5379-ecb9-453e-a5f2-6657e5a1b914")
+    (uuid "682f8134-0365-4a71-9e5c-e237c4c4d3ed")
     (property "Reference" "J14"
       (at 29.21 132.08 0)
       (effects
@@ -4206,7 +3981,7 @@
         )
       )
     )
-    (property "Value" "PWR 3.3V/5VSB/12V (optional)"
+    (property "Value" "PWR 3.3V/12V/5VSB (optional)"
       (at 29.21 142.24 0)
       (effects
         (font
@@ -4233,25 +4008,25 @@
       )
     )
     (pin "1"
-      (uuid "3973d57e-a3ad-491d-bc84-3bae02b18653")
+      (uuid "d7ba5e0f-1ccf-4bc3-9fd9-cd5733b10971")
     )
     (pin "2"
-      (uuid "8ce0d9ed-3a15-4b4b-96cf-789180208fa5")
+      (uuid "d6b1e6bc-3a5b-487a-8053-01e39ea8520d")
     )
     (pin "3"
-      (uuid "2b8a8128-e0ad-41bb-be14-d89ab5245af8")
+      (uuid "1647de80-2d14-4b42-a359-bdb221e70817")
     )
     (pin "4"
-      (uuid "a370abf8-0110-4b98-aebd-402e8b7e5c6e")
+      (uuid "ba6bbed7-b0ec-41d4-a4fd-221d029e84c9")
     )
     (pin "5"
-      (uuid "4d6a8ae4-659c-4a41-8902-f8f792a3f931")
+      (uuid "0592a72d-a7eb-4617-8e19-68f715612110")
     )
     (pin "6"
-      (uuid "b9fd7563-80d4-44fa-9d6f-8ce53b0ce3ee")
+      (uuid "dd57f9b7-ee27-4c4a-a936-754894918903")
     )
     (instances
-      (project "bc250_carrier"
+      (project "bc250_carrier_e"
         (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
           (reference "J14")
           (unit 1)
@@ -4268,9 +4043,9 @@
       (width 0)
       (type default)
     )
-    (uuid "d44493bb-6a45-4598-b54d-03fed19171d1")
+    (uuid "0914511b-27f8-4514-88d8-f7814208c466")
   )
-  (label "5VSB"
+  (label "3.3V"
     (at 17.78 134.62 180)
     (fields_autoplaced)
     (effects
@@ -4279,7 +4054,7 @@
       )
       (justify right bottom)
     )
-    (uuid "60ee884a-de45-4d46-83ef-664310007c07")
+    (uuid "64da4f3b-8cc4-4bca-82d6-985fadb40149")
   )
   (wire
     (pts
@@ -4290,9 +4065,9 @@
       (width 0)
       (type default)
     )
-    (uuid "be75104d-e03e-4da7-8837-68d46cd5861d")
+    (uuid "823148f5-5750-46ae-bf83-10a86f78508d")
   )
-  (label "5VSB"
+  (label "3.3V"
     (at 40.64 134.62 0)
     (fields_autoplaced)
     (effects
@@ -4301,7 +4076,7 @@
       )
       (justify left bottom)
     )
-    (uuid "34e19ab5-dda1-4322-9b26-de7adee0f94e")
+    (uuid "972c621b-ca9d-4205-a7dd-872c8499913f")
   )
   (wire
     (pts
@@ -4312,9 +4087,9 @@
       (width 0)
       (type default)
     )
-    (uuid "e36e2aea-895f-4afc-9cc9-d9d8f1fc50a7")
+    (uuid "5d8431e7-d839-4013-951a-4062d53be760")
   )
-  (label "3.3V"
+  (label "12V"
     (at 17.78 137.16 180)
     (fields_autoplaced)
     (effects
@@ -4323,7 +4098,7 @@
       )
       (justify right bottom)
     )
-    (uuid "0e6aa6ff-35a8-499d-afba-b5dfc8f949aa")
+    (uuid "cb6915fe-6a5c-414f-900a-4de2b9f81069")
   )
   (wire
     (pts
@@ -4334,9 +4109,9 @@
       (width 0)
       (type default)
     )
-    (uuid "d215c78c-e816-4d8d-9441-69bf55418e82")
+    (uuid "bd63bbde-d699-4aef-841b-b5208b3fdffb")
   )
-  (label "3.3V"
+  (label "12V"
     (at 40.64 137.16 0)
     (fields_autoplaced)
     (effects
@@ -4345,7 +4120,7 @@
       )
       (justify left bottom)
     )
-    (uuid "4229dd9f-d3dc-4265-9bd9-f470eafc776f")
+    (uuid "ce4e7139-6dd7-40f9-818c-f7592d5c6635")
   )
   (wire
     (pts
@@ -4356,9 +4131,9 @@
       (width 0)
       (type default)
     )
-    (uuid "8ff052e0-f292-499b-a3d5-ccccc9b7b4f1")
+    (uuid "7898b8ce-b4ad-4f3b-9cb3-464336742f1f")
   )
-  (label "12V"
+  (label "5VSB"
     (at 17.78 139.7 180)
     (fields_autoplaced)
     (effects
@@ -4367,7 +4142,7 @@
       )
       (justify right bottom)
     )
-    (uuid "158b82f1-a99c-4822-8b0e-9346b742969b")
+    (uuid "a500da47-ba80-4c57-a68b-ac399bb380c1")
   )
   (wire
     (pts
@@ -4378,9 +4153,9 @@
       (width 0)
       (type default)
     )
-    (uuid "a5bd5cd2-10bb-47b9-bb46-688189466a11")
+    (uuid "ef9e5e25-12f6-4d1c-9cb6-dd0a75e51fa2")
   )
-  (label "12V"
+  (label "5VSB"
     (at 40.64 139.7 0)
     (fields_autoplaced)
     (effects
@@ -4389,7 +4164,7 @@
       )
       (justify left bottom)
     )
-    (uuid "849e386c-e6a3-451c-a935-4969a350f845")
+    (uuid "61bac9b8-f57c-4670-b174-4f7612699e70")
   )
   (symbol
     (lib_id "Transistor_FET:2N7000")
@@ -4398,7 +4173,7 @@
     (in_bom yes)
     (on_board yes)
     (dnp no)
-    (uuid "2c3b6402-b3a0-4a12-8c48-f2bb3500bf56")
+    (uuid "cd492131-5a40-4a01-b39f-3c5b08c222bc")
     (property "Reference" "Q1"
       (at 93.98 146.05 0)
       (effects
@@ -4434,16 +4209,16 @@
       )
     )
     (pin "1"
-      (uuid "11aa7a0b-5497-4496-a8eb-d0e11310d598")
+      (uuid "d071712b-6c55-4da7-9cf1-354e972854cc")
     )
     (pin "2"
-      (uuid "619f1315-6dbf-4c7d-97d8-a73bd568f7a8")
+      (uuid "82751c04-e89a-45b3-831a-a8ea3c04eff2")
     )
     (pin "3"
-      (uuid "0bf9c3eb-1cd9-43ac-88e4-573a020dab83")
+      (uuid "8af1cd75-8709-40e9-90dc-55845af9be33")
     )
     (instances
-      (project "bc250_carrier"
+      (project "bc250_carrier_e"
         (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
           (reference "Q1")
           (unit 1)
@@ -4460,7 +4235,7 @@
       (width 0)
       (type default)
     )
-    (uuid "8a858930-da18-4885-98e0-56c0ff282dfb")
+    (uuid "11137e1d-15ef-4729-8b86-8ff79052b19e")
   )
   (label "GND"
     (at 91.44 157.48 270)
@@ -4471,7 +4246,7 @@
       )
       (justify right bottom)
     )
-    (uuid "d70caa24-a388-42d0-9ee0-f293b147ce7a")
+    (uuid "02acd549-182e-4b3d-bf0b-397c1ea2ffc0")
   )
   (wire
     (pts
@@ -4482,7 +4257,7 @@
       (width 0)
       (type default)
     )
-    (uuid "7280c785-a1ce-4c98-977b-01e822e70a39")
+    (uuid "cd8530f2-a8ba-44a7-8ad7-f56c520bac24")
   )
   (label "GATE"
     (at 78.74 147.32 180)
@@ -4493,7 +4268,7 @@
       )
       (justify right bottom)
     )
-    (uuid "1ea3ba46-b49c-4956-8ce1-81db8107b0df")
+    (uuid "0552e891-e03d-4df7-8463-c69d88d98b94")
   )
   (wire
     (pts
@@ -4504,7 +4279,7 @@
       (width 0)
       (type default)
     )
-    (uuid "2200defc-7356-4958-a549-4a29b732aa62")
+    (uuid "35953c87-a0bb-4f53-b978-1ffd066899f8")
   )
   (label "PS_ON#"
     (at 91.44 137.16 90)
@@ -4515,7 +4290,7 @@
       )
       (justify left bottom)
     )
-    (uuid "f40191c2-522f-4ea0-9270-3dd1f97297be")
+    (uuid "ce89159b-720d-460c-9ead-713cd37b1e04")
   )
   (symbol
     (lib_id "Device:R")
@@ -4524,7 +4299,7 @@
     (in_bom yes)
     (on_board yes)
     (dnp no)
-    (uuid "11130c36-9615-4009-b74f-c6bfb1079d7d")
+    (uuid "52004776-c0ff-499b-9332-a641ba4e09b8")
     (property "Reference" "R1"
       (at 73.66 146.05 0)
       (effects
@@ -4560,13 +4335,13 @@
       )
     )
     (pin "1"
-      (uuid "c5f5eb0c-e978-4564-b77f-d36c96343b6d")
+      (uuid "e5a9f65c-aa08-4123-9916-1fb1d47b4254")
     )
     (pin "2"
-      (uuid "473ccf12-d628-41bf-ac1c-104fad8c9662")
+      (uuid "fc98a96f-dcd5-4552-aee9-91adf5ee674b")
     )
     (instances
-      (project "bc250_carrier"
+      (project "bc250_carrier_e"
         (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
           (reference "R1")
           (unit 1)
@@ -4583,7 +4358,7 @@
       (width 0)
       (type default)
     )
-    (uuid "f8337e77-4cef-4e76-b37c-fd34d022fcb9")
+    (uuid "3228a26e-1260-43a9-ac1e-254aec8f1d08")
   )
   (label "GATE"
     (at 71.12 138.43 90)
@@ -4594,7 +4369,7 @@
       )
       (justify left bottom)
     )
-    (uuid "fad23356-fc13-4fc2-baad-702e1c94d9ad")
+    (uuid "0c88923c-97e4-4d0b-872a-510d3291d6c1")
   )
   (wire
     (pts
@@ -4605,7 +4380,7 @@
       (width 0)
       (type default)
     )
-    (uuid "d3b89f33-fa21-4c68-8d51-6f8970c50744")
+    (uuid "e29123dc-d49f-42a0-8753-210b5e9a35cc")
   )
   (label "GND"
     (at 71.12 156.21 270)
@@ -4616,7 +4391,7 @@
       )
       (justify right bottom)
     )
-    (uuid "4f0f4ea3-920a-488f-9d26-81fdd36a7aa1")
+    (uuid "966450cb-ccef-4a42-9455-9a48596b357e")
   )
   (symbol
     (lib_id "Connector_Generic:Conn_01x04")
@@ -4625,7 +4400,7 @@
     (in_bom yes)
     (on_board yes)
     (dnp no)
-    (uuid "5446aace-e5e7-48ba-b430-f5d70bb67f85")
+    (uuid "a071594c-2baf-4384-ba69-88c4d3c170ad")
     (property "Reference" "J5"
       (at 237.49 38.1 0)
       (effects
@@ -4661,19 +4436,19 @@
       )
     )
     (pin "1"
-      (uuid "3f0a02db-fd65-41b9-b85f-20aad98a7951")
+      (uuid "8370f78b-ea42-4075-8eb3-2abfbafad4b7")
     )
     (pin "2"
-      (uuid "ab7f1b39-efb7-4e99-9c29-ee31f234b6e0")
+      (uuid "bca0e4e8-b2b4-48ca-9c88-d540e08ff622")
     )
     (pin "3"
-      (uuid "125c01e4-c90d-4bab-aec6-f5cd87ee7b08")
+      (uuid "52442aa8-7ba4-4431-bb11-80883d8a56fa")
     )
     (pin "4"
-      (uuid "0c104a07-76ec-4a70-bb7b-0c31d84c6202")
+      (uuid "d6ae0d0a-c621-468f-90bd-caefd11c2024")
     )
     (instances
-      (project "bc250_carrier"
+      (project "bc250_carrier_e"
         (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
           (reference "J5")
           (unit 1)
@@ -4690,7 +4465,7 @@
       (width 0)
       (type default)
     )
-    (uuid "52eedf49-8c9d-4e9c-ba06-41d90a8e93d6")
+    (uuid "8de1d817-b979-4015-94c7-4a1ad2c003c1")
   )
   (label "GND"
     (at 226.06 40.64 180)
@@ -4701,7 +4476,7 @@
       )
       (justify right bottom)
     )
-    (uuid "80dc1602-81a7-4801-b82b-ec58bfb79979")
+    (uuid "a876b20a-fb3c-459b-9c3b-d822fe092815")
   )
   (wire
     (pts
@@ -4712,7 +4487,7 @@
       (width 0)
       (type default)
     )
-    (uuid "263828eb-63fa-46d4-b5bc-5a0fa26c6a45")
+    (uuid "fe310c1e-a99a-4179-a1b8-435811768aa0")
   )
   (label "12V"
     (at 226.06 43.18 180)
@@ -4723,11 +4498,11 @@
       )
       (justify right bottom)
     )
-    (uuid "a547ab66-0f93-433c-9699-7bdb900575f2")
+    (uuid "ca29bb26-41f0-4de9-81c1-2106e5541cba")
   )
   (no_connect
     (at 231.14 45.72)
-    (uuid "fbcc144b-041a-4d6e-8629-42ec71bac458")
+    (uuid "a6af71c7-5316-4c65-8a4d-07e6850c93ef")
   )
   (wire
     (pts
@@ -4738,7 +4513,7 @@
       (width 0)
       (type default)
     )
-    (uuid "36083447-12e0-4dbc-9f10-87f29de5a5c7")
+    (uuid "252d6222-ad9b-482c-8e0a-4e25fccc5ae5")
   )
   (label "FAN_GPIO5"
     (at 226.06 48.26 180)
@@ -4749,7 +4524,7 @@
       )
       (justify right bottom)
     )
-    (uuid "e49ec3b9-afe4-41db-a5f1-850540f37a46")
+    (uuid "b9bc7152-b99b-4852-a53f-3085d613b823")
   )
   (symbol
     (lib_id "Connector_Generic:Conn_01x04")
@@ -4758,7 +4533,7 @@
     (in_bom yes)
     (on_board yes)
     (dnp no)
-    (uuid "bd91bda0-b4a9-4775-a2ec-e9ab70c50d23")
+    (uuid "fdfcf0af-ef84-4315-a6b8-0249d94b0547")
     (property "Reference" "J6"
       (at 237.49 60.96 0)
       (effects
@@ -4794,19 +4569,19 @@
       )
     )
     (pin "1"
-      (uuid "3ddbca72-b6ce-486a-ad2d-30420272bc47")
+      (uuid "36563c4a-6c0a-4461-8fe8-213fc51f1906")
     )
     (pin "2"
-      (uuid "72722a84-af89-4d07-b0a2-72109056797f")
+      (uuid "3ecc939a-5673-4279-9074-7bb7aff0c12e")
     )
     (pin "3"
-      (uuid "1c62761b-ede9-4bee-b50a-a8d34be98aca")
+      (uuid "f9a2951f-c5e9-450a-a70a-19852cb6c799")
     )
     (pin "4"
-      (uuid "e7bd9c96-02a6-4b96-a5e6-60d50268d3e5")
+      (uuid "342823f8-8c2b-459a-a18b-e0f605b273bd")
     )
     (instances
-      (project "bc250_carrier"
+      (project "bc250_carrier_e"
         (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
           (reference "J6")
           (unit 1)
@@ -4823,7 +4598,7 @@
       (width 0)
       (type default)
     )
-    (uuid "1c784d43-bf77-400a-9b8d-74dfcd88cafc")
+    (uuid "99bf13af-0a2e-4d4c-b5c4-5214696389bd")
   )
   (label "GND"
     (at 226.06 63.5 180)
@@ -4834,7 +4609,7 @@
       )
       (justify right bottom)
     )
-    (uuid "72dcf5ac-516f-4b2f-bda1-166b68f1b5fb")
+    (uuid "592c225d-5ed5-4f89-ad74-055fdcb26dc0")
   )
   (wire
     (pts
@@ -4845,7 +4620,7 @@
       (width 0)
       (type default)
     )
-    (uuid "2144da3e-c996-46b9-9e0a-ec3ce01bc5b2")
+    (uuid "7dc46642-bc18-428b-9895-b2c846c96c0b")
   )
   (label "12V"
     (at 226.06 66.04 180)
@@ -4856,11 +4631,11 @@
       )
       (justify right bottom)
     )
-    (uuid "87d216e7-6f9d-416e-8580-5473ba06bb70")
+    (uuid "41144c0a-6a59-490f-b9cf-500f1a2fd55e")
   )
   (no_connect
     (at 231.14 68.58)
-    (uuid "f532b311-9ed0-4576-8f2b-c4bf8c80e4f6")
+    (uuid "4303fefb-617c-4ce4-b8c7-e9484b19c7cf")
   )
   (wire
     (pts
@@ -4871,7 +4646,7 @@
       (width 0)
       (type default)
     )
-    (uuid "53ce2211-4eba-4db4-91da-1cf26c5a7284")
+    (uuid "b6f5aaf3-5cff-4ddf-9a7f-87651e9d1abe")
   )
   (label "FAN_GPIO6"
     (at 226.06 71.12 180)
@@ -4882,7 +4657,7 @@
       )
       (justify right bottom)
     )
-    (uuid "5d631fc8-7cca-4042-bc9f-a8b8061abd95")
+    (uuid "4c48455c-1603-4fde-8870-2dd61a93f542")
   )
   (symbol
     (lib_id "Connector_Generic:Conn_01x04")
@@ -4891,7 +4666,7 @@
     (in_bom yes)
     (on_board yes)
     (dnp no)
-    (uuid "f39a569f-482d-45e8-a26b-a86592e83bf4")
+    (uuid "025fd049-3f45-4dbb-ade6-0bc5d6a87c72")
     (property "Reference" "J7"
       (at 237.49 83.82 0)
       (effects
@@ -4927,19 +4702,19 @@
       )
     )
     (pin "1"
-      (uuid "f3957896-c389-4545-a454-9654601b7fb5")
+      (uuid "2e78ad95-36a8-4587-a78a-694a6576ae33")
     )
     (pin "2"
-      (uuid "e791ad61-806c-43c4-9a86-68a0d0587b86")
+      (uuid "0221db11-be90-4cce-8b47-ee5f41101624")
     )
     (pin "3"
-      (uuid "16ce4f23-470d-477c-97d3-6e0898a8db6e")
+      (uuid "1b928912-ff0a-4d89-b0be-7c1d2ea3ec45")
     )
     (pin "4"
-      (uuid "3c038f93-11f9-4d2e-bc70-8346360f2bfb")
+      (uuid "3c211d1a-f414-42fb-8ff0-78d4603b8dfb")
     )
     (instances
-      (project "bc250_carrier"
+      (project "bc250_carrier_e"
         (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
           (reference "J7")
           (unit 1)
@@ -4956,7 +4731,7 @@
       (width 0)
       (type default)
     )
-    (uuid "1ca6df84-11cb-455c-9b4f-21665711a45e")
+    (uuid "d84c9285-a006-4202-8b5e-d573d6be517d")
   )
   (label "GND"
     (at 226.06 86.36 180)
@@ -4967,7 +4742,7 @@
       )
       (justify right bottom)
     )
-    (uuid "d7eb482c-42c3-422b-b0ac-c6795e696638")
+    (uuid "534a761b-474b-45f7-af44-f205c929d2f6")
   )
   (wire
     (pts
@@ -4978,7 +4753,7 @@
       (width 0)
       (type default)
     )
-    (uuid "d225231f-8695-4b33-a22f-b847e9d715ea")
+    (uuid "00043ff8-9289-4f37-83a6-0432ae7f4215")
   )
   (label "12V"
     (at 226.06 88.9 180)
@@ -4989,11 +4764,11 @@
       )
       (justify right bottom)
     )
-    (uuid "5ffaa4f8-f7c8-4590-856d-cd924b303df3")
+    (uuid "46720141-6cc0-4f28-9d98-9afcccc17ae2")
   )
   (no_connect
     (at 231.14 91.44)
-    (uuid "c01bff7f-10da-4c96-88bf-7c0c3f8eefcc")
+    (uuid "94692645-41ee-4f82-8022-8a49eaf882b8")
   )
   (wire
     (pts
@@ -5004,7 +4779,7 @@
       (width 0)
       (type default)
     )
-    (uuid "2cc42130-efdb-4802-a081-51a77457ef8f")
+    (uuid "ead4443c-0222-4afe-9a04-1ba7af9212e3")
   )
   (label "FAN_GPIO7"
     (at 226.06 93.98 180)
@@ -5015,7 +4790,7 @@
       )
       (justify right bottom)
     )
-    (uuid "f30caf51-5ef3-443d-bf58-53495118cd0d")
+    (uuid "9724b761-8e1e-4cbf-a9ac-6ecbc59994f3")
   )
   (symbol
     (lib_id "Connector_Generic:Conn_01x04")
@@ -5024,7 +4799,7 @@
     (in_bom yes)
     (on_board yes)
     (dnp no)
-    (uuid "9fb11c3e-c2be-4221-9abe-0eb9c48622d5")
+    (uuid "275341a4-ab26-40e1-a737-832ee1388148")
     (property "Reference" "J8"
       (at 237.49 106.68 0)
       (effects
@@ -5060,19 +4835,19 @@
       )
     )
     (pin "1"
-      (uuid "95a5f238-b544-4981-8f2a-d7c9ce91baa5")
+      (uuid "fa3914b5-54d5-4c2b-b815-886e6dc79c40")
     )
     (pin "2"
-      (uuid "2d810aa1-52aa-4010-8c94-312e3012f5cc")
+      (uuid "1204ebb1-fa36-4699-82af-6846802f13b2")
     )
     (pin "3"
-      (uuid "3f543102-a623-47e8-a293-af07dc327b21")
+      (uuid "89620579-9750-4a1f-9334-b2d8080fd84f")
     )
     (pin "4"
-      (uuid "967baa0f-6c9b-4e54-bfa0-0665c832863b")
+      (uuid "7d591b9a-9be5-439a-92f3-09c5ce67aa82")
     )
     (instances
-      (project "bc250_carrier"
+      (project "bc250_carrier_e"
         (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
           (reference "J8")
           (unit 1)
@@ -5089,7 +4864,7 @@
       (width 0)
       (type default)
     )
-    (uuid "1feb2216-68b5-439a-82ec-761550311e5a")
+    (uuid "cd34e731-1152-491e-92cb-b1df4b162e8f")
   )
   (label "GND"
     (at 226.06 109.22 180)
@@ -5100,7 +4875,7 @@
       )
       (justify right bottom)
     )
-    (uuid "26cc176c-7304-443b-83bb-4b61ae44540a")
+    (uuid "571203a8-b7b5-4c46-9496-c71d7c6d6614")
   )
   (wire
     (pts
@@ -5111,7 +4886,7 @@
       (width 0)
       (type default)
     )
-    (uuid "b53cc964-6817-4089-9bc6-a83416eecb75")
+    (uuid "5415d70f-abaa-4622-b44d-c502ea47715c")
   )
   (label "12V"
     (at 226.06 111.76 180)
@@ -5122,11 +4897,11 @@
       )
       (justify right bottom)
     )
-    (uuid "7ce3fee8-19c5-419f-871a-e4ec50826065")
+    (uuid "c99ef03f-ca49-4f4e-99ed-6c7346043837")
   )
   (no_connect
     (at 231.14 114.3)
-    (uuid "1cfdaab0-a58f-4dc4-8159-ff8c79b590ff")
+    (uuid "61dbc9d3-c9d4-444a-a97a-1210425c8731")
   )
   (wire
     (pts
@@ -5137,7 +4912,7 @@
       (width 0)
       (type default)
     )
-    (uuid "9b7785cc-21f0-4447-825c-82d20a25c123")
+    (uuid "64536063-655f-4506-809f-72d4f4be8d9d")
   )
   (label "FAN_GPIO10"
     (at 226.06 116.84 180)
@@ -5148,160 +4923,7 @@
       )
       (justify right bottom)
     )
-    (uuid "4236634c-abcc-40d1-a968-0c9965c023f0")
-  )
-  (symbol
-    (lib_id "Mechanical:MountingHole")
-    (at 43.18 175.26 0)
-    (unit 1)
-    (in_bom yes)
-    (on_board yes)
-    (dnp no)
-    (uuid "c350b2d6-7c31-4e09-9f4e-7479605ad507")
-    (property "Reference" "H2"
-      (at 43.18 171.45 0)
-      (effects
-        (font
-          (size 1.27 1.27)
-        )
-      )
-    )
-    (property "Value" "M3"
-      (at 43.18 179.07 0)
-      (effects
-        (font
-          (size 1.27 1.27)
-        )
-      )
-    )
-    (property "Footprint" "MountingHole:MountingHole_3.2mm_M3"
-      (at 43.18 175.26 0)
-      (effects
-        (font
-          (size 1.27 1.27)
-        )
-        hide
-      )
-    )
-    (property "Datasheet" "~"
-      (at 43.18 175.26 0)
-      (effects
-        (font
-          (size 1.27 1.27)
-        )
-        hide
-      )
-    )
-    (instances
-      (project "bc250_carrier"
-        (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
-          (reference "H2")
-          (unit 1)
-        )
-      )
-    )
-  )
-  (symbol
-    (lib_id "Mechanical:MountingHole")
-    (at 58.42 175.26 0)
-    (unit 1)
-    (in_bom yes)
-    (on_board yes)
-    (dnp no)
-    (uuid "eba466c6-4655-40ba-b77a-bcaf2d8542be")
-    (property "Reference" "H3"
-      (at 58.42 171.45 0)
-      (effects
-        (font
-          (size 1.27 1.27)
-        )
-      )
-    )
-    (property "Value" "M3"
-      (at 58.42 179.07 0)
-      (effects
-        (font
-          (size 1.27 1.27)
-        )
-      )
-    )
-    (property "Footprint" "MountingHole:MountingHole_3.2mm_M3"
-      (at 58.42 175.26 0)
-      (effects
-        (font
-          (size 1.27 1.27)
-        )
-        hide
-      )
-    )
-    (property "Datasheet" "~"
-      (at 58.42 175.26 0)
-      (effects
-        (font
-          (size 1.27 1.27)
-        )
-        hide
-      )
-    )
-    (instances
-      (project "bc250_carrier"
-        (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
-          (reference "H3")
-          (unit 1)
-        )
-      )
-    )
-  )
-  (symbol
-    (lib_id "Mechanical:MountingHole")
-    (at 73.66 175.26 0)
-    (unit 1)
-    (in_bom yes)
-    (on_board yes)
-    (dnp no)
-    (uuid "d42536d2-ab5b-4a74-8d10-9cd714804b75")
-    (property "Reference" "H4"
-      (at 73.66 171.45 0)
-      (effects
-        (font
-          (size 1.27 1.27)
-        )
-      )
-    )
-    (property "Value" "M3"
-      (at 73.66 179.07 0)
-      (effects
-        (font
-          (size 1.27 1.27)
-        )
-      )
-    )
-    (property "Footprint" "MountingHole:MountingHole_3.2mm_M3"
-      (at 73.66 175.26 0)
-      (effects
-        (font
-          (size 1.27 1.27)
-        )
-        hide
-      )
-    )
-    (property "Datasheet" "~"
-      (at 73.66 175.26 0)
-      (effects
-        (font
-          (size 1.27 1.27)
-        )
-        hide
-      )
-    )
-    (instances
-      (project "bc250_carrier"
-        (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
-          (reference "H4")
-          (unit 1)
-        )
-      )
-    )
+    (uuid "4c0266be-099e-49e9-b538-7fb7d81861f3")
   )
   (symbol
     (lib_id "bc250_carrier:ESP32-C3_SuperMini")
@@ -5310,7 +4932,7 @@
     (in_bom no)
     (on_board no)
     (dnp no)
-    (uuid "0fe434db-d9bd-4fb1-874f-ae9f51188139")
+    (uuid "47e88a2c-c98b-4b0b-a5db-be9a57447106")
     (property "Reference" "U1"
       (at 148.59 81.915 0)
       (effects
@@ -5346,55 +4968,55 @@
       )
     )
     (pin "1"
-      (uuid "56d2e090-7198-4937-acc4-1ac605a284d9")
+      (uuid "c69146b4-c02e-4a2d-8042-3be2c944e16c")
     )
     (pin "2"
-      (uuid "f3e90e86-3aed-4402-a885-5dcb57cdef43")
+      (uuid "38a78f90-b56f-4296-945c-842a844756a3")
     )
     (pin "3"
-      (uuid "44e4dab5-3e36-49b4-ba3b-be8e58133385")
+      (uuid "ce5a186c-28a1-48db-b628-2a03bc73d112")
     )
     (pin "4"
-      (uuid "e4d4204a-18f1-465c-9b3d-60dc5052a7d0")
+      (uuid "749c5e51-e3f8-4290-9244-944230da3d37")
     )
     (pin "5"
-      (uuid "51413bd3-2183-404d-a2e5-5f83ba8e3265")
+      (uuid "fa6bca0f-bbf1-4f09-867d-572f9d4b6c0e")
     )
     (pin "6"
-      (uuid "7f734904-65ba-4b3e-86e8-81fbc357c3f1")
+      (uuid "5f2ca287-cb2a-4f72-9393-5ffb5971db71")
     )
     (pin "7"
-      (uuid "994c106e-99c9-44e5-b46b-3ab0a5029175")
+      (uuid "955f71f8-259c-4353-b79e-9b70618651c9")
     )
     (pin "8"
-      (uuid "b94dcf2c-0f5f-4b2c-96bb-98a589d1aaab")
+      (uuid "fb86bbce-0958-4dc1-8997-bf38343c6ca2")
     )
     (pin "9"
-      (uuid "13f68ffb-1fe9-4e51-b35d-3b877aa9edd3")
+      (uuid "ec191bd6-899a-41b1-9057-5219bcf37468")
     )
     (pin "10"
-      (uuid "a90e1250-280f-4d5f-b2cd-29f06b35f3a7")
+      (uuid "68b445ca-13d5-42e1-a4b8-28cc7630154e")
     )
     (pin "11"
-      (uuid "e434598f-3eda-43d5-9cf2-49d373f2671a")
+      (uuid "729cd3f5-4537-40da-97eb-a7ee6c2b8236")
     )
     (pin "12"
-      (uuid "b2191aa6-0746-4517-9da3-a2cfb984eef9")
+      (uuid "acd3c1b6-0d39-41ba-8ab9-b12cd724e030")
     )
     (pin "13"
-      (uuid "aeb313cd-1484-4ac2-adee-a703518781a0")
+      (uuid "7d3e90fc-4392-4a13-b0d1-2e33f76192dd")
     )
     (pin "14"
-      (uuid "b0340e08-9351-46d0-b26b-0910befbdb46")
+      (uuid "93927478-1c44-41c7-9dd7-f8d5a3e04476")
     )
     (pin "15"
-      (uuid "de5cb9e9-65e5-4aad-9be2-630bf90b5919")
+      (uuid "037b1cb5-86a0-45d0-a01b-e6f959407d3d")
     )
     (pin "16"
-      (uuid "1612b849-e4f6-446a-864e-438e485d309f")
+      (uuid "670bacd7-d4fa-40b1-8b1c-275c0215299d")
     )
     (instances
-      (project "bc250_carrier"
+      (project "bc250_carrier_e"
         (path "/0f8c9b7e-4d21-4e3a-9c5a-bc250c0de001"
           (reference "U1")
           (unit 1)
@@ -5411,7 +5033,7 @@
       (width 0)
       (type default)
     )
-    (uuid "3e8e5e24-651e-46f3-8b90-e5f389cc999d")
+    (uuid "58beb18b-e187-4fd1-ab11-f63792e2a3c9")
   )
   (label "FAN_GPIO5"
     (at 125.73 87.63 180)
@@ -5422,7 +5044,7 @@
       )
       (justify right bottom)
     )
-    (uuid "84d22e46-4e0c-4406-a083-1fa50412b9f5")
+    (uuid "68aed4b1-b3e2-4c5e-9098-d95eb9fc1561")
   )
   (wire
     (pts
@@ -5433,7 +5055,7 @@
       (width 0)
       (type default)
     )
-    (uuid "3b844434-bbb3-456f-bee2-03af1d80627f")
+    (uuid "2b71296e-369d-4bc0-a59c-d9fed5bb7cf0")
   )
   (label "FAN_GPIO6"
     (at 125.73 90.17 180)
@@ -5444,7 +5066,7 @@
       )
       (justify right bottom)
     )
-    (uuid "20db3b7f-036f-4234-850b-9ad309d14a12")
+    (uuid "3d458537-6795-4658-b96b-b52b397de6f5")
   )
   (wire
     (pts
@@ -5455,7 +5077,7 @@
       (width 0)
       (type default)
     )
-    (uuid "d3ea19d4-0f7b-4434-99f0-59a15229c23b")
+    (uuid "de75f2f3-ea73-4886-8e5f-8d225a4d6739")
   )
   (label "FAN_GPIO7"
     (at 125.73 92.71 180)
@@ -5466,7 +5088,7 @@
       )
       (justify right bottom)
     )
-    (uuid "6858474a-1d02-45fe-aa50-659def6974b6")
+    (uuid "6ef761d8-bef1-4181-a5a2-8aaa773d4f99")
   )
   (wire
     (pts
@@ -5477,7 +5099,7 @@
       (width 0)
       (type default)
     )
-    (uuid "616a32c0-1682-4c5f-ab07-9a578fa685c9")
+    (uuid "7d930cec-116c-4d0c-a4d7-44e9f6caef1e")
   )
   (label "GPIO8"
     (at 125.73 95.25 180)
@@ -5488,7 +5110,7 @@
       )
       (justify right bottom)
     )
-    (uuid "56284fc8-5267-4fa2-81dc-6a34e9fc1874")
+    (uuid "236c118f-57b1-4eff-a04b-cb184c0acce3")
   )
   (wire
     (pts
@@ -5499,7 +5121,7 @@
       (width 0)
       (type default)
     )
-    (uuid "215742c7-f5ab-4fb8-8605-7284181aa5b0")
+    (uuid "398db604-e7f3-41fe-96d9-7201ac18d7b9")
   )
   (label "GPIO9"
     (at 125.73 97.79 180)
@@ -5510,7 +5132,7 @@
       )
       (justify right bottom)
     )
-    (uuid "1a52072c-ea6f-4d2d-a4c5-7a6d27ce6ac7")
+    (uuid "7d549bcd-106f-4a76-909a-808c6864b2eb")
   )
   (wire
     (pts
@@ -5521,7 +5143,7 @@
       (width 0)
       (type default)
     )
-    (uuid "6fca88f1-7a33-4d9f-9f84-cb27ad5f13f0")
+    (uuid "7e1b947c-c9cc-4d5f-975f-79d164b61816")
   )
   (label "FAN_GPIO10"
     (at 125.73 100.33 180)
@@ -5532,7 +5154,7 @@
       )
       (justify right bottom)
     )
-    (uuid "227c03e6-d282-46df-abbd-3eca5fd4b6e4")
+    (uuid "e5344847-fe63-426c-8fb2-107160fa0267")
   )
   (wire
     (pts
@@ -5543,7 +5165,7 @@
       (width 0)
       (type default)
     )
-    (uuid "f18b1875-d4b6-4bc7-b456-8cafb689f8d1")
+    (uuid "1dbf87bf-99a0-4119-9c62-a572bd91be0d")
   )
   (label "GPIO20"
     (at 125.73 102.87 180)
@@ -5554,7 +5176,7 @@
       )
       (justify right bottom)
     )
-    (uuid "397d5a48-fa09-44e9-916d-d1783d62be8b")
+    (uuid "b0b7b2fd-b600-4e0b-9a48-5ade44ad3e14")
   )
   (wire
     (pts
@@ -5565,7 +5187,7 @@
       (width 0)
       (type default)
     )
-    (uuid "23841d1d-08c5-450c-a6ab-8fe4dcda0ac8")
+    (uuid "ebe748cf-84b0-4a9f-ba19-97c0d5d4082a")
   )
   (label "GPIO21"
     (at 125.73 105.41 180)
@@ -5576,7 +5198,7 @@
       )
       (justify right bottom)
     )
-    (uuid "481b9199-7d8d-424f-a991-85f7a0e7dd1d")
+    (uuid "7f7790ee-40d6-4e81-bc06-5949bc1167b3")
   )
   (wire
     (pts
@@ -5587,7 +5209,7 @@
       (width 0)
       (type default)
     )
-    (uuid "4c479734-f9ec-473e-92f7-6240ac7859d5")
+    (uuid "f87f5b66-8fb3-4ec4-aace-8eb81f6fe24a")
   )
   (label "5VSB"
     (at 171.45 87.63 0)
@@ -5598,7 +5220,7 @@
       )
       (justify left bottom)
     )
-    (uuid "9122a112-b5f0-406d-b201-7f318fe79cd7")
+    (uuid "332a0beb-90c3-4e1b-bbe6-16cab6cfb41d")
   )
   (wire
     (pts
@@ -5609,7 +5231,7 @@
       (width 0)
       (type default)
     )
-    (uuid "f626a75c-c5e4-4c8d-9fa1-c69dbe18b4b7")
+    (uuid "9bec97d0-b7aa-41cd-96ae-6152c8f571be")
   )
   (label "GND"
     (at 171.45 90.17 0)
@@ -5620,11 +5242,11 @@
       )
       (justify left bottom)
     )
-    (uuid "1a270ec1-0f4e-4d9b-ab57-08ad7ebdda59")
+    (uuid "420e2fe3-fe89-4999-bd45-c75db13f5026")
   )
   (no_connect
     (at 166.37 92.71)
-    (uuid "7ee91a19-d788-48da-a3ef-f61f3ed98803")
+    (uuid "63d249e2-61fd-462c-86a3-64c7cf8224b7")
   )
   (wire
     (pts
@@ -5635,7 +5257,7 @@
       (width 0)
       (type default)
     )
-    (uuid "d89d0072-02d4-42bd-876c-7b57bc6db553")
+    (uuid "8df9671b-f689-41ea-83d5-f6d1359e1e39")
   )
   (label "DIN"
     (at 171.45 95.25 0)
@@ -5646,7 +5268,7 @@
       )
       (justify left bottom)
     )
-    (uuid "1f300d69-4d83-4339-9df1-03ac3aac929e")
+    (uuid "4c716dc4-1ff8-4dbe-abd6-3fad0e48e04a")
   )
   (wire
     (pts
@@ -5657,7 +5279,7 @@
       (width 0)
       (type default)
     )
-    (uuid "8339f9cc-1a24-4c88-b246-1dac062b244b")
+    (uuid "e6fa3f10-3241-4533-a767-9b4d042f1dd5")
   )
   (label "GATE"
     (at 171.45 97.79 0)
@@ -5668,7 +5290,7 @@
       )
       (justify left bottom)
     )
-    (uuid "f9b855ad-6d7a-463b-98dd-d72bd24534c8")
+    (uuid "9c28b30b-55dc-4b9d-85f8-f94ea4dffba6")
   )
   (wire
     (pts
@@ -5679,7 +5301,7 @@
       (width 0)
       (type default)
     )
-    (uuid "7f41b2ec-4162-4ad9-9fc8-aaac53601a98")
+    (uuid "b0181a0b-d102-4ddd-a586-f92faaeab007")
   )
   (label "SENSE"
     (at 171.45 100.33 0)
@@ -5690,7 +5312,7 @@
       )
       (justify left bottom)
     )
-    (uuid "a3ea53f5-dcd0-4abd-851e-a0ebb1edfaa2")
+    (uuid "ccac4556-c0f1-489b-b0b3-a1840e7360bb")
   )
   (wire
     (pts
@@ -5701,7 +5323,7 @@
       (width 0)
       (type default)
     )
-    (uuid "b8238c5c-1540-4b16-9638-8ad24eca4476")
+    (uuid "53e49525-4965-45b5-88b6-edbb37c8c891")
   )
   (label "BTN"
     (at 171.45 102.87 0)
@@ -5712,7 +5334,7 @@
       )
       (justify left bottom)
     )
-    (uuid "3eead4c3-d7a1-486e-b43c-282fea8354fb")
+    (uuid "de2356aa-3851-452a-85b1-8cc422b7d95f")
   )
   (wire
     (pts
@@ -5723,7 +5345,7 @@
       (width 0)
       (type default)
     )
-    (uuid "8ac57108-eea6-444c-ace2-055ff375e08d")
+    (uuid "3aad557a-4fa0-46c5-858c-4295a1d75662")
   )
   (label "GPIO0"
     (at 171.45 105.41 0)
@@ -5734,7 +5356,7 @@
       )
       (justify left bottom)
     )
-    (uuid "40f83868-5b6c-46d7-b54f-1af7b55964dc")
+    (uuid "b8a5ca5c-8d9e-4cc3-9fe6-da25d60aecd7")
   )
   (text "ESP32-C3 Super Mini carrier for the BC-250 (serial_led_controller)."
     (at 20.32 20.32 0)
@@ -5744,7 +5366,7 @@
       )
       (justify left bottom)
     )
-    (uuid "e6bcf200-a981-4589-b426-2c56e9bf0387")
+    (uuid "433d5fcf-f9ae-460f-ac04-fcc8db94a71b")
   )
   (text "The Super Mini brings its own USB-C, 3.3 V regulator, BOOT/RESET buttons and GPIO8 LED."
     (at 20.32 24.13 0)
@@ -5754,7 +5376,7 @@
       )
       (justify left bottom)
     )
-    (uuid "93b94879-d2c3-4a11-b89f-fdcf4eecab41")
+    (uuid "85e42cfe-4c51-4951-aa71-14d476e2027a")
   )
   (text "U1 is not soldered: it plugs, pins down, into the 1x8 sockets J12 (left column) and J13 (right), USB-C at the board edge."
     (at 20.32 46.99 0)
@@ -5764,7 +5386,7 @@
       )
       (justify left bottom)
     )
-    (uuid "4cb19a8d-c22a-41b0-ad17-5651342abd64")
+    (uuid "643bfa6c-07ac-4139-b1f3-e1d93dc0e2f0")
   )
   (text "Its USB VBUS is tied to the 5V pin: cut the red wire in the USB cable (README, Power switch)."
     (at 20.32 27.94 0)
@@ -5774,7 +5396,7 @@
       )
       (justify left bottom)
     )
-    (uuid "23b6a619-3ba0-45e9-a847-8d1fc4af4d68")
+    (uuid "eed8b0c2-7b40-4c96-8f42-05a58163d994")
   )
   (text "The switch common (J9 pin 4) is a real GND: power_switch.pins.button_gnd is null in the config."
     (at 20.32 31.75 0)
@@ -5784,7 +5406,7 @@
       )
       (justify left bottom)
     )
-    (uuid "0bb5f692-7c9f-48e5-9a6e-70339d735ac3")
+    (uuid "6c39be17-9556-4363-9fdc-75db24f94aca")
   )
   (text "Fan header pin 1 = GND, 2 = +12 V, 3 = tach (unused), 4 = PWM. FAN1..4 = GPIO 5, 6, 7, 10 = fans.header1..4."
     (at 20.32 35.56 0)
@@ -5794,7 +5416,7 @@
       )
       (justify left bottom)
     )
-    (uuid "876a185b-90d3-4a27-abb6-a84fcde225f3")
+    (uuid "e55824ac-6648-4b8f-819d-b0a1706e585b")
   )
   (text "J1 takes the FSP500-30AS 10-pin Mini-Fit Jr plug; pin map per its pinout drawing (see README)."
     (at 20.32 39.37 0)
@@ -5804,7 +5426,7 @@
       )
       (justify left bottom)
     )
-    (uuid "fd4f7727-cf8f-4863-95e9-cbcded048de7")
+    (uuid "13111654-51d7-496b-9780-260e7a853519")
   )
   (text "VIN is the strip supply rail (3.3 V from the PSU), separate from 5VSB; the strip path is sized for 3 A."
     (at 20.32 43.18 0)
@@ -5814,7 +5436,7 @@
       )
       (justify left bottom)
     )
-    (uuid "80f9e713-cea8-4cb0-8fa5-c502ddd01165")
+    (uuid "b6854b82-a51e-43aa-af62-b64b9b6bd3b7")
   )
   (text "Mounting holes, M3:"
     (at 20.32 163.83 0)
@@ -5824,7 +5446,7 @@
       )
       (justify left bottom)
     )
-    (uuid "213ddb28-d507-45b6-b9a1-42b9c3a2518c")
+    (uuid "4d2a0192-c75c-42ca-876f-67815edcac5c")
   )
   (sheet_instances
     (path "/"
