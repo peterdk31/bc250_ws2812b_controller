@@ -1,6 +1,7 @@
 # BC-250 carrier board: regenerate the KiCad project, check it, export fab files.
 #
 #   make            generate + check + export
+#   make generate   write the KiCad files from generate.py, then fill.py: the ground fill and its stitching vias
 #   make check      geometry check only (KiCad 7's kicad-cli has no DRC)
 #   make drc        KiCad's own DRC through the pcbnew Python module (out/drc.txt)
 #   make export     gerbers, drill, PDFs, position file, netlist, BOM xml into out/, then fab.py:
@@ -25,12 +26,15 @@ all: generate check drc preview pinout export
 
 generate:
 	python3 generate.py
+	python3 fill.py $(PCB)
 
 check:
 	python3 check.py
 
 preview:
 	python3 preview.py
+	python3 preview.py $(OUT)/preview-F.png 14 F
+	python3 preview.py $(OUT)/preview-B.png 14 B
 
 pinout:
 	python3 pinout.py

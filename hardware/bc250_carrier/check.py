@@ -14,9 +14,10 @@ import sys
 
 import generate as g
 
-CLEAR = 0.2        # min copper clearance
+CLEAR = 0.3        # min copper clearance, track to track (etched, under the mask)
+PAD_CLEAR = 0.5    # min copper clearance to a solder pad of another part: the board is hand soldered
 EDGE = 0.3         # min copper to board edge
-HOLE_CLEAR = 0.25  # copper to a mounting hole wall / an unplated peg hole
+HOLE_CLEAR = 0.3   # copper to a mounting hole wall / an unplated peg hole
 
 
 def seg_point_dist(a, b, p):
@@ -103,7 +104,7 @@ def main():
                 continue
             if p[0] == 'pad' and q[0] == 'pad' and p[1][0] == q[1][0]:
                 continue  # pads of one stock footprint: its own geometry
-            need = HOLE_CLEAR if is_hole(p) or is_hole(q) else CLEAR
+            need = HOLE_CLEAR if is_hole(p) or is_hole(q) else PAD_CLEAR if 'pad' in (p[0], q[0]) else CLEAR
             dd = dist(p, q)
             if dd < need - 1e-6:
                 findings.append(f'clearance {dd:.3f} < {need} on {p[3]}: {p[0]} {p[1]} [{p[2]}] vs {q[0]} {q[1]} [{q[2]}]')

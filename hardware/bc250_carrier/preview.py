@@ -5,7 +5,9 @@ the antenna keepout and the silkscreen legends — so a layout can be looked
 at without KiCad.  Pillow only.  Not a substitute for the KiCad render, just
 fast.
 
-Usage:  python3 preview.py [out/preview.png] [px_per_mm]
+Usage:  python3 preview.py [out/preview.png] [px_per_mm] [F|B]
+        (F or B: that copper layer alone, fill and tracks; out/preview-F.png and
+        out/preview-B.png are written that way by `make preview`)
 """
 import os
 import sys
@@ -15,7 +17,44 @@ from PIL import Image, ImageDraw, ImageFont
 import generate as g
 
 SCALE = float(sys.argv[2]) if len(sys.argv) > 2 else 14.0
+ONLY = {'F': 'F.Cu', 'B': 'B.Cu'}.get(sys.argv[3]) if len(sys.argv) > 3 else None
 MARGIN = 3.0
+
+
+def draw_fill(img, P, size):
+    """Tint the filled GND zones (back blue, front red, over each other) and
+    return the vias the design does not place itself (fill.py's stitches)."""
+    try:
+        import pcbnew
+    except ImportError:
+        return []
+    path = os.path.join(g.HERE, g.PROJECT + '.kicad_pcb')
+    board = pcbnew.LoadBoard(path)
+    mm = pcbnew.ToMM
+    for layer, rgb in ((pcbnew.B_Cu, (60, 110, 255)), (pcbnew.F_Cu, (255, 90, 70))):
+        if ONLY and board.GetLayerName(layer) != ONLY:
+            continue
+        mask = Image.new('L', size, 0)
+        md = ImageDraw.Draw(mask)
+        for z in board.Zones():
+            if z.GetNetname() != 'GND' or z.GetIsRuleArea() or not z.HasFilledPolysForLayer(layer):
+                continue
+            polys = z.GetFilledPolysList(layer)
+            for i in range(polys.OutlineCount()):
+                chain = polys.Outline(i)
+                md.polygon([P(mm(chain.CPoint(k).x), mm(chain.CPoint(k).y)) for k in range(chain.PointCount())], fill=70)
+                for hi in range(polys.HoleCount(i)):
+                    hole = polys.Hole(i, hi)
+                    md.polygon([P(mm(hole.CPoint(k).x), mm(hole.CPoint(k).y)) for k in range(hole.PointCount())], fill=0)
+        img.paste(Image.new('RGB', size, rgb), (0, 0), mask)
+    own = {(round(x, 3), round(y, 3)) for n, x, y in g.VIAS}
+    out = []
+    for t in board.GetTracks():
+        if t.GetClass() == 'PCB_VIA':
+            x, y = mm(t.GetPosition().x), mm(t.GetPosition().y)
+            if (round(x, 3), round(y, 3)) not in own:
+                out.append(('GND', x, y))
+    return out
 
 
 def main():
@@ -42,9 +81,14 @@ def main():
     kx0, ky0, kx1, ky1 = d['keepout']
     dr.rectangle([P(kx0, ky0), P(kx1, ky1)], outline=(220, 80, 220), width=1)
 
+    # the ground fill and its stitching vias, from the filled board (fill.py), when pcbnew is there
+    stitches = draw_fill(img, P, (w, h))
+
     # tracks: B.Cu first (blue), then F.Cu (red)
     col = {'B.Cu': (60, 110, 255, 200), 'F.Cu': (255, 70, 70, 200)}
     for layer in ('B.Cu', 'F.Cu'):
+        if ONLY and layer != ONLY:
+            continue
         for n, lay, width, pts in d['tracks']:
             if lay != layer:
                 continue
@@ -96,7 +140,7 @@ def main():
                 r = drill / 2 * SCALE
                 dr.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(30, 30, 30))
         dr.text(P(x, y - 0.1), ref, fill=(255, 255, 120), font=font(1.0), anchor='mm')
-    for n, vx, vy in d.get('vias', []):
+    for n, vx, vy in d.get('vias', []) + stitches:
         cx, cy = P(vx, vy)
         r = g.VIA_D / 2 * SCALE
         dr.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(180, 120, 255))

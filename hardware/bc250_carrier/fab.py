@@ -70,7 +70,7 @@ def board_parts(pos):
                           package=first['Package'], value=first['Val'], lcsc=lcsc, type='THT',
                           notes=f'LCSC {lcsc}  https://www.lcsc.com/product-detail/{lcsc}.html'))
         fitted.update(refs)
-    missing = set(pos) - fitted
+    missing = set(pos) - fitted - g.NOT_ASSEMBLED
     assert not missing, f'footprints on the board with no part: {sorted(missing)}'
     return parts, fitted
 

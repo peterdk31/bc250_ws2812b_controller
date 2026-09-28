@@ -1121,7 +1121,7 @@ Wiring (channel order = header order):
 |---|---|---|
 | header1–header4 | GPIO5, 6, 7, 10 — the carrier board's FAN1–FAN4 | one fan's PWM input each (pin 4 on the 4-pin connector) |
 | — | — | fan +12 V and GND come from the PSU, **sharing a common ground** with the receiver; tach (pin 3) unconnected |
-| a `gpio:N` source | GPIO0, 20 or 21 — J11 pins 16, 12, 14, each with a GND beside it | a fan header's PWM (pin 4) and GND, two wires only — see `gpio:N` above |
+| a `gpio:N` source | GPIO0, 20 or 21 — J11 pins 12, 8, 10, each with a GND beside it | a fan header's PWM (pin 4) and GND, two wires only — see `gpio:N` above |
 
 The header → GPIO map is the board's, not the config's (`tools/pincheck.py`,
 `FAN_PINS`; the plain ESP32 gets 16, 17, 18, 19, untested). A hand-wired build

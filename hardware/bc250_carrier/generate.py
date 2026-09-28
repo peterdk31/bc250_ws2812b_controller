@@ -210,7 +210,8 @@ def supermini_symbol():
 
 # ------------------------------------------------------------------ the design
 #
-# Rev C layout, three columns on an 80 x 34.5 mm board (y grows downwards):
+# Rev D layout (rev C plus the ground fill, J14 and the solder-side rules),
+# three columns on an 80 x 34.5 mm board (y grows downwards):
 #
 #   left    the Super Mini (USB-C at the top edge), the button and sense
 #           XH connectors under its antenna end
@@ -220,14 +221,15 @@ def supermini_symbol():
 #           whole column above the header is the "plug zone": tracks only,
 #           nothing taller than the soldermask, because the plug body sits
 #           ~1.3 mm above the board and the wires drape over the rest.
-#   right   the strip VH, the four fan headers as a 2 x 2 block, Q1 and R1
+#   right   the strip VH with the power breakout J14 beside it, the four fan
+#           headers as a 2 x 2 block, Q1 and R1
 #
 # Board outline
 BX0, BY0 = 100.0, 100.0
 BX1, BY1 = 180.0, 134.5
 
 # --- Super Mini: left column.  Module top edge 3.9 mm inside the board edge
-# (the USB-C plug overhangs the board, that is fine; the mounting hole H1
+# (the USB-C plug overhangs the board, that is fine; J14 takes the corner
 # needs the corner).  1.5 mm right of centre so the optional GPIO header
 # J11 fits between the left edge and the module's left pads.  Column names come from SM_LEFT / SM_RIGHT above (5V
 # column on the RIGHT with the module component-side up, USB-C at the top).
@@ -311,60 +313,78 @@ def fan_pin(k, pin):
     return (x1 - FAN_P * (pin - 1), y)
 
 
-# Q1 (TO-92 inline, rotated 180: D G S left to right) and R1 (axial, 7.62 mm
-# pitch, pin 1 = GATE, pin 2 = GND) in the bottom row of the right column,
-# beside the header's rear pins.
+# Q1 (TO-92 inline WIDE, 2.54 mm between the legs, rotated 180: D G S left
+# to right) and R1 (axial, 7.62 mm pitch, pin 1 = GATE, pin 2 = GND) in the
+# bottom row of the right column, beside the header's rear pins.  The wide
+# footprint is for hand soldering: the stock 1.27 mm one leaves 0.3 mm
+# between the gate and drain pads, and a bridge there puts PS_ON# straight
+# on GPIO3 (the Sep 2026 board 2 fault: the PSU stuck on, then clicked).
+# Bend the legs out to fit.
 Q1_Y = 131.5
-Q1_S = 157.54
-Q1_G, Q1_D = Q1_S - 1.27, Q1_S - 2.54
+Q1_S = 158.0                            # Q1's courtyard 0.1 mm clear of the header's
+Q1_G, Q1_D = Q1_S - 2.54, Q1_S - 5.08
 R1_X, R1_Y, R1_P = 160.2, 131.5, 7.62
 R1_P1, R1_P2 = (R1_X, R1_Y), (R1_X + R1_P, R1_Y)
 
 # Button and sense under the module, pins along x.  J9 (button) is a 4-pin
 # JST-XH: 12V and GND for the button's ring LED, then the switch's NO and C
 # (the firmware wants a contact that CLOSES on press; the NC terminal makes
-# the PSU click, see the README).  J10 (sense) is a single 2.54 mm pin.
-XH_Y, XH_P = 130.0, 2.5
+# the PSU click, see the README).  The sense wire lands on J11's top row.
+XH_Y, XH_P = 130.6, 2.5              # low enough for two tracks between the antenna keepout and the pads
 J9_X0 = 109.2                            # housing edge 0.75 mm clear of a 5.6 mm screw head on H3
 J9_X = [J9_X0 + XH_P * k for k in range(4)]      # 12V, GND, NO (BTN), C (GND)
-J10_X = 121.6
-# Optional breakout header J11 along the left edge, in the 7.8 mm strip
-# between the board edge and the module's left pads: a 2x8 pin header.  The
-# INNER column (even pins) is, top to bottom, the three rails 3.3V, 5VSB,
-# 12V and then the module's five UNUSED GPIOs: GPIO8, GPIO9, GPIO20, GPIO21
-# (left column, rows 3, 4, 6, 7 — 20 and 21 step up one row so GPIO0 can
-# take the bottom row) and GPIO0 (right column, brought round under the
-# module's end).  The OUTER column (odd pins) doubles each rail on the top
-# three rows (two pins of 3.3V, two of 5VSB, two of 12V) and is GND beside
-# each GPIO.  The rows sit half a pitch below the module's rows so the
-# header's plastic clears the corner mounting screw's head; the GPIO stubs
-# take a short diagonal.
+# Optional GPIO breakout J11 along the left edge, in the 7.8 mm strip
+# between the board edge and the module's left pads: a 2x5 pin header.  The
+# INNER column (even pins) is, top to bottom, the module's five UNUSED GPIOs:
+# GPIO8, GPIO9, GPIO20, GPIO21 (left column, rows 3, 4, 6, 7 — 20 and 21
+# step up one row so GPIO0 can take the bottom row) and GPIO0 (right column,
+# brought round under the module's end); the OUTER column (odd pins) is GND
+# beside each GPIO.  The rows sit half a pitch below the module's rows; the
+# GPIO stubs take a short diagonal.  No rail comes near it: the rails have a
+# header of their own (J14), so a slipped probe cannot put 12 V on a GPIO,
+# and no rail track runs past the module socket's pads.
 J11_X0, J11_X1 = 102.4, 104.94          # outer (GND) / inner column x
 J11_DY = 1.27                           # header rows = module rows + this
-J11_INNER = ['3.3V', '5VSB', '12V', 'GPIO8', 'GPIO9', 'GPIO20', 'GPIO21', 'GPIO0']
-J11_GPIO = J11_INNER[3:]
-J11Y = [sm_y(k) + J11_DY for k in range(8)]
+J11_GPIO = ['GPIO8', 'GPIO9', 'GPIO20', 'GPIO21', 'GPIO0']
+J11_ROWS = ['SENSE'] + J11_GPIO        # SENSE (GPIO2, the BC-250's TPMS1 pin 9) on top, with a GND beside it too
+J11Y = [sm_y(k) + J11_DY for k in range(2, 8)]
+
+# Optional power breakout J14: a 2x3 pin header in the top left corner (no
+# mounting hole there since rev D), above J11 with an empty row between
+# them, same columns.  Each row is one rail on both pins: 5VSB on top, then
+# 3.3V, then 12 V.  3.3V and 12 V come up the left edge from the PSU header
+# along the bottom edge, one per layer, past nothing but J11's GND column;
+# 12 V takes the back and the bottom row, so on the soldering side it passes
+# no other pad at all.  5VSB comes over the top of the module from its 5V pad.
+J14_X0 = J11_X0
+J14_Y0 = BY0 + 2.9
+J14_NET = {1: '5VSB', 2: '5VSB', 3: '3.3V', 4: '3.3V', 5: '12V', 6: '12V'}
+
+
+def j14_xy(pin):
+    return (J14_X0 + 2.54 * ((pin - 1) % 2), J14_Y0 + 2.54 * ((pin - 1) // 2))
+
 
 # footprint reference text moved off the stock spot: ref -> (x, y) relative
 REF_POS = {f'J{5 + k}': (3.81, 4.0) for k in range(4)}
-REF_POS['Q1'] = (5.0, 0)                 # left of the TO-92 (rotated 180: -x is +x on the board)
+REF_POS['Q1'] = (5.0, 2.6)               # above the drain pad, left of the fan legend (rotated 180: +x/+y are -x/-y on the board)
 REF_POS['R1'] = (3.81, 2.4)
 REF_POS['J1'] = (-2.4, 2.75)
 REF_POS['J3'] = (3.96, -3.0)
 REF_POS['J9'] = (3.75, 3.8)
 # named by their legends instead (the stock spots collide with them); the holes need no name
-HIDE_REF = {'J9', 'J10', 'J11', 'J5', 'J6', 'J7', 'J8', 'H1', 'H2', 'H3', 'H4'}
-REF_POS['J10'] = (0, -2.6)
-REF_POS['J11'] = (1.27, 19.9)            # under the header (above it is H1's screw head)
+HIDE_REF = {'J9', 'J11', 'J14', 'J5', 'J6', 'J7', 'J8', 'H2', 'H3', 'H4'}
 
-HOLES = [(103.2, 103.2), (BX1 - 3.2, 103.2), (103.2, BY1 - 3.2), (BX1 - 3.2, BY1 - 3.2)]
+# M3 mounting holes; the top left one (H1 up to rev C) gave its corner to J14
+HOLES = {'H2': (BX1 - 3.2, 103.2), 'H3': (103.2, BY1 - 3.2), 'H4': (BX1 - 3.2, BY1 - 3.2)}
 
 # Track widths
 W_SIG, W_5V, W_12V, W_3A = 0.5, 1.5, 1.5, 3.0
-# J11's rails: 12 V and 5VSB share the 2 mm strip between J11 and the module's
-# pads (one per layer); 3.3V squeezes between the mounting holes and the board
-# edge (1.6 mm, less the 0.25 hole and 0.3 edge rules) so it stops at 0.9
-W_HDR_12V, W_HDR_5V, W_HDR_33 = 1.2, 1.0, 0.9
+# J14's rails: 3.3V and 12 V run up the left edge beside J11's outer pads
+# (1.25 mm, less the 0.3 edge rule and 0.5 to the pads) so they stop at
+# 0.75 mm, about 1.5 A each; 5VSB is 1.0 mm, about 2 A.  Not the PSU's full
+# output.  The 12 V also feeds the button LED on its way.
+W_PWR, W_PWR5 = 0.75, 1.0
 W_GND, W_GND3A = 1.0, 2.5
 VIA_D, VIA_DRILL = 1.0, 0.5
 
@@ -388,20 +408,17 @@ net('GND', sm_pad['GND'], ('J9', '2'), ('J9', '4'), ('Q1', '1'), ('R1', '2'),
     ('J3', '3'), ('J5', '1'), ('J6', '1'), ('J7', '1'), ('J8', '1'))
 net('PS_ON#', ('Q1', '3'))
 net('GATE', sm_pad['GPIO3'], ('Q1', '2'), ('R1', '1'))
-net('SENSE', ('J10', '1'), sm_pad['GPIO2'])
 net('BTN', ('J9', '3'), sm_pad['GPIO1'])
 net('DIN', sm_pad['GPIO4'], ('J3', '2'))
 net('3.3V', ('J3', '1'))
 net('12V', ('J5', '2'), ('J6', '2'), ('J7', '2'), ('J8', '2'), ('J9', '1'))
 for k, gp in enumerate(FAN_ORDER):
     net(f'FAN_{gp}', sm_pad[gp], (f'J{5 + k}', '4'))
-for k, n in enumerate(J11_INNER):
-    if n.startswith('GPIO'):
-        NETS[('J11', str(2 * k + 1))] = 'GND'
-        net(n, sm_pad[n], ('J11', str(2 * k + 2)))
-    else:                                   # a rail: both pins of the row
-        NETS[('J11', str(2 * k + 1))] = n
-        NETS[('J11', str(2 * k + 2))] = n
+for k, n in enumerate(J11_ROWS):
+    NETS[('J11', str(2 * k + 1))] = 'GND'
+    net(n, sm_pad['GPIO2' if n == 'SENSE' else n], ('J11', str(2 * k + 2)))
+for pin, n in J14_NET.items():
+    net(n, ('J14', str(pin)))
 
 NET_NAMES = ['GND', '5VSB', 'PS_ON#', 'GATE', 'SENSE', 'BTN', 'DIN', '3.3V', '12V'] + J11_GPIO + \
             [f'FAN_{g}' for g in ['GPIO5', 'GPIO6', 'GPIO7', 'GPIO10']]
@@ -422,11 +439,11 @@ PARTS = {
            (VH_X0, VH_Y, 0)),
     'J9': ('Connector_Generic', 'Conn_01x04', 'Connector_JST', 'JST_XH_B4B-XH-A_1x04_P2.50mm_Vertical', 'BUTTON',
            (J9_X0, XH_Y, 0)),
-    'J10': ('Connector_Generic', 'Conn_01x01', 'Connector_PinHeader_2.54mm', 'PinHeader_1x01_P2.54mm_Vertical',
-            'SENSE', (J10_X, XH_Y, 0)),
     'J11': ('Connector_Generic', 'Conn_02x08_Odd_Even', 'Connector_PinHeader_2.54mm',
-            'PinHeader_2x08_P2.54mm_Vertical', 'PWR+GPIO/GND (optional)', (J11_X0, J11Y[0], 0)),
-    'Q1': ('Transistor_FET', '2N7000', 'Package_TO_SOT_THT', 'TO-92_Inline', '2N7000', (Q1_S, Q1_Y, 180)),
+            'PinHeader_2x06_P2.54mm_Vertical', 'SENSE+GPIO/GND', (J11_X0, J11Y[0], 0)),
+    'J14': ('Connector_Generic', 'Conn_02x03_Odd_Even', 'Connector_PinHeader_2.54mm',
+            'PinHeader_2x03_P2.54mm_Vertical', 'PWR 3.3V/5VSB/12V (optional)', (J14_X0, J14_Y0, 0)),
+    'Q1': ('Transistor_FET', '2N7000', 'Package_TO_SOT_THT', 'TO-92_Inline_Wide', '2N7000', (Q1_S, Q1_Y, 180)),
     'R1': ('Device', 'R', 'Resistor_THT', 'R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal', '100k',
            (R1_X, R1_Y, 0)),
 }
@@ -434,21 +451,29 @@ for k, (x1, y) in enumerate(FAN_POS):
     PARTS[f'J{5 + k}'] = ('Connector_Generic', 'Conn_01x04', 'Connector_Molex',
                           'Molex_KK-254_AE-6410-04A_1x04_P2.54mm_Vertical',
                           f'FAN{k + 1} {FAN_ORDER[k]}', (x1, y, 180))
-for k, (hx, hy) in enumerate(HOLES):
-    PARTS[f'H{k + 1}'] = ('Mechanical', 'MountingHole', 'MountingHole', 'MountingHole_3.2mm_M3', 'M3', (hx, hy, 0))
+for name, (hx, hy) in HOLES.items():
+    PARTS[name] = ('Mechanical', 'MountingHole', 'MountingHole', 'MountingHole_3.2mm_M3', 'M3', (hx, hy, 0))
 
 # ---------------------------------------------------------------- the tracks
 # (net, layer, width, [points]) — polylines; THT pads join both layers, and
-# the two vias in VIAS do too.
+# the vias in VIAS do too (fill.py adds the ground stitching vias on top).
 #
 # Layer plan.  Across the plug zone the board is a grid: F.Cu carries the
 # fat rails (3.3V, the 3 A GND return) up the header's left side and east to
-# the VH, DIN along the very top, 12 V east along the header's front row,
-# PS_ON# out through the row gap; B.Cu carries the module's 5VSB and GND
-# straight down to the header, the four fan PWM lines along the top edge and
-# down the right side of the zone, GATE through the row gap to Q1, and the
-# XH ground.  GATE is the one net that has to cross both a B.Cu vertical
-# (5VSB) and an F.Cu one (3.3V): two vias.
+# the VH, DIN along the very top, 12 V east below the header's front row,
+# GATE through the row gap, the button LED's 12 V above the front row,
+# 5VSB east to J14; B.Cu
+# carries the module's 5VSB and GND straight down to the header, the four
+# fan PWM lines along the top edge and down the right side of the zone,
+# PS_ON# through the row gap to Q1, and the XH ground.
+#
+# The rule behind it: the back is where every joint is soldered, so on B.Cu
+# 12 V never runs past a pad of 5VSB, GATE or a GPIO (a bridge there burns
+# the module); nets whose short only turns the PSU on or off, or trips it,
+# may.  Every other layer change is a THT pad or one of four vias: GATE
+# hops a B.Cu vertical (5VSB) and an F.Cu one (3.3V), the LED's 12 V drops
+# to the back beside the 3 A return, and 5VSB to J14 goes F and back
+# to B round the PWM drop.
 
 T = []
 VIAS = []          # (net, x, y)
@@ -467,35 +492,38 @@ V33_X = 128.6                            # 3.3V up the header's left side, F.Cu 
 V33_Y = 105.5                            # 3.3V east to the VH, F.Cu
 GND3A_X = mf_xy(2)[0]                    # GND return up from pin 2, F.Cu
 GND3A_Y = 109.8                          # ... and east to the VH, F.Cu
-DIN_X, DIN_Y = SMR + 2.2, 103.4          # DIN: up beside the module, east along the top, F.Cu
-GATE_VIA1_X, GATE_X, GATE_VIA2_Y = 138.5, 146.4, 123.2
+DIN_X, DIN_Y = SMR + 2.2, 102.9          # DIN: up beside the module, east along the top, F.Cu
+GATE_VIA1_X, GATE_X = 138.5, (mf_xy(4)[0] + mf_xy(5)[0]) / 2   # GATE centred between pins 4 and 5
 PSON_X = mf_xy(3)[0] + 2.1               # PS_ON# leaves pin 8 between the pad columns
+PSON_GAP_Y = MF_GAP_Y + 0.1              # ... and runs the row gap 0.5 clear of pins 9/10 and 0.5 of the 12 V under pin 5, B.Cu
+V12_UP_Y, V12_VIA_X = 122.0, 138.5       # the button LED's 12 V: up from pin 4 above the front row (F), a via beside the 3 A return,
+V12_DROP_X = 128.9                       # ... west (B) and down past the header's left end, 1.3 mm off its 3.3V pins
 V12B_Y = 128.0                           # 12 V to the right fan column, B.Cu
+V12F_Y = 127.2                           # 12 V to the left fan column, F.Cu: low enough to pass FAN3's pins 1.3 mm clear
 GNDB_Y = BY1 - 0.8                       # GND along the bottom edge, F.Cu
 GNDR_X = BX1 - 0.8                       # GND up the right edge, F.Cu
 PWM_ROW = [100.7, 101.5, 102.3, 103.1]   # PWM lines along the top edge, B.Cu (FAN1 top)
-PWM_UP = [SML, SML + 1.52, SML + 2.32, SML + 3.12]      # ... rising from the module's left pads
+PWM_UP = [SML, SML + 1.62, SML + 2.42, SML + 3.22]      # ... rising from the module's left pads
 PWM_DOWN = [153.9, 153.1, 152.3, 151.5]  # ... dropping down the right side of the plug zone
 PWM_IN_Y = [FAN_Y[0], 118.9, FAN_Y[1], 126.5]          # ... and entering each fan's pin 4
-XHG_Y, XHG_X = 128.55, SMR - 1.52        # J9 ground: east under J10, up the module's right side to its GND pad, B.Cu
-V12J9_Y = 132.9                          # 12 V to the button LED: west through the row gap, then along the bottom edge under J10/J9, B.Cu
-BTN_X, BTN_Y = SMR + 1.4, 128.55         # BTN / SENSE round the module's lower right, F.Cu
-SENSE_X, SENSE_Y = SMR + 2.2, 129.3
-GPIO0_Y = 127.8                          # GPIO0 west under the module's end to J11, F.Cu (above BTN/SENSE)
-HDR_GND_Y, HDR_GND_X, HDR_GND_Y0 = 128.5, 105.6, 131.9   # J9 ground: below J9's pins, west past pin 1, up to J11's GND column, F.Cu
-V12HDR_X, V12HDR_Y = 106.81, 126.5       # 12 V from J9 pin 1 up between J11 and the module to J11 row 2, B.Cu (centred in the strip)
-V33HDR_Y, V33HDR_X = BY1 - 0.85, BX0 + 0.85     # 3.3V along the bottom edge, up the left edge, in over J11's top, F.Cu (0.3 off H3/H1, 0.4 off the edge)
-V33HDR_TOP = 105.6                       # ... between the mounting hole and J11's top pads
-V5HDR_X, V5HDR_Y, V5HDR_DROP = SMR + 1.03, 101.5, 106.81  # 5VSB over the top of the module, down the strip beside J11 into row 1, F.Cu
+XHG_Y, XHG_X = 128.55, SMR - 1.62        # J9 ground: east below the module's end, up its right side to its GND pad, B.Cu
+BTN_X, BTN_Y = SMR + 1.6, 128.55         # BTN / SENSE round the module's lower right, F.Cu
+SENSE_X, SENSE_TOP_Y = SMR - 1.62, 104.5   # SENSE: up inside the module's right pad column, west above both sockets, F.Cu
+STRIP_X = (J11_X1 + SML) / 2              # ... and down the strip between J11 and the module's left pads into J11's top row
+GPIO0_Y = 127.75                         # GPIO0 west under the module's end to J11, F.Cu (above BTN/SENSE)
+HDR_GND_Y, HDR_GND_X, HDR_GND_Y0 = 128.6, 105.6, 132.35   # J11 ground: below J9's pins, west past pin 1, up to J11's GND column, F.Cu
+EDGE_X, EDGE_Y = BX0 + 0.675, BY1 - 0.675   # J14's 3.3V (F) and 12 V (B): along the bottom edge and up the left edge, 0.3 off it
+V5PWR_X, V5PWR_Y = SMR + 1.03, BY0 + 1.6    # J14's 5VSB: up beside the module's 5V pad, west over its USB end, down into the top row, F.Cu
 STUB_X = SML - 1.68                      # GPIO stubs: diagonal from the pad to here, then straight into J11
 
 # --- 5VSB: front pin 3 straight up the plug zone, west to the module (B)
 trk('5VSB', B, W_5V, mf_xy(3), (mf_xy(3)[0], sm_y(0)), (SMR, sm_y(0)))
 # --- GND, module: west from a via on the 3 A return (B); the return itself
-# runs up from pin 2 and east to the VH (F); pin 7 tied behind pin 2
+# runs up from pin 2 and east to the VH (F); pin 7 tied behind pin 2 (B, so
+# the row gap stays free on the front)
 trk('GND', B, W_GND, (SMR, sm_y(1)), (GND3A_X, sm_y(1)))
 via('GND', GND3A_X, sm_y(1))
-trk('GND', F, 2.7, mf_xy(7), mf_xy(2))
+trk('GND', B, 2.7, mf_xy(7), mf_xy(2))
 trk('GND', F, W_GND3A, mf_xy(2), (GND3A_X, sm_y(1)))
 trk('GND', F, W_GND3A, (GND3A_X, GND3A_Y), (VH_X[2], GND3A_Y), (VH_X[2], VH_Y))
 # GND, rear row: 9 <-> 10 tied (7 joins through pin 2, 9/10 through the
@@ -509,71 +537,78 @@ trk('GND', F, W_GND, mf_xy(10), (mf_xy(10)[0], GNDB_Y), (GNDR_X, GNDB_Y), (GNDR_
 trk('GND', F, W_SIG, (Q1_S, GNDB_Y), (Q1_S, Q1_Y))
 trk('GND', F, W_SIG, (R1_P2[0], GNDB_Y), R1_P2)
 trk('GND', F, W_GND, (fan_pin(2, 1)[0], GNDB_Y), fan_pin(2, 1), fan_pin(0, 1), (fan_pin(0, 1)[0], GND3A_Y))
-# --- 3.3V (3 A): rear pin 6 tied behind pin 1; pin 1 west, up the header's
+# --- 3.3V (3 A): rear pin 6 tied behind pin 1 (B); pin 1 west, up the header's
 # left side, east along the plug zone into the VH (F)
-trk('3.3V', F, 2.7, mf_xy(6), mf_xy(1))
+trk('3.3V', B, 2.7, mf_xy(6), mf_xy(1))
 trk('3.3V', F, W_3A, mf_xy(1), (V33_X, mf_xy(1)[1]), (V33_X, V33_Y), (VH_X[0], V33_Y))   # ends inside the VH pad
 # --- DIN: up beside the module, along the top edge, down into the VH (F)
 trk('DIN', F, W_SIG, (SMR, sm_y(3)), (DIN_X, sm_y(3)), (DIN_X, DIN_Y), (VH_X[1], DIN_Y), (VH_X[1], VH_Y))
-# --- 12 V: front pins 4 <-> 5 tied; east along the front row and up the
-# left fan column (F); the right fan column fed under the header body (B)
-trk('12V', F, W_12V, mf_xy(4), mf_xy(5), (fan_pin(2, 2)[0], mf_xy(5)[1]), fan_pin(2, 2), fan_pin(0, 2))
+# --- 12 V: front pins 4 <-> 5 tied (B); east from pin 5 along the front row
+# and up the left fan column (F); the right fan column fed under the header
+# body (B)
+trk('12V', B, W_12V, mf_xy(4), mf_xy(5))
+trk('12V', F, W_12V, mf_xy(5), (mf_xy(5)[0], V12F_Y), (fan_pin(2, 2)[0], V12F_Y), fan_pin(2, 2), fan_pin(0, 2))
 trk('12V', B, 1.2, mf_xy(5), (mf_xy(5)[0], V12B_Y), (fan_pin(3, 2)[0], V12B_Y), fan_pin(3, 2), fan_pin(1, 2))
-# 12 V for the button's LED: pin 4 down into the row gap, west through it
-# past pins 3/8, 2/7 and 1/6, then along the bottom edge under J10 and J9
-# into J9 pin 1 from below (B)
-trk('12V', B, W_HDR_12V, mf_xy(4), (mf_xy(4)[0], MF_GAP_Y), (127.5, MF_GAP_Y))
-trk('12V', B, W_HDR_12V, (127.5, MF_GAP_Y), (127.5, V12J9_Y), (J9_X[0], V12J9_Y), (J9_X[0], XH_Y))
-# --- power switch.  PS_ON#: rear pin 8 sideways, up between the pad
-# columns, east through the row gap to Q1's drain (F)
-trk('PS_ON#', F, W_SIG, mf_xy(8), (PSON_X, mf_xy(8)[1]), (PSON_X, MF_GAP_Y), (Q1_D, MF_GAP_Y), (Q1_D, Q1_Y))
-# GATE: east from the module (B), via, on across the 5VSB vertical (F),
-# down beside pin 4, via, on down through the row gap (B) to Q1's gate and R1
+# 12 V for the button's LED and J14: up out of pin 4 into the plug zone and
+# west above the front row (F), a via between the 3 A return and the 5VSB
+# trunk, on west (B), down past the header's left end, along the bottom
+# edge (J9 pin 1 taps it from below) and up the left edge into J14's bottom
+# row (B).  It keeps over 1 mm from every PSU header pad on both layers; the
+# row gap between the pin rows carries no 12 V at all.
+trk('12V', F, W_PWR, mf_xy(4), (mf_xy(4)[0], V12_UP_Y), (V12_VIA_X, V12_UP_Y))
+via('12V', V12_VIA_X, V12_UP_Y)
+trk('12V', B, W_PWR, (V12_VIA_X, V12_UP_Y), (V12_DROP_X, V12_UP_Y), (V12_DROP_X, EDGE_Y), (EDGE_X, EDGE_Y),
+    (EDGE_X, j14_xy(5)[1]), j14_xy(5))
+trk('12V', B, W_SIG, (J9_X[0], EDGE_Y), (J9_X[0], XH_Y))
+# --- power switch.  The row gap's back side carries PS_ON# (a bridge to its
+# neighbours only turns the PSU on or off), the front carries GATE (a bridge
+# from 12 V to GATE would reach GPIO3).  PS_ON#: rear pin 8 sideways, up
+# between the pad columns, east through the row gap to Q1's drain (B)
+trk('PS_ON#', B, W_SIG, mf_xy(8), (PSON_X, mf_xy(8)[1]), (PSON_X, PSON_GAP_Y), (Q1_D, PSON_GAP_Y), (Q1_D, Q1_Y))
+# GATE: east from the module (B), via, on across the 5VSB vertical and down
+# between pins 4 and 5 (F), east through the row gap to R1, and down into
+# Q1's gate (F)
 trk('GATE', B, W_SIG, (SMR, sm_y(4)), (GATE_VIA1_X, sm_y(4)))
 via('GATE', GATE_VIA1_X, sm_y(4))
-trk('GATE', F, W_SIG, (GATE_VIA1_X, sm_y(4)), (GATE_X, sm_y(4)), (GATE_X, GATE_VIA2_Y))
-via('GATE', GATE_X, GATE_VIA2_Y)
-trk('GATE', B, W_SIG, (GATE_X, GATE_VIA2_Y), (GATE_X, MF_GAP_Y), (R1_P1[0], MF_GAP_Y), R1_P1)
-trk('GATE', B, W_SIG, (Q1_G, MF_GAP_Y), (Q1_G, Q1_Y))
-# --- button and sense: right column pads, down the module's right side,
-# west under the antenna end, into the XH pins (F).  BTN (the lower pad)
-# takes the inner, upper path and the farther connector.
+trk('GATE', F, W_SIG, (GATE_VIA1_X, sm_y(4)), (GATE_X, sm_y(4)), (GATE_X, MF_GAP_Y), (R1_P1[0], MF_GAP_Y), R1_P1)
+trk('GATE', F, W_SIG, (Q1_G, MF_GAP_Y), (Q1_G, Q1_Y))
+# --- button and sense (F).  BTN: off the right column's pad, down the
+# module's right side, west under the antenna end and down into J9.  SENSE:
+# off its pad INTO the column (0.5 clear of the pads, clear of the antenna
+# zone), up past the module's top pads, west above both sockets, down the
+# empty strip beside J11 and into J11's top row (a slow 1 Hz ADC input, the
+# length does not matter).
 trk('BTN', F, W_SIG, (SMR, sm_y(6)), (BTN_X, sm_y(6)), (BTN_X, BTN_Y), (J9_X[2], BTN_Y), (J9_X[2], XH_Y))
-trk('SENSE', F, W_SIG, (SMR, sm_y(5)), (SENSE_X, sm_y(5)), (SENSE_X, SENSE_Y), (J10_X, SENSE_Y), (J10_X, XH_Y))
+trk('SENSE', F, W_SIG, (SMR, sm_y(5)), (SENSE_X, sm_y(5)), (SENSE_X, SENSE_TOP_Y), (STRIP_X, SENSE_TOP_Y),
+    (STRIP_X, J11Y[0]), (J11_X1, J11Y[0]))
 # J9 grounds: pins 2 and 4 tied under the housing (round the NO pin between
-# them), then east under J10 and up the module's right side, just outside the
+# them), then east below the module's end and up the module's right side, just outside the
 # antenna zone, onto the module's GND pad (B)
-trk('GND', B, W_SIG, (J9_X[1], XH_Y), (J9_X[1], XH_Y + 1.6), (J9_X[3], XH_Y + 1.6), (J9_X[3], XH_Y))
+trk('GND', B, W_SIG, (J9_X[1], XH_Y), (J9_X[1], XH_Y + 1.75), (J9_X[3], XH_Y + 1.75), (J9_X[3], XH_Y))
 trk('GND', B, W_SIG, (J9_X[3], XH_Y), (J9_X[3], XHG_Y), (XHG_X, XHG_Y), (XHG_X, sm_y(1)), (SMR, sm_y(1)))
-# --- optional header J11.  GPIO rows: GPIO8 and GPIO9 step half a pitch
-# down, GPIO20 and GPIO21 half a pitch up (diagonal off the pad, then
-# straight in), GPIO0 comes round under the module's end and up into the
-# bottom row (all F); the GND column is one strip.
-for gp, row in (('GPIO8', 3), ('GPIO9', 4), ('GPIO20', 5), ('GPIO21', 6)):
+# --- optional GPIO header J11.  GPIO8 and GPIO9 step half a pitch down,
+# GPIO20 and GPIO21 half a pitch up (diagonal off the pad, then straight
+# in), GPIO0 comes round under the module's end and up into the bottom row
+# (all F); the GND column is one strip.
+for gp, row in (('GPIO8', 1), ('GPIO9', 2), ('GPIO20', 3), ('GPIO21', 4)):
     i = SM_LEFT.index(gp)
     trk(gp, F, W_SIG, (SML, sm_y(i)), (STUB_X, J11Y[row]), (J11_X1, J11Y[row]))
-trk('GPIO0', F, W_SIG, (SMR, sm_y(7)), (SMR, GPIO0_Y), (J11_X1, GPIO0_Y), (J11_X1, J11Y[7]))
-trk('GND', F, W_SIG, (J11_X0, J11Y[3]), (J11_X0, J11Y[7]))       # GND column: GPIO rows only
-for k in range(3):                                                # rail rows: outer pin bridged to the inner
-    trk(J11_INNER[k], F, 1.2, (J11_X0, J11Y[k]), (J11_X1, J11Y[k]))
-# J11 ground: from J9's pin 2 down and west below J9 pin 1 (F, between the
-# 12 V run and the 3.3V run that are on the other layer / further down), up
-# beside the mounting hole and into the GND column
+trk('GPIO0', F, W_SIG, (SMR, sm_y(7)), (SMR, GPIO0_Y), (J11_X1, GPIO0_Y), (J11_X1, J11Y[5]))
+trk('GND', F, W_SIG, (J11_X0, J11Y[0]), (J11_X0, J11Y[5]))       # GND column
+# J11 ground: from J9's pin 2 down and west below J9 pin 1 (F), up beside
+# the mounting hole and into the GND column
 trk('GND', F, W_SIG, (J9_X[1], XH_Y), (J9_X[1], HDR_GND_Y0), (HDR_GND_X, HDR_GND_Y0), (HDR_GND_X, HDR_GND_Y),
-    (J11_X0, HDR_GND_Y), (J11_X0, J11Y[7]))
-# J11 rails.  12 V: from J9 pin 1 up the strip between J11 and the module,
-# in from the right into row 2 (B)
-trk('12V', B, W_HDR_12V, (J9_X[0], XH_Y), (J9_X[0], V12HDR_Y), (V12HDR_X, V12HDR_Y), (V12HDR_X, J11Y[2]),
-    (J11_X1, J11Y[2]))
-# 3.3V: off the PSU header's pin 1/6 tie through the row gap, along the
-# bottom edge under the connectors, up the left edge, in over the top of J11
-# between the mounting hole and the pads, down into row 0 (F)
-trk('3.3V', F, W_HDR_33, (mf_xy(1)[0], MF_GAP_Y), (127.5, MF_GAP_Y), (127.5, V33HDR_Y), (V33HDR_X, V33HDR_Y),
-    (V33HDR_X, V33HDR_TOP), (J11_X1, V33HDR_TOP), (J11_X1, J11Y[0]))
+    (J11_X0, HDR_GND_Y), (J11_X0, J11Y[5]))
+# --- optional power header J14, top left.  Each row's two pins tied (F).
+for pin in (1, 3, 5):
+    trk(J14_NET[pin], F, 1.2, j14_xy(pin), j14_xy(pin + 1))
+# 3.3V: west off the PSU header's pin 6, along the bottom edge, up the left
+# edge beside J11's GND column and into the middle row from the left (F)
+trk('3.3V', F, W_PWR, mf_xy(6), (127.5, mf_xy(6)[1]), (127.5, EDGE_Y), (EDGE_X, EDGE_Y), (EDGE_X, j14_xy(3)[1]),
+    j14_xy(3))
 # 5VSB: from the module's 5V pad, up beside the module, west above its USB
-# end, down the strip beside J11's inner column, in from the right into row 1 (F)
-trk('5VSB', F, W_HDR_5V, (SMR, sm_y(0)), (V5HDR_X, sm_y(0)), (V5HDR_X, V5HDR_Y), (V5HDR_DROP, V5HDR_Y),
-    (V5HDR_DROP, J11Y[1]), (J11_X1, J11Y[1]))
+# end and down into the top row's inner pin (F)
+trk('5VSB', F, W_PWR5, (SMR, sm_y(0)), (V5PWR_X, sm_y(0)), (V5PWR_X, V5PWR_Y), (j14_xy(2)[0], V5PWR_Y), j14_xy(2))
 # --- fan PWM (B): each left-column pad steps right and rises between the
 # pads above it, runs east along the top edge, drops down the right side of
 # the plug zone and enters its fan's pin 4 (the left pin) from the left.
@@ -594,7 +629,7 @@ for k, gp in enumerate(FAN_ORDER):
 # assembly BOM).  (refs, LCSC #, "manufacturer part" (one space between the
 # two), description, per-board qty, LCSC minimum order).  Every number, name
 # and minimum order checked against LCSC's product API on Sep 8 2026; Sep 18
-# 2026: J10 and J11 re-picked as one-piece parts an assembly line can fit,
+# 2026: the single sense pin and J11 re-picked as one-piece parts an assembly line can fit,
 # the fan headers swapped for the Molex part, the module sockets added (all
 # lines are in JLCPCB's assembly library, with stock, that day).
 ORDER = [
@@ -604,7 +639,6 @@ ORDER = [
      'Mini-Fit Jr 2x5 4.2 mm RIGHT-ANGLE header with snap-in pegs, 9 A (Molex 5569-10A2 clone)', 1, 5),
     (['J3'], 'C160316', 'JST B3P-VH(LF)(SN)', 'VH 3.96 mm 3-pin vertical header, 10 A', 1, 5),
     (['J9'], 'C594232', 'JST B4B-XH-A-G', 'XH 2.5 mm 4-pin vertical header (gold flash)', 1, 5),
-    (['J10'], 'C81276', 'BOOMELE 2.54-1*1P', '2.54 mm single pin header (1x1)', 1, 50),
     # NOT C41927 (BOOMELE 2.54-4AS): that is a fully shrouded 2.54 mm wafer, a fan plug cannot enter it
     # NOT C140769 (Ckmtw W-2510S04P): its ramp spans all four positions and a PC fan
     # plug's latch wall lands on it -- the Sep 2026 boards needed it cut down
@@ -612,15 +646,18 @@ ORDER = [
      'KK 254 2.54 mm 4-circuit fan header, friction-lock ramp over circuits 1-3 (the 4-wire PC fan header; 3- and 4-pin fan plugs mate)', 4, 5),
     (['J12', 'J13'], 'C55218878', 'ShouHan PM2.54-1x8PZZ-H5.7',
      '2.54 mm 1x8 female header, 5.7 mm low profile: the Super Mini plugs into the pair, pins down', 2, 5),
-    # mating plugs: strip, button and sense.  J1 mates with the PSU's own plug,
+    # two 2x8 headers, cut: a 2x6 for J11 (sense + GPIO, GND beside each) and a 2x3 for J14
+    # (rails, optional).  Soldered by hand, so NOT_ASSEMBLED keeps both off an assembly order
+    (['J11 + J14'], 'C68234', 'BOOMELE 2.54-2*8P', '2.54 mm 2x8 pin header, cut: a 2x6 (J11 sense/GPIO/GND) and a 2x3 (J14 rails, optional)', 2, 5),
+    # mating plugs: strip and button.  J1 mates with the PSU's own plug,
     # the fan headers with the fans' plugs.  Contacts counted with spares.
     (['J3 plug'], 'C157899', 'JST VHR-3N', 'VH 3-way housing', 1, 10),
     (['J3 plug'], 'C160349', 'JST SVH-21T-P1.1', 'VH crimp contact, 18-22 AWG (3 used)', 5, 100),
     (['J9 plug'], 'C144403', 'JST XHP-4', 'XH 4-way housing', 1, 20),
     (['J9 plug'], 'C140573', 'JST SXH-001T-P0.6', 'XH crimp contact, 22-28 AWG (4 used)', 6, 100),
 ]
+NOT_ASSEMBLED = {'J11', 'J14'}     # headers you cut from 2x8s and fit yourself
 ORDER_OPTIONAL = [
-    (['J11'], 'C68234', 'BOOMELE 2.54-2*8P', '2.54 mm 2x8 pin header: the optional rails + GPIO/GND breakout', 1, 5),
 ]
 
 
@@ -640,6 +677,11 @@ def write_parts_list(boards=1):
                 w.writerow([lcsc, mpn, qty, desc, ' '.join(refs), per, 'yes' if optional else ''])
 
 
+# Ground fill (fill.py fills it): 0.5 mm from every other net, like the
+# tracks, 0.5 mm in from the board edge, thermal spokes on every ground pad so
+# the pads still take solder, no slivers thinner than GND_MIN_W.
+GND_CLEAR, GND_EDGE, GND_SPOKE, GND_MIN_W = 0.5, 0.5, 0.5, 0.5
+
 # Antenna zone: no copper pour, no tracks, under the module's antenna end
 KEEPOUT = (SM_CX - 5.5, SM_BOT - 7.0, SM_CX + 5.5, SM_BOT + 1.0)   # tracks are checked as copper, edge to edge
 
@@ -651,16 +693,15 @@ def _lab(text, x, y, just, size=1.0, layer='F.SilkS'):
 
 
 SILK = [
-    _lab('BC-250 carrier  rev C', MF_X0 + 8.4, 111.2, None, 0.9),
+    _lab('BC-250 carrier  rev D', MF_X0 + 8.4, 111.2, None, 0.9),
     _lab('plug zone: keep clear', MF_X0 + 8.4, 112.8, None, 0.7),
     # button / sense pin names in the strip between the module and the XH housings
     # 0.85 mm between the module outline and the XH housing; 1 mm under the housing
     _lab('12V', J9_X[0], 127.1, None, 0.65), _lab('GND', J9_X[1], 127.1, None, 0.65),
     _lab('NO', J9_X[2], 127.1, None, 0.65), _lab('C', J9_X[3], 127.1, None, 0.65),
-    _lab('SNS', J10_X, 127.1, None, 0.65),
     _lab('J9 BUTTON  LED | SW', J9_X0 + 3.75, BY1 - 0.58, None, 0.6),
-    _lab('J10 SENSE', J10_X, BY1 - 0.58, None, 0.6),
     # strip: pin names under the VH housing
+
     _lab('STRIP', 169.3, 104.6, None, 0.8), _lab('3A', 169.3, 106.4, None, 0.8),
     # VH pin names above the housing (the fan headers sit right under it)
     _lab('3.3V', VH_X[0], 100.85, None, 0.7), _lab('DIN', VH_X[1], 100.85, None, 0.7),
@@ -676,17 +717,22 @@ for pin in range(6, 11):
     SILK.append(_lab(MF_NET[pin].replace('PS_ON#', 'PS_ON'), x, MF_GAP_Y, None, 0.7))
     SILK.append((MF_NET[pin - 5], x, MF_GAP_Y, 0, 'mirror', 0.7, 'B.SilkS'))
 # J11's names on the back, beside each row (under the module, clear of its left
-# pad column): the rail rows are both pins, the GPIO rows name the inner pin
-# and the outer column's GND is said once.
-SILK.append(_lab('J11 opt.', 103.6, 127.15, None, 0.8))
+# pad column): each row names its GPIO (the inner pin), the outer column's GND
+# is said once.
+SILK.append(_lab('J11 SNS/IO', 103.9, 127.15, None, 0.7))
 SILK.append(_lab('names: back', 103.4, 128.45, None, 0.6))
-for k, n in enumerate(J11_INNER):
-    SILK.append((n if n.startswith('GPIO') else f'2x {n}', 111.6, J11Y[k], 0, 'mirror', 0.7, 'B.SilkS'))
+for k, n in enumerate(J11_ROWS):
+    SILK.append((n, 111.6, J11Y[k], 0, 'mirror', 0.7, 'B.SilkS'))
+# J14's names on the back beside each row, like J11's (both pins of a row
+# are the rail); the front names the header in the gap between the two
+for pin in (1, 3, 5):
+    SILK.append((f'2x {J14_NET[pin]}', 111.6, j14_xy(pin)[1], 0, 'mirror', 0.7, 'B.SilkS'))
+SILK.append(_lab('J14 PWR', (J14_X0 + J11_X1) / 2, (j14_xy(5)[1] + J11Y[0]) / 2, None, 0.7))
 SILK.append(('J11: GND beside each GPIO', 112.0, 128.4, 0, 'mirror', 0.7, 'B.SilkS'))
 for k, (x1, y) in enumerate(FAN_POS):
-    SILK.append(_lab(f'^ J{5 + k} FAN{k + 1} {FAN_ORDER[k]}', x1 - 3.81, y + 4.1, None, 0.8))   # under its header
+    SILK.append(_lab(f'^ J{5 + k} FAN{k + 1} {FAN_ORDER[k]}', x1 - 3.81, y + 3.85, None, 0.8))   # under its header
 for x1 in FAN_X1:
-    SILK.append(_lab('PWM  T  12V  G', x1 - 3.81, FAN_Y[1] + 5.3, None, 0.8))
+    SILK.append(_lab('PWM  T  12V  G', x1 - 3.81, FAN_Y[1] + 4.95, None, 0.8))   # clear of Q1's outline
 
 # Silkscreen rectangles: (x0, y0, x1, y1, layer).  The fan headers' bodies
 # and 3-position ramps, in KK-254 footprint coordinates (pin 1 at the
@@ -714,6 +760,10 @@ SILK += [
     _lab('antenna v', SM_CX, SM_BOT - 5.2, None, 0.7),
 ]
 SILK += [_lab(nm, SMR + SM_LABEL_DX, sm_y(i), 'left', SM_LABEL_SIZE) for i, nm in enumerate(SM_RIGHT)]
+# Q1's legs by name, so a reversed part is spotted before power-up (fitted the
+# wrong way round, its body diode holds PS_ON# low and the PSU stays on):
+# D and S under their pads, clear of the body outline, G inside it
+SILK += [_lab('D', Q1_D, 133.45, None, 0.6), _lab('G', Q1_G, 133.1, None, 0.6), _lab('S', Q1_S, 133.45, None, 0.6)]
 
 
 # ------------------------------------------------------------ pad geometry
@@ -772,7 +822,7 @@ def write_pcb():
     pcb = S('kicad_pcb', S('version', 20221018), S('generator', 'generate.py'))
     pcb.append(S('general', S('thickness', 1.6)))
     pcb.append(S('paper', Q('A4')))
-    pcb.append(S('title_block', S('title', Q('BC-250 carrier')), S('rev', Q('C')),
+    pcb.append(S('title_block', S('title', Q('BC-250 carrier')), S('rev', Q('D')),
                  S('comment', 1, Q('ESP32-C3 Super Mini carrier: power switch, WS2812B strip, 4 PWM fans'))))
     layers = S('layers')
     std = [(0, 'F.Cu', 'signal'), (31, 'B.Cu', 'signal'), (32, 'B.Adhes', 'user', 'B.Adhesive'),
@@ -851,6 +901,17 @@ def write_pcb():
     for netname, vx, vy in VIAS:
         pcb.append(S('via', S('at', vx, vy), S('size', VIA_D), S('drill', VIA_DRILL), S('layers', Q('F.Cu'), Q('B.Cu')),
                      S('net', NET_ID[netname]), S('tstamp', Q(U()))))
+    # the ground fill: one zone per copper layer over the whole board, filled
+    # and stitched by fill.py (KiCad's own filler)
+    for layer in ('F.Cu', 'B.Cu'):
+        gx0, gy0, gx1, gy1 = BX0 + GND_EDGE, BY0 + GND_EDGE, BX1 - GND_EDGE, BY1 - GND_EDGE
+        pcb.append(S('zone', S('net', NET_ID['GND']), S('net_name', Q('GND')), S('layer', Q(layer)),
+                     S('tstamp', Q(U())), S('name', Q('GND fill ' + layer[0])), S('hatch', 'edge', 0.508),
+                     S('connect_pads', S('clearance', GND_CLEAR)), S('min_thickness', GND_MIN_W),
+                     S('filled_areas_thickness', 'no'),
+                     S('fill', 'yes', S('thermal_gap', GND_CLEAR), S('thermal_bridge_width', GND_SPOKE),
+                       S('island_removal_mode', 0)),
+                     S('polygon', S('pts', S('xy', gx0, gy0), S('xy', gx1, gy0), S('xy', gx1, gy1), S('xy', gx0, gy1)))))
     kx0, ky0, kx1, ky1 = KEEPOUT
     pcb.append(S('zone', S('net', 0), S('net_name', Q('')), S('layers', Q('F&B.Cu')), S('tstamp', Q(U())),
                  S('name', Q('antenna')), S('hatch', 'edge', 0.508), S('connect_pads', S('clearance', 0)),
@@ -869,7 +930,7 @@ def write_pcb():
 def write_sch():
     sch = S('kicad_sch', S('version', 20230121), S('generator', 'generate.py'), S('uuid', Q(ROOT_UUID)),
             S('paper', Q('A4')),
-            S('title_block', S('title', Q('BC-250 carrier')), S('rev', Q('C')),
+            S('title_block', S('title', Q('BC-250 carrier')), S('rev', Q('D')),
               S('comment', 1, Q('ESP32-C3 Super Mini carrier: power switch, WS2812B strip, 4 PWM fans'))))
     libsyms = S('lib_symbols')
     seen = set()
@@ -897,11 +958,11 @@ def write_sch():
     # schematic placement (sheet mm)
     SPOS = {
         'U1': (148.59, 96.52), 'J12': (105.41, 96.52), 'J13': (200.66, 96.52),
-        'J1': (60.96, 60.96), 'J3': (60.96, 91.44), 'J9': (60.96, 111.76), 'J10': (60.96, 129.54),
-        'J11': (27.94, 111.76),
+        'J1': (60.96, 60.96), 'J3': (60.96, 91.44), 'J9': (60.96, 111.76),
+        'J11': (27.94, 111.76), 'J14': (27.94, 137.16),
         'Q1': (88.9, 147.32), 'R1': (71.12, 147.32),
         'J5': (236.22, 43.18), 'J6': (236.22, 66.04), 'J7': (236.22, 88.9), 'J8': (236.22, 111.76),
-        'H1': (27.94, 175.26), 'H2': (43.18, 175.26), 'H3': (58.42, 175.26), 'H4': (73.66, 175.26),
+        'H2': (43.18, 175.26), 'H3': (58.42, 175.26), 'H4': (73.66, 175.26),
     }
     STUB = 5.08
     items = []
@@ -989,9 +1050,9 @@ def write_project():
             "design_settings": {
                 "defaults": {"board_outline_line_width": 0.1, "copper_line_width": 0.2, "silk_line_width": 0.15,
                              "silk_text_size_h": 1.0, "silk_text_size_v": 1.0, "silk_text_thickness": 0.15},
-                "rules": {"min_clearance": 0.2, "min_copper_edge_clearance": 0.3, "min_hole_clearance": 0.25,
+                "rules": {"min_clearance": 0.3, "min_copper_edge_clearance": 0.3, "min_hole_clearance": 0.25,
                           "min_hole_to_hole": 0.25, "min_microvia_diameter": 0.2, "min_microvia_drill": 0.1,
-                          "min_resolved_spokes": 2, "min_silk_clearance": 0.0, "min_text_height": 0.6,
+                          "min_resolved_spokes": 1, "min_silk_clearance": 0.0, "min_text_height": 0.6,
                           "min_text_thickness": 0.08, "min_through_hole_diameter": 0.3, "min_track_width": 0.25,
                           "min_via_annular_width": 0.15, "min_via_diameter": 0.5, "solder_mask_clearance": 0.0,
                           "solder_mask_min_width": 0.0, "use_height_for_length_calcs": True},
@@ -1003,7 +1064,7 @@ def write_project():
         "boards": [], "cvpcb": {"equivalence_files": []}, "libraries": {"pinned_footprint_libs": [],
                                                                        "pinned_symbol_libs": []},
         "meta": {"filename": PROJECT + ".kicad_pro", "version": 1},
-        "net_settings": {"classes": [{"bus_width": 12, "clearance": 0.2, "diff_pair_gap": 0.25,
+        "net_settings": {"classes": [{"bus_width": 12, "clearance": 0.3, "diff_pair_gap": 0.25,
                                       "diff_pair_via_gap": 0.25, "diff_pair_width": 0.2, "line_style": 0,
                                       "microvia_diameter": 0.3, "microvia_drill": 0.1, "name": "Default",
                                       "pcb_color": "rgba(0, 0, 0, 0.000)", "schematic_color": "rgba(0, 0, 0, 0.000)",
