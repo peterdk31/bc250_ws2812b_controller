@@ -1,0 +1,59 @@
+# BC-250 carrier board: regenerate the KiCad project, check it, export fab files.
+#
+#   make            generate + check + export
+#   make generate   write the KiCad files from generate.py, then fill.py: the ground fill and its stitching vias
+#   make check      geometry check only (KiCad 7's kicad-cli has no DRC)
+#   make drc        KiCad's own DRC through the pcbnew Python module (out/drc.txt)
+#   make export     gerbers, drill, PDFs, position file, netlist, BOM xml into out/, then fab.py:
+#                   an order-ready folder per fab under out/fab/ (jlcpcb, pcbway): gerber zip + BOM + CPL
+#   make preview    quick PNG render of the layout (out/preview.png, Pillow only, no KiCad needed)
+#   make pinout     the annotated wiring/pinout image (pinout.png, tracked — shown in the README)
+#   BOARDS=3 make   size the LCSC parts list (out/lcsc_parts.csv) for 3 boards (default 10)
+#
+# Needs python3 and kicad-cli 7 (KICAD_SHARE points at KiCad's share dir,
+# /usr/share/kicad by default, for the stock symbols and footprints).
+
+PCB = bc250_carrier_e.kicad_pcb
+SCH = bc250_carrier_e.kicad_sch
+OUT = out
+CLI ?= kicad-cli
+BOARDS ?= 10         # boards to order: sizes out/lcsc_parts.csv
+export BOARDS
+
+.PHONY: all generate check drc export preview pinout clean
+
+all: generate check drc preview pinout export
+
+generate:
+	python3 generate.py
+	python3 fill.py $(PCB)
+
+check:
+	python3 check.py
+
+preview:
+	python3 preview.py
+	python3 preview.py $(OUT)/preview-F.png 14 F
+	python3 preview.py $(OUT)/preview-B.png 14 B
+
+pinout:
+	python3 pinout.py
+
+drc:
+	mkdir -p $(OUT) && python3 drc.py $(PCB) $(OUT)/drc.txt
+
+export:
+	rm -rf $(OUT)/gerbers && mkdir -p $(OUT)/gerbers
+	$(CLI) pcb export gerbers --layers "F.Cu,B.Cu,F.SilkS,B.SilkS,F.Mask,B.Mask,Edge.Cuts" --output $(OUT)/gerbers/ $(PCB)
+	$(CLI) pcb export drill --format excellon --excellon-separate-th --output $(OUT)/gerbers/ $(PCB)
+	$(CLI) pcb export pdf --layers "F.Cu,B.Cu,F.SilkS,Edge.Cuts" --output $(OUT)/board-top.pdf $(PCB)
+	$(CLI) pcb export pdf --layers "B.Cu,B.SilkS,Edge.Cuts" --mirror --output $(OUT)/board-bottom.pdf $(PCB)
+	$(CLI) pcb export pos --format csv --units mm --output $(OUT)/positions.csv $(PCB)
+	$(CLI) sch export pdf --output $(OUT)/schematic.pdf $(SCH)
+	$(CLI) sch export netlist --output $(OUT)/netlist.net $(SCH)
+	$(CLI) sch export python-bom --output $(OUT)/bom.xml $(SCH)
+	python3 -c "import zoom; zoom.crop('$(OUT)/board-top.pdf', '$(OUT)/zoom-top.pdf', False); zoom.crop('$(OUT)/board-bottom.pdf', '$(OUT)/zoom-bottom.pdf', True)"
+	python3 fab.py
+
+clean:
+	rm -rf $(OUT)
