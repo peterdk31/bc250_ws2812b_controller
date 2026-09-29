@@ -187,26 +187,42 @@ export const label = id => labels().labels[id] || receivers[id]?.name || DEFAULT
 // behind it, so each gets a deadline; a disconnect or a receiver switch
 // starts a fresh chain. A deadline that fires is taken at its word: the link
 // is dropped, and the usual auto-reconnect brings the board back.
+//
+// Every operation belongs to the board its characteristic is on. Work for a
+// board that has since been switched away from (a dashboard still loading, a
+// re-read, a write) is never issued, and one that was in flight at the
+// switch has its answer dropped: it rejects with SUPERSEDED, which callers
+// pass over in silence, and nothing of the old board lands in `S`. Issuing
+// GATT calls on the board just disconnected, while connecting the next,
+// is what crashed Chrome's page on Android.
 const GATT_OP_TIMEOUT_MS = 10000;
+export const SUPERSEDED = new Error('another receiver was selected');
 let gattChain = Promise.resolve();
-function gattQueue(op) {
+// the board a characteristic is on (the demo's stand-ins have no service:
+// the selected one)
+const deviceOf = c => c?.service?.device || S.device;
+function gattQueue(c, op) {
+  const d = deviceOf(c);
   const p = gattChain.then(() => new Promise((resolve, reject) => {
+    if (S.device !== d) { reject(SUPERSEDED); return; }
     const t = setTimeout(() => {
       reject(new Error('Bluetooth operation timed out — the link may be gone'));
-      try { S.device?.gatt.disconnect(); } catch {}
+      try { if (S.device === d) d.gatt.disconnect(); } catch {}
     }, GATT_OP_TIMEOUT_MS);
-    Promise.resolve().then(op).then(resolve, reject).finally(() => clearTimeout(t));
+    Promise.resolve().then(op)
+      .then(v => S.device === d ? resolve(v) : reject(SUPERSEDED), e => reject(S.device === d ? e : SUPERSEDED))
+      .finally(() => clearTimeout(t));
   }));
   gattChain = p.then(() => {}, () => {});
   return p;
 }
 const gattReset = () => { gattChain = pagedChain = Promise.resolve(); };
-const gattRead = c => gattQueue(() => c.readValue());
+const gattRead = c => gattQueue(c, () => c.readValue());
 // writeValueWithResponse is newer than the iOS polyfills' first releases —
 // the deprecated writeValue is the same thing where the new name is missing
-const gattWrite = (c, v) => gattQueue(() =>
+const gattWrite = (c, v) => gattQueue(c, () =>
   c.writeValueWithResponse ? c.writeValueWithResponse(v) : c.writeValue(v));
-const gattSubscribe = c => gattQueue(() => c.startNotifications());
+const gattSubscribe = c => gattQueue(c, () => c.startNotifications());
 
 // top-level named handlers: addEventListener dedupes identical refs, so
 // re-attaching across reconnects can't stack them
@@ -240,7 +256,7 @@ async function open() {
   onStatus(first);
   remember(d);
   say('');
-  dashOpen(svc).catch(e => { say(`Dashboard: ${e.message}`); });
+  dashOpen(svc).catch(e => { if (e !== SUPERSEDED) say(`Dashboard: ${e.message}`); });
 }
 
 function onStatus(v) { S.psu = v; emit(); }
@@ -354,7 +370,7 @@ export async function connect() {
   S.busy = true; say('');
   try { await pick(); }
   catch (e) {
-    if (e.name !== 'NotFoundError') say(`Couldn’t connect: ${e.message}`); // chooser dismissed = not an error
+    if (e.name !== 'NotFoundError' && e !== SUPERSEDED) say(`Couldn’t connect: ${e.message}`); // chooser dismissed = not an error
   } finally { S.busy = false; emit(); }
 }
 
@@ -382,6 +398,7 @@ async function writeOp(op, ...args) {
     await gattWrite(S.ctrl, buf);
     say('');
   } catch (e) {
+    if (e === SUPERSEDED) throw e; // the board is gone from the screen: nothing to say
     if (tokenRejected(e)) {
       say(`Token rejected by ${label(S.device.id)} — enter the one it was flashed with.`);
       S.editToken = true;
@@ -841,8 +858,8 @@ const PAGE_HDR = 6; // ver slot page pages len(2)
 // queued on its own, so the whole read is held behind its own chain: paged
 // reads run one at a time.
 let pagedChain = Promise.resolve();
-export function readPaged(slot) {
-  const p = pagedChain.then(() => readPagedNow(slot));
+export function readPaged(slot, d = S.device) {
+  const p = pagedChain.then(() => { if (S.device !== d) throw SUPERSEDED; return readPagedNow(slot); });
   pagedChain = p.then(() => {}, () => {});
   return p;
 }
@@ -865,7 +882,7 @@ async function readPagedNow(slot) {
   return new DataView(out.buffer);
 }
 // a JSON value, whole: paged where the receiver pages, a plain read otherwise
-const readJson = (chr, slot) => S.pageChr && slot !== undefined ? readPaged(slot) : gattRead(chr);
+const readJson = (chr, slot) => S.pageChr && slot !== undefined ? readPaged(slot, deviceOf(chr)) : gattRead(chr);
 function notifier(current, ok, apply, slot) {
   let reading = false, stale = false;
   return async e => {
@@ -971,7 +988,13 @@ export const whenSaved = fn => { onSaved = fn; };
 // matches it — still powers the host, but its fans are the old shape
 export const fansCurrent = () => S.demo || !!S.pageChr;
 
+// the dashboard of the board open() just connected; a switch while it
+// loads stops it (SUPERSEDED, out of the first GATT op after), and an
+// optional value that failed to read is null — unless that failure was the
+// switch, which must not blank the next board's values
+const skip = e => { if (e === SUPERSEDED) throw e; return null; };
 async function dashOpen(svc) {
+  const d = S.device;
   let f, c, t, i;
   try {
     f = await svc.getCharacteristic(FANS);
@@ -985,7 +1008,7 @@ async function dashOpen(svc) {
   try { se = await svc.getCharacteristic(SENSORS); } catch { se = null; }  // firmware before the catalogue
   try { pw = await svc.getCharacteristic(PWR); pc = await svc.getCharacteristic(PWRCFG); } catch { pw = pc = null; } // firmware before the power settings
   try { pg = await svc.getCharacteristic(PAGE); } catch { pg = null; }     // firmware before the fan list
-  if (!connected()) return;
+  if (S.device !== d || !d.gatt.connected) return;
   S.fansChr = f; S.cfgChr = c; S.telemChr = t; S.saChr = s; S.sensChr = se; S.pwrChr = pw; S.pcfgChr = pc; S.infoChr = i; S.pageChr = pg;
   f.addEventListener('characteristicvaluechanged', onFansEvent);
   c.addEventListener('characteristicvaluechanged', onCfgEvent);
@@ -1003,16 +1026,16 @@ async function dashOpen(svc) {
   if (pc) await gattSubscribe(pc);
   const fv = parseFans(await gattRead(f));
   if (fv) S.fans = fv;
-  if (i) { try { S.info = parseInfo(await gattRead(i)); } catch { S.info = null; } }
+  if (i) { try { S.info = parseInfo(await gattRead(i)); } catch (e) { S.info = skip(e); } }
   onCfg(await readJson(c, SLOT.fancfg));
   const tv = await readJson(t, SLOT.telem);
   S.telem = tv.byteLength ? parseTelem(utf8.decode(tv)) : null;
-  if (s) { try { onSa(await gattRead(s)); } catch {} }
-  if (se) { try { const v = await readJson(se, SLOT.sensors); S.sens = v.byteLength ? parseSensors(utf8.decode(v)) : null; } catch { S.sens = null; } }
-  if (pw) { try { S.pwr = parsePwr(await gattRead(pw)); } catch { S.pwr = null; } }
-  if (pc) { try { onPcfg(await readJson(pc, SLOT.pwrcfg)); } catch { S.pcfg = null; } }
+  if (s) { try { onSa(await gattRead(s)); } catch (e) { skip(e); } }
+  if (se) { try { const v = await readJson(se, SLOT.sensors); S.sens = v.byteLength ? parseSensors(utf8.decode(v)) : null; } catch (e) { S.sens = skip(e); } }
+  if (pw) { try { S.pwr = parsePwr(await gattRead(pw)); } catch (e) { S.pwr = skip(e); } }
+  if (pc) { try { onPcfg(await readJson(pc, SLOT.pwrcfg)); } catch (e) { S.pcfg = skip(e); } }
   emit();
-  if (sc) await stripOpen(sc);
+  if (sc && S.device === d) await stripOpen(sc);
 }
 
 // ---- fan edits ----
@@ -1094,6 +1117,7 @@ export async function writeCfg(key, edit, chr = S.cfgChr) {
     }, SAVE_TIMEOUT_MS);
     return true;
   } catch (e) {
+    if (e === SUPERSEDED) return false; // the switch reset the save state already
     S.saving = null;
     if (tokenRejected(e)) { note('token rejected', 'err'); S.editToken = true; emit(); }
     else note(`write failed: ${e.message}${writeHint(e)}`, 'err');
@@ -1118,7 +1142,8 @@ async function writeRecord(slot, h, key) {
       S.saving = null;
       note('the receiver did not confirm the change', 'err');
     }, SAVE_TIMEOUT_MS);
-  } catch {
+  } catch (e) {
+    if (e === SUPERSEDED) return;
     S.saving = null;
     note('refused by the receiver — a pin it can’t use, a bad curve, or a value out of range', 'err'); // writeOp said more
   }
@@ -1206,8 +1231,8 @@ async function writeWake(pin) {
   try {
     await writeOp(OP_PWR_WAKE, pin === null ? NONE : pin);
     return true;
-  } catch {
-    note('refused by the receiver — a pin it can’t use for the wake input', 'err'); // writeOp said more
+  } catch (e) {
+    if (e !== SUPERSEDED) note('refused by the receiver — a pin it can’t use for the wake input', 'err'); // writeOp said more
     return false;
   }
 }
@@ -1223,7 +1248,8 @@ async function writeTuning(t) {
   try {
     await writeOp(OP_PWR_TUNING, ...u16(Math.round(t.hold * 1000)), ...u16(Math.round(t.boot * 1000)), ...u16(t.low), ...u16(t.high));
     settled('p');
-  } catch {
+  } catch (e) {
+    if (e === SUPERSEDED) return;
     S.saving = null;
     note('refused by the receiver — a value out of its range', 'err'); // writeOp said more
   }
@@ -1336,6 +1362,7 @@ export async function writeStrip(edit) {
       note('no answer from the host', 'err');
     }, SAVE_TIMEOUT_MS);
   } catch (e) {
+    if (e === SUPERSEDED) return; // the switch reset the strip's state already
     sSaving = false; sInflight = null; sPending = null;
     if (tokenRejected(e)) { note('token rejected', 'err'); S.editToken = true; emit(); }
     else note(`write failed: ${e.message}${writeHint(e)}`, 'err');
