@@ -77,6 +77,13 @@
 //                BC-250's own fan header, wired over) — the receiver samples
 //                it and runs the curve itself, so this works with no daemon
 //                and the machine off. x is 0..100 %. A receiver output only
+//   esp32_temp
+//                the receiver chip's own temperature sensor, °C — a rough
+//                reading of the case air around it (the die runs a few
+//                degrees warmer; write the curve against what it reads). The
+//                receiver runs the curve itself, like gpio:N; x is whole °C
+//                0..100. A receiver output only, on a chip with the sensor
+//                (the C3; not the plain ESP32)
 //   temp         the top-level `sensors` pick, °C            (this daemon)
 //   chip:label   any hwmon temperature, °C                   (this daemon)
 //   pmbus:CPU VRM / pmbus:GPU VRM
@@ -181,7 +188,7 @@ struct Fan
     int slot = -1;                   // the receiver slot (Header/GpioOut), else -1
 
     std::string input;               // as written
-    enum Kind { Fallback, Gpio, Temp, Pwm, CpuLoad, GpuLoad, Board } kind = Fallback;
+    enum Kind { Fallback, Gpio, RecvTemp, Temp, Pwm, CpuLoad, GpuLoad, Board } kind = Fallback;
     int gpio = -1;                   // Gpio: the receiver's input pin
     std::string spec;                // hwmon candidates (Temp) / chip (Pwm)
     std::string pwmFile;             // "pwm1" (Pwm)
@@ -215,8 +222,12 @@ struct Fan
 
     bool receiverOut() const { return out == Header || out == GpioOut; }
 
+    // does the receiver run this fan's curve itself (its input is the
+    // receiver's to read)?
+    bool receiverCurve() const { return kind == Gpio || kind == RecvTemp; }
+
     // does this fan's curve read something only this daemon can?
-    bool hostInput() const { return kind != Fallback && kind != Gpio && kind != Board; }
+    bool hostInput() const { return kind != Fallback && !receiverCurve() && kind != Board; }
 
     // does it take a curve?
     bool hasCurve() const { return kind != Fallback && kind != Board; }
@@ -236,10 +247,12 @@ struct Fan
         w.ramp = (uint8_t)(ramp + 0.5f);
         w.kind = kind == Fallback ? proto::FAN_KIND_FALLBACK
                : kind == Gpio     ? proto::FAN_KIND_GPIO
+               : kind == RecvTemp ? proto::FAN_KIND_RECEIVER_TEMP
                                   : proto::FAN_KIND_HOST;
         if (kind == Gpio)
-        {
             w.gpio = (uint8_t)gpio;
+        if (receiverCurve())
+        {
             w.npts = (uint8_t)curve.size();
             for (size_t i = 0; i < curve.size(); i++)
             {
@@ -271,7 +284,8 @@ struct Tuning
 };
 static const Tuning TUNINGS[] = {
     {"hysteresis", "h", "a number of °C, 0 or more", 0, 1e9f, &Fan::hysteresis,
-     [](const Fan& f) { return f.kind == Fan::Temp; }, "a temperature input", DEFAULT_HYSTERESIS},
+     [](const Fan& f) { return f.kind == Fan::Temp; },
+     "a temperature this host reads (esp32_temp is smoothed on the receiver)", DEFAULT_HYSTERESIS},
     {"ramp", "r", "percent per second, 0..255 (0 = at once)", 0, 255, &Fan::ramp,
      [](const Fan& f) { return f.hasCurve(); }, "an input with a curve", proto::FAN_DEFAULT_RAMP},
     {"boost_seconds", "t", "seconds, 0..255", 0, 255, &Fan::boostSecs,
@@ -552,6 +566,10 @@ public:
             else if (f.kind == Fan::Gpio)
                 fprintf(out, "input: %s \"%s\" (the receiver reads the pin and runs the curve)",
                         f.input.c_str(), f.curveText.c_str());
+            else if (f.kind == Fan::RecvTemp)
+                fprintf(out, "input: %s \"%s\" (the receiver reads its own chip temperature and "
+                             "runs the curve)",
+                        f.input.c_str(), f.curveText.c_str());
             else
             {
                 fprintf(out, "input: %s", f.input.c_str());
@@ -635,7 +653,7 @@ private:
 
     static const char* INPUT_HELP()
     {
-        return "expected fallback, gpio:N, temp, cpu_load, gpu_load, a hwmon chip:label / "
+        return "expected fallback, gpio:N, esp32_temp, temp, cpu_load, gpu_load, a hwmon chip:label / "
                "chip:pwmN, pmbus:CPU VRM / pmbus:GPU VRM, smu:VRAM hotspot / smu:VRAM 0..7, "
                "file:/path, or (for a host output) \"\" for the board's own curve";
     }
@@ -750,6 +768,12 @@ private:
             return "";
         }
 
+        if (src == "esp32_temp")
+        {
+            f.kind = Fan::RecvTemp;
+            return "";
+        }
+
         if (src == "cpu_load")
         {
             f.kind = Fan::CpuLoad;
@@ -860,6 +884,9 @@ private:
             if (kind == Fan::Gpio && (x < 0 || x > 100 || x != floorf(x)))
                 return bad(where, "\"" + t + "\": a gpio curve's input is whole percents "
                                   "0..100 (it travels to the receiver as bytes)");
+            if (kind == Fan::RecvTemp && (x < 0 || x > 100 || x != floorf(x)))
+                return bad(where, "\"" + t + "\": an esp32_temp curve's input is whole °C "
+                                  "0..100 (it travels to the receiver as bytes)");
             for (auto& p : out)
                 if (p.x == x)
                     return bad(where, "two points at " + t.substr(0, colon));
@@ -922,6 +949,10 @@ private:
 
         if (f.kind == Fan::Gpio && f.out == Fan::Host)
             return bad(where + ".input", "a gpio input is read by the receiver, which can't drive a "
+                                         "host output — put the fan on a receiver output (headerN / "
+                                         "gpio:N), or give it a host input");
+        if (f.kind == Fan::RecvTemp && f.out == Fan::Host)
+            return bad(where + ".input", "esp32_temp is read by the receiver, which can't drive a "
                                          "host output — put the fan on a receiver output (headerN / "
                                          "gpio:N), or give it a host input");
         if (f.kind == Fan::Gpio && f.out == Fan::GpioOut && f.gpio == f.outNum)
@@ -1145,6 +1176,7 @@ private:
         {
             case Fan::Fallback:
             case Fan::Gpio:
+            case Fan::RecvTemp:
                 return false; // nothing this side reads
 
             case Fan::CpuLoad:
@@ -1216,7 +1248,8 @@ private:
     // one fan's duty this tick, as this side runs it: read, hysteresis
     // (temperatures), curve, ramp. An input that can't be read runs the
     // fallback; a fan this side doesn't run is FAN_NONE — parked, the
-    // receiver's own (a fallback or gpio fan on a receiver output), or the
+    // receiver's own (a fallback, gpio or esp32_temp fan on a receiver
+    // output), or the
     // board's (its reading is kept for the dashboard).
     int compute(Fan& f, float dt)
     {
@@ -1239,7 +1272,7 @@ private:
         if (f.kind == Fan::Fallback)
             return f.receiverOut() ? proto::FAN_NONE : f.fallback;
 
-        if (f.kind == Fan::Gpio)
+        if (f.receiverCurve())
             return proto::FAN_NONE;
 
         float in;

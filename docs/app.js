@@ -306,7 +306,7 @@ function PowerSheet() {
 // otherwise the thing that runs it instead (the chip names the same state).
 // "no reading" is only for an input that is in force and has none.
 const INPUT_NAMES = { fallback: 'Fixed speed', host: 'Host curve', temp: 'CPU temperature', cpu_load: 'CPU load',
-                      gpu_load: 'GPU load', board: 'Board curve' };
+                      gpu_load: 'GPU load', board: 'Board curve', esp32_temp: 'Receiver temperature' };
 const inputName = c => c.kind === 'gpio' ? `PWM input on GPIO${c.gpio}` : c.kind === 'hwmon' ? c.spec
   : c.kind === 'pwm' ? `Board fan header ${c.spec}` : INPUT_NAMES[c.kind] ?? c.src;
 const HOST_STATES = { gone: 'not found on this machine', ro: 'read-only driver — the board runs it', busy: 'not driven by this host',
@@ -399,8 +399,8 @@ const PAD = { l: 26, r: 8, t: 6, b: 16 }, W = 320, H = 120;
 function xDomain(h) {
   if (!B.isTempX(h)) return [0, 100];
   const xs = h.pts.map(p => p.x).filter(Number.isFinite);
-  let lo = Math.min(20, ...xs) - 5, hi = Math.max(90, ...xs) + 5;
-  return [Math.max(0, Math.floor(lo / 10) * 10), Math.min(B.TEMP_MAX, Math.ceil(hi / 10) * 10)];
+  let lo = Math.min(20, ...xs) - 5, hi = Math.max(B.ownCurve(h) ? 60 : 90, ...xs) + 5;
+  return [Math.max(0, Math.floor(lo / 10) * 10), Math.min(B.xMax(h), Math.ceil(hi / 10) * 10)];
 }
 const sx = (x, d) => PAD.l + (x - d[0]) / (d[1] - d[0]) * (W - PAD.l - PAD.r);
 const sy = y => PAD.t + (1 - y / 100) * (H - PAD.t - PAD.b);
@@ -437,7 +437,7 @@ function Curve({ h, now = null, editing = false, onChange }) {
     const prev = h.pts[i - 1], next = h.pts[i + 1];
     const lo = prev && Number.isFinite(prev.x) ? prev.x + 0.5 : d[0], hi = next && Number.isFinite(next.x) ? next.x - 0.5 : d[1];
     const x = clamp(ux(px, d), lo, hi);
-    onChange(i, { x: B.isTempX(h) ? Math.round(x * 2) / 2 : Math.round(x), y: Math.round(clamp(uy(py), 0, 100)) });
+    onChange(i, { x: Math.round(x / B.xStep(h)) * B.xStep(h), y: Math.round(clamp(uy(py), 0, 100)) });
   };
   const end = () => { drag.current = null; };
   const nowPt = now !== null && !editing ? [clamp(now, d[0], d[1]), evalCurve({ pts: shown }, now)] : null;
@@ -455,7 +455,8 @@ function Curve({ h, now = null, editing = false, onChange }) {
 
 // ---- the fan editor ----
 // a starting curve for an input the fan didn't have before
-const defaultCurve = h => B.isTempX(h) ? [{ x: 40, y: 30 }, { x: 70, y: 100 }] : [{ x: 0, y: 20 }, { x: 100, y: 100 }];
+const defaultCurve = h => h.kind === 'esp32_temp' ? [{ x: 30, y: 30 }, { x: 50, y: 100 }] // the case air, not a die
+  : B.isTempX(h) ? [{ x: 40, y: 30 }, { x: 70, y: 100 }] : [{ x: 0, y: 20 }, { x: 100, y: 100 }];
 // the input changed kind: keep a curve whose x unit still fits, start a
 // fresh one otherwise, none for a fixed speed or the board's own curve
 function withKind(h, kind) {
@@ -465,7 +466,7 @@ function withKind(h, kind) {
   if ((kind === 'hwmon' || kind === 'pwm') && n.spec === undefined) n.spec = '';
   if (B.isFixed(n)) n.pts = [];
   else if (!hadCurve || wasTemp !== B.isTempX(n) || !n.pts.length) n.pts = defaultCurve(n);
-  else if (kind === 'gpio') n.pts = n.pts.map(p => ({ x: Math.round(clamp(p.x, 0, 100)), y: p.y }));
+  else if (B.ownCurve(n)) n.pts = n.pts.map(p => ({ x: Math.round(clamp(p.x, 0, 100)), y: p.y }));
   return n;
 }
 // the output changed: an input the new output can't have becomes a fixed
@@ -474,11 +475,11 @@ function withKind(h, kind) {
 function withOutput(h, output) {
   let n = { ...h, output, out: B.outInfo(output) };
   if (h.kind === 'board' && n.out.kind !== 'host') n = withKind(n, 'fallback');
-  if (h.kind === 'gpio' && n.out.kind === 'host') n = withKind(n, 'fallback');
+  if (B.ownCurve(h) && n.out.kind === 'host') n = withKind(n, 'fallback');
   if (n.out.kind === 'host') n.boost = B.NONE;
   return n;
 }
-const fmtReading = (kind, v) => v === null ? '—' : kind === 'temp' || kind === 'hwmon' ? `${fmt1(v)} °C` : `${fmt1(v)} %`;
+const fmtReading = (kind, v) => v === null ? '—' : B.isTempX({ kind }) ? `${fmt1(v)} °C` : `${fmt1(v)} %`;
 // what a fan reads right now, for the picker: a catalogue spec's reading
 // for the hwmon kinds, the telemetry's otherwise
 const readingFor = h => (h.kind === 'hwmon' || h.kind === 'pwm') ? B.sensorReading(h.spec) : B.readingOf(h.kind, h);
@@ -569,9 +570,12 @@ function FanEditor({ fkey }) {
   if (!h) return html`<${Header} back="Fans" /><div class="empty">${fkey === 'new' ? 'No free output for another fan.' : 'This fan is gone.'}</div>`;
   const daemon = h.route === 'daemon';
   const hostOut = h.out.kind === 'host';
-  const kinds = !daemon ? (h.kind === 'host' ? ['host', 'fallback', 'gpio'] : ['fallback', 'gpio'])
+  // the receiver's own temperature, where its chip has the sensor (or the
+  // fan follows it already, so the row that says so stays)
+  const own = ['gpio', ...(S.fans && S.fans.temp !== null || h.kind === 'esp32_temp' ? ['esp32_temp'] : [])];
+  const kinds = !daemon ? (h.kind === 'host' ? ['host', 'fallback', ...own] : ['fallback', ...own])
     : hostOut ? ['board', 'fallback', ...B.HOST_KINDS]
-    : ['fallback', 'gpio', ...B.HOST_KINDS];
+    : ['fallback', ...own, ...B.HOST_KINDS];
   const setPt = (i, p) => setH(x => { const pts = x.pts.map(q => ({ ...q })); pts[i] = { ...pts[i], ...p }; return { ...x, pts }; });
   const addPt = () => setH(x => {
     const p = x.pts.map(q => ({ ...q })), d = xDomain(x);
@@ -579,7 +583,7 @@ function FanEditor({ fkey }) {
     let at = p.length, xv, yv;
     if (p.length >= 2) { const a = p[p.length - 2], b = p[p.length - 1]; xv = (a.x + b.x) / 2; yv = Math.round((a.y + b.y) / 2); at = p.length - 1; }
     else { xv = Math.min(d[1], p[0].x + 10); yv = p[0].y; }
-    if (!B.isTempX(x)) xv = Math.round(xv);
+    xv = Math.round(xv / B.xStep(x)) * B.xStep(x);
     p.splice(at, 0, { x: xv, y: yv });
     return { ...x, pts: p };
   });
@@ -632,14 +636,15 @@ function FanEditor({ fkey }) {
         : typed && html`<label class="frow"><span>${h.kind === 'pwm' ? 'Header' : 'Sensor'}</span>
           <input class="text" type="text" autocomplete="off" placeholder=${cur.hint} value=${h.spec || ''} onInput=${e => set({ spec: e.target.value.trim() })} /></label>`}
         ${h.kind === 'board' && html`<div class="note">The board runs this output with its own curve, as it would with no daemon at all. Pick an input to have the host run it instead.</div>`}
+        ${h.kind === 'esp32_temp' && html`<div class="note">The receiver chip’s own sensor: a rough reading of the air around the receiver, a few degrees warmer than it. The receiver runs this curve itself, with or without the host.</div>`}
       </div>
-      ${h.kind === 'host' && html`<div class="card"><div class="note">This fan follows a curve the host runs; with the host off it sits at its fallback speed. Pick Fixed speed or PWM input for something the receiver runs on its own.</div></div>`}
+      ${h.kind === 'host' && html`<div class="card"><div class="note">This fan follows a curve the host runs; with the host off it sits at its fallback speed. Pick Fixed speed, PWM input or Receiver temperature for something the receiver runs on its own.</div></div>`}
       ${!B.isFixed(h) && h.kind !== 'host' && html`<div class="card">
         <h2>Curve</h2>
         <${Curve} h=${h} editing=${true} onChange=${setPt} />
         <div class="pts">${h.pts.map((p, i) => html`<div key=${i} class="prow">
           <label>${i + 1}</label>
-          <${NumField} aria=${`point ${i + 1} ${B.isTempX(h) ? 'temperature' : 'input'}`} step=${B.isTempX(h) ? 0.5 : 1} min=${0} max=${B.isTempX(h) ? B.TEMP_MAX : 100} value=${p.x} onValue=${v => setPt(i, { x: v === null ? v : clamp(v, 0, B.isTempX(h) ? B.TEMP_MAX : 100) })} /><span class="unit">${unit}</span>
+          <${NumField} aria=${`point ${i + 1} ${B.isTempX(h) ? 'temperature' : 'input'}`} step=${B.xStep(h)} min=${0} max=${B.xMax(h)} value=${p.x} onValue=${v => setPt(i, { x: v === null ? v : clamp(v, 0, B.xMax(h)) })} /><span class="unit">${unit}</span>
           <${NumField} aria=${`point ${i + 1} speed`} min=${0} max=${100} step=${1} value=${p.y} onValue=${v => setPt(i, { y: v })} /><span class="unit">%</span>
           ${h.pts.length > 1 ? html`<button class="x" aria-label="remove point" onClick=${() => rmPt(i)}>×</button>` : html`<span></span>`}
         </div>`)}</div>

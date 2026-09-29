@@ -458,12 +458,13 @@ export async function forget() {
 
 // ---- the dashboard's data ----
 // A fan is an input read through a curve onto an output (daemon/fans.hpp).
-// Its input: the config's string ("fallback", "gpio:0", "temp",
+// Its input: the config's string ("fallback", "gpio:0", "esp32_temp", "temp",
 // "amdgpu:edge", "nct6686:pwm1", "cpu_load", "gpu_load" — or, on a host
 // output, "": the board drives it) → its kind and parts
 export const SRC_KINDS = {
   fallback: { label: 'Fixed speed', hint: 'runs at the fallback speed, always' },
   gpio:     { label: 'PWM input', hint: 'a fan wire on a receiver pin' },
+  esp32_temp: { label: 'Receiver temperature', hint: 'the receiver chip’s own sensor — the air around it, a few °C warm' },
   temp:     { label: 'CPU temperature' },
   hwmon:    { label: 'Sensor', hint: 'chip:label, e.g. amdgpu:edge, pmbus:GPU VRM or smu:VRAM hotspot' },
   pwm:      { label: 'Board fan header', hint: 'chip:pwmN, e.g. nct6686:pwm1' },
@@ -478,7 +479,7 @@ export function srcInfo(s, output = '') {
   s = String(s || '');
   if (!s && outInfo(output).kind === 'host') return { kind: 'board', src: '' };
   if (s === 'fallback' || s === 'constant') return { kind: 'fallback', src: 'fallback' };
-  if (s === 'temp' || s === 'cpu_load' || s === 'gpu_load') return { kind: s, src: s };
+  if (s === 'temp' || s === 'cpu_load' || s === 'gpu_load' || s === 'esp32_temp') return { kind: s, src: s };
   const i = s.indexOf(':'), chip = i < 0 ? s : s.slice(0, i), lbl = i < 0 ? '' : s.slice(i + 1);
   if (chip === 'gpio') return { kind: 'gpio', src: s, gpio: parseInt(lbl, 10) };
   if (/^pwm\d+$/.test(lbl)) return { kind: 'pwm', src: s, spec: s };
@@ -508,17 +509,26 @@ export function outPin(o) {
 export const outLabel = o => o.kind === 'header' ? `Header ${o.num}` : o.kind === 'gpio' ? `GPIO${o.num}`
   : o.kind === 'host' ? o.spec.replace(':', ' ') : 'No output';
 export const isFixed = h => h.kind === 'fallback' || h.kind === 'board'; // no curve
-export const isTempX = h => h.kind === 'temp' || h.kind === 'hwmon'; // the curve's x is °C
+export const isTempX = h => h.kind === 'temp' || h.kind === 'hwmon' || h.kind === 'esp32_temp'; // the curve's x is °C
 export const TEMP_MAX = 200; // °C, the daemon's hwmon::TEMP_MAX: no reading goes above it
+// the receiver runs this fan's curve itself (fanwire::Header::ownCurve): its
+// points travel as bytes, so x is a whole number 0..100 (percent or °C)
+export const ownCurve = h => h.kind === 'gpio' || h.kind === 'esp32_temp';
+export const xMax = h => ownCurve(h) ? 100 : isTempX(h) ? TEMP_MAX : 100;
+export const xStep = h => ownCurve(h) || !isTempX(h) ? 1 : 0.5;
 export const NONE = 0xFF;
 export const CHANNELS = 6, MAX_POINTS = 8; // common/fancurve.hpp: the daemon and the receiver cap at this too
-export const SRC_NAMES = ['', 'fallback', 'live', 'boost', 'curve']; // fan::SRC_* (curve = the receiver's own gpio curve)
-const KIND_BYTE = { fallback: 0, gpio: 1, host: 2 }; // protocol.hpp FAN_KIND_*
+export const SRC_NAMES = ['', 'fallback', 'live', 'boost', 'curve']; // fan::SRC_* (curve = the receiver's own curve)
+const KIND_BYTE = { fallback: 0, gpio: 1, host: 2, esp32_temp: 3 }; // protocol.hpp FAN_KIND_*
+const KIND_NAME = Object.fromEntries(Object.entries(KIND_BYTE).map(([k, v]) => [v, k]));
 const OUT_HEADER = 1, OUT_GPIO = 2;                  // protocol.hpp FAN_OUT_*
 // the fans view's length by layout version: 1 = state(1) duty(1) per slot,
-// 2 adds the receiver's stored fallback(1), 3 the input kind(1) and input(1)
+// 2 adds the receiver's stored fallback(1), 3 the input kind(1) and input(1).
+// A ver-3 view may carry a tail after the uptime: the chip's temperature,
+// int16 tenths of °C (-32768 = none) — `temp`, null without it
 const FANS_STRIDE = { 1: 2, 2: 3, 3: 5 };
 export const FANS_LEN = ver => 4 + CHANNELS * FANS_STRIDE[ver] + 4;
+const TEMP_NONE = -32768;
 // the standalone value: protocol.hpp CMD_FAN_STANDALONE's layout — one record
 // per slot (common/fanwire.hpp): fallback boost boost_secs ramp kind gpio npts
 // pts[8][2] out_kind out
@@ -540,8 +550,12 @@ export function parseFans(dv) {
   const out = {
     active: !!(f & 1), boosting: !!(f & 2), hold: !!(f & 4), live: !!(f & 8),
     host: !!(f & 16), telem: !!(f & 32),
-    psu: dv.getUint8(2), age: dv.getUint8(3), h: [], uptime: u32(dv, 4 + CHANNELS * stride),
+    psu: dv.getUint8(2), age: dv.getUint8(3), h: [], uptime: u32(dv, 4 + CHANNELS * stride), temp: null,
   };
+  if (dv.byteLength >= FANS_LEN(ver) + 2) {
+    const t = dv.getInt16(FANS_LEN(ver), true);
+    if (t !== TEMP_NONE) out.temp = t / 10;
+  }
   for (let i = 0; i < CHANNELS; i++) {
     const o = 4 + i * stride, st = dv.getUint8(o);
     out.h.push({ wired: !!(st & 1), src: (st >> 1) & 7, duty: dv.getUint8(o + 1),
@@ -557,22 +571,22 @@ function decodeRecord(dv, q) {
   const k = dv.getUint8(q + 4), n = Math.min(MAX_POINTS, dv.getUint8(q + 6));
   const ok = dv.getUint8(q + 7 + 2 * MAX_POINTS), on = dv.getUint8(q + 8 + 2 * MAX_POINTS);
   const pts = [];
-  if (k === KIND_BYTE.gpio) for (let j = 0; j < n; j++) pts.push({ x: dv.getUint8(q + 7 + 2 * j), y: dv.getUint8(q + 8 + 2 * j) });
+  if (k === KIND_BYTE.gpio || k === KIND_BYTE.esp32_temp) for (let j = 0; j < n; j++) pts.push({ x: dv.getUint8(q + 7 + 2 * j), y: dv.getUint8(q + 8 + 2 * j) });
   return { used: ok === OUT_HEADER || ok === OUT_GPIO,
            out: ok === OUT_HEADER ? { kind: 'header', num: on } : ok === OUT_GPIO ? { kind: 'gpio', num: on } : { kind: 'parked' },
            fb: dv.getUint8(q), boost: dv.getUint8(q + 1), boostSecs: dv.getUint8(q + 2), ramp: dv.getUint8(q + 3),
-           kind: k === KIND_BYTE.fallback ? 'fallback' : k === KIND_BYTE.gpio ? 'gpio' : 'host', gpio: dv.getUint8(q + 5), pts };
+           kind: KIND_NAME[k] ?? 'host', gpio: dv.getUint8(q + 5), pts };
 }
 // ...and a card's fan → the record the receiver stores (the control op's
 // argument); null = an unused slot (the fan removed)
 export function encodeRecord(h) {
   const r = new Uint8Array(SA_HEADER_LEN).fill(NONE);
   if (!h) return r;
-  const gpio = h.kind === 'gpio';
+  const gpio = h.kind === 'gpio', own = ownCurve(h);
   r.set([h.fallback, h.boost === NONE || h.boost === null || h.boost === undefined ? NONE : h.boost,
          Math.round(h.boostSecs ?? DEFAULTS.boostSecs), Math.round(h.ramp ?? DEFAULTS.ramp),
-         KIND_BYTE[h.kind] ?? KIND_BYTE.host, gpio ? h.gpio : NONE, gpio ? h.pts.length : 0]);
-  for (let j = 0; j < MAX_POINTS; j++) r.set(gpio && j < h.pts.length ? [h.pts[j].x, h.pts[j].y] : [0, 0], 7 + 2 * j);
+         KIND_BYTE[h.kind] ?? KIND_BYTE.host, gpio ? h.gpio : NONE, own ? h.pts.length : 0]);
+  for (let j = 0; j < MAX_POINTS; j++) r.set(own && j < h.pts.length ? [h.pts[j].x, h.pts[j].y] : [0, 0], 7 + 2 * j);
   r.set([h.out.kind === 'header' ? OUT_HEADER : OUT_GPIO, h.out.num], 7 + 2 * MAX_POINTS);
   return r;
 }
@@ -639,11 +653,12 @@ export const liveOf = c => c && c.slot >= 0 && S.fans ? S.fans.h[c.slot] : null;
 // the daemon's telemetry for a card (by list index), or null
 export const telemOf = c => c && c.index >= 0 && S.fans && S.fans.telem && S.telem ? S.telem.fans[c.index] || null : null;
 // the reading a card's curve sees right now: a gpio input's from the
-// receiver (it samples the pin), a host input's (and the board's own duty)
-// from the daemon's telemetry
+// receiver (it samples the pin), the receiver's temperature from its own
+// view, a host input's (and the board's own duty) from the daemon's telemetry
 export function inputOf(c) {
   if (!c) return null;
   if (c.kind === 'gpio') { const f = liveOf(c); return f && f.in !== NONE ? f.in : null; }
+  if (c.kind === 'esp32_temp') return S.fans ? S.fans.temp : null;
   const t = telemOf(c);
   return t && t.in !== undefined ? t.in : null;
 }
@@ -654,6 +669,7 @@ export function readingOf(kind, c) {
   if (kind === 'cpu_load') return t && t.cpu !== undefined ? t.cpu : null;
   if (kind === 'gpu_load') return t && t.gpu !== undefined ? t.gpu : null;
   if (kind === 'gpio') { const f = liveOf(c); return f && f.kind === KIND_BYTE.gpio && f.in !== NONE ? f.in : null; }
+  if (kind === 'esp32_temp') return S.fans ? S.fans.temp : null;
   if (kind === 'board' && c) { const o = S.outs && S.outs.find(x => x.spec === c.output); return o ? o.duty : null; }
   return null;
 }
@@ -715,7 +731,7 @@ export function parseCfg(text) {
 }
 // which settings a fan has (fans.hpp TUNINGS, and the boost's rule): the
 // editor shows these, the daemon refuses the others
-export const hasHyst = h => isTempX(h);                 // a temperature input
+export const hasHyst = h => h.kind === 'temp' || h.kind === 'hwmon'; // a temperature the host reads (the receiver smooths its own)
 export const hasRamp = h => !isFixed(h);                // an input with a curve
 export const hasBoost = h => h.out.kind !== 'host';     // the receiver runs a boost, before the host is up
 export const hasBoostSecs = h => hasBoost(h) && h.boost !== NONE; // a fan with a boost
@@ -1048,7 +1064,7 @@ export function checkEdit(h, key) {
     if (!nm || [...nm].length > NAME_CHARS) return `a name is 1–${NAME_CHARS} characters`; // characters, as the daemon counts
   }
   if (h.route !== 'daemon' && !isReceiverOut(h.out)) return 'the receiver alone drives a header or a pin — pick one';
-  if (h.route !== 'daemon' && h.kind !== 'fallback' && h.kind !== 'gpio') return 'the receiver alone runs a fixed speed or a PWM input — pick one';
+  if (h.route !== 'daemon' && h.kind !== 'fallback' && !ownCurve(h)) return 'the receiver alone runs a fixed speed, a PWM input or its own temperature — pick one';
   const other = cards().find(c => c.key !== key && h.output && c.output === h.output);
   if (other) return `${outLabel(h.out)} is ${other.name || 'another fan'}’s output`;
   // the same pin under two spellings (header1 and gpio:5 on a board wiring
@@ -1066,6 +1082,7 @@ export function checkEdit(h, key) {
   if (h.out.kind === 'gpio' && !(Number.isInteger(h.out.num) && h.out.num >= 0 && h.out.num <= 48)) return 'the output pin is a number 0–48';
   if (h.out.kind === 'host' && !/^[^:\s]+:pwm\d+$/.test(h.output)) return 'a host output is chip:pwmN, e.g. nct6686:pwm2';
   if (h.kind === 'gpio' && h.out.kind === 'host') return 'a PWM input is read by the receiver, which can’t drive a host output';
+  if (h.kind === 'esp32_temp' && h.out.kind === 'host') return 'the receiver’s temperature is read by the receiver, which can’t drive a host output';
   if (h.kind === 'board' && h.out.kind !== 'host') return 'only a host output has a board curve';
   if (h.kind === 'gpio' && !(Number.isInteger(h.gpio) && h.gpio >= 0 && h.gpio <= 48)) return 'the pin is a number 0–48';
   if (h.kind === 'gpio' && h.out.kind === 'gpio' && h.gpio === h.out.num) return 'a pin can’t be the input and the output';
@@ -1082,6 +1099,7 @@ export function checkEdit(h, key) {
       if (!(p.y >= 0 && p.y <= 100)) return 'speed must be 0–100 %';
       if (!Number.isFinite(p.x)) return 'every point needs an input value';
       if (h.kind === 'gpio' && !(Number.isInteger(p.x) && p.x >= 0 && p.x <= 100)) return 'a PWM input curve reads whole percents 0–100';
+      if (h.kind === 'esp32_temp' && !(Number.isInteger(p.x) && p.x >= 0 && p.x <= 100)) return 'a receiver temperature curve reads whole °C 0–100';
       if (xs.has(p.x)) return `two points at ${p.x}`;
       xs.add(p.x);
     }
@@ -1415,7 +1433,7 @@ export function demo() {
       saBytes.set(encodeRecord({ out: { kind: 'header', num: hdr }, fallback: fb, boost: b, boostSecs: 5, ramp, kind: k, gpio: g,
                                  pts: pts.map(([x, y]) => ({ x, y })) }), i * SA_HEADER_LEN));
   S.sa = parseSa(new DataView(saBytes.buffer));
-  const f = new Uint8Array(FANS_LEN(3)), dv = new DataView(f.buffer);
+  const f = new Uint8Array(FANS_LEN(3) + 2), dv = new DataView(f.buffer);
   f[0] = 3; f[1] = 0x01 | 0x08 | 0x10 | 0x20; f[2] = 2; f[3] = 1;
   // state: driving | src<<1 (1 = fallback, 2 = live, 3 = boost, 4 = the
   // receiver's own curve); duty; the stored fallback; the input kind; a gpio
@@ -1424,12 +1442,13 @@ export function demo() {
    [0, NONE, NONE, NONE, NONE], [0, NONE, NONE, NONE, NONE]]
     .forEach(([st, d, fb, k, inp], i) => { f.set([st, d, fb, k, inp], 4 + i * 5); });
   dv.setUint32(4 + CHANNELS * 5, 5 * 3600 + 17 * 60, true);
+  dv.setInt16(FANS_LEN(3), 342, true); // the receiver's chip: 34.2 °C
   S.fans = parseFans(dv);
   if (location.search.includes('nodaemon')) {
     S.cfg = S.telem = S.scfg = S.sens = S.outs = null; // nothing from the daemon
     S.fans.live = S.fans.telem = S.fans.host = false; S.fans.age = 255; S.fans.psu = 0;
     // the receiver alone: a gpio slot keeps its own curve, everything else runs its fallback
-    S.fans.h.forEach(h => { if (!h.wired) return; if (h.kind === KIND_BYTE.gpio) h.src = 4; else { h.src = 1; h.duty = h.fb; } });
+    S.fans.h.forEach(h => { if (!h.wired) return; if (h.kind === KIND_BYTE.gpio || h.kind === KIND_BYTE.esp32_temp) h.src = 4; else { h.src = 1; h.duty = h.fb; } });
   }
   S.info = { ver: 3, version: 'v1.31.0-demo', heap: 143 * 1024, minHeap: 121 * 1024, pins: [0, 20, 21],
              headerPins: [5, 6, 7, 10, null, null], outPins: [0, 1, 2, 3, 20, 21] };
@@ -1487,6 +1506,7 @@ export function demo() {
       else {
         h.wired = true; h.fb = r.fb; h.kind = KIND_BYTE[r.kind];
         if (r.kind === 'gpio') { h.in = 50; h.src = 4; h.duty = Math.round(r.pts.length ? r.pts[0].y : 50); }
+        else if (r.kind === 'esp32_temp') { h.in = 34; h.src = 4; h.duty = Math.round(r.pts.length ? r.pts[0].y : 50); }
         else { h.in = NONE; h.src = 1; h.duty = h.fb; }
       }
       saBytes.set(rec, slot * SA_HEADER_LEN); // the stored value, as the receiver would echo it

@@ -901,6 +901,7 @@ so does *where the curve runs* — on whichever side can read the input:
 |---|---|---|---|
 | `fallback` | nothing — the fan runs its `fallback` value, always; no `curve` | — | receiver (a host output: daemon) |
 | `gpio:N` | the duty of a PWM signal on the receiver's GPIO N — a fan header's PWM wire (the BC-250's own, say), so the receiver follows the board's BIOS curve with no daemon and the machine off. A receiver output only | % | receiver |
+| `esp32_temp` | the receiver chip's own temperature sensor — a rough reading of the case air around the receiver (see below). The receiver runs the curve itself, with no daemon and the machine off. A receiver output only, on a chip with the sensor (the C3 yes, the plain ESP32 no) | °C | receiver |
 | `temp` | the top-level `sensors` pick | °C | daemon |
 | `chip:label` | any hwmon temperature, same syntax as `sensors` (`amdgpu:edge`, `nct6686:CPU`; a comma list of candidates works too). The phone's picker lists every labelled one the machine has, with its reading; so does `--fan-status` | °C | daemon |
 | `pmbus:CPU VRM` / `pmbus:GPU VRM` | the BC-250's two VRM rails, read from the board's PMBus controller over I2C by the daemon itself — see [VRM and GDDR6 temperatures](#vrm-and-gddr6-temperatures) for the two-wire mod that exposes the bus. Listed in the picker once the controller answers | °C | daemon |
@@ -917,8 +918,8 @@ or 100 on the x axis. Floors, ceilings and scaling all live in the curve
 board's own) takes no curve and every other input needs one — the daemon (and
 `make flash`) refuse the other combinations, along with an unknown or missing
 key, so a typo is a startup error rather than a silently odd fan. A `gpio`
-curve's inputs are whole percents 0..100 (it travels to the receiver as
-bytes).
+curve's inputs are whole percents 0..100, an `esp32_temp` curve's whole °C
+0..100 (both travel to the receiver as bytes).
 
 **`gpio:N`** as an input is the wired twin of `chip:pwmN`: a two-wire lead
 from the fan header's PWM (pin 4) and GND pins to a free receiver GPIO and its
@@ -938,6 +939,20 @@ edit, a daemon push) is checked again on the receiver, which logs a refusal
 and runs the fallback. The phone never has to guess: the receiver publishes
 the pins that pass that check, for inputs and for outputs, and the editor
 lists them.
+
+**`esp32_temp`** reads the temperature sensor inside the receiver's own
+chip — nothing to wire. It is the die's temperature, not the air's: the chip
+sits a few degrees above the air around it (more with the radio busy), and
+the offset varies from chip to chip, so treat it as a trend of the case air
+near the receiver rather than a thermometer, and write the curve against what
+it actually reads (the phone's picker shows it live). The receiver reads it
+once a second and smooths it over ~8 s, so it has no `hysteresis` of its own
+(the key is refused); `ramp` applies as usual. Its use is a curve that keeps
+working with no daemon — a case fan that tracks how warm the box is, on a
+bench build or while the host is booting — not a replacement for the host's
+real temperatures. The page shows the reading whether or not a fan follows
+it; a receiver with no sensor doesn't offer the input, and one that is sent
+it anyway runs the fallback.
 
 **`boost`** and **`fallback`** are the fan's *standalone* settings — what the
 receiver does on its own. Full speed is the safe answer for cooling, which is
@@ -966,7 +981,7 @@ step 2 on the same way.
 
 Each receiver fan's duty comes from four places, strongest first: the
 **boost** while its window runs; the receiver's own **curve** for a `gpio`
-input; the daemon's **live** duty (a host curve's output, pushed on the 0.5 s
+or `esp32_temp` input; the daemon's **live** duty (a host curve's output, pushed on the 0.5 s
 rule tick when it changes and refreshed every 5 s, never persisted); and the
 **fallback**. With the power switch configured, "host powers on" means *its*
 power-on event — the button press asserting PS_ON# — confirmed by the sense
@@ -985,16 +1000,16 @@ config file like every other edit, and the daemon pushes the standalone values
 to the receiver. **With no daemon at all**, straight to the receiver (a control
 op over BLE, nothing relayed to a host), stored in its flash so it survives
 power cycles — and the pickers then offer just what a receiver runs by itself:
-its headers and pins, and the `fallback` and `gpio:N` inputs. So the receiver
-is a fan controller on its own: every fan on it runs its fallback or its gpio
-curve, the boost still primes a pump at power-on, and the phone dials, adds,
+its headers and pins, and the `fallback`, `gpio:N` and `esp32_temp`
+inputs. So the receiver is a fan controller on its own: every fan on it runs
+its fallback or its own curve, the boost still primes a pump at power-on, and the phone dials, adds,
 moves and removes them. That is the bench case (a carrier board, a PSU and
 fans, no BC-250 booting) and the machine-off case too — dial the fans down at
 night without waking anything. What the receiver can't do alone is a *host*
-curve: it has no temperature to read, so a `temp` or load fan runs its
-fallback until a daemon connects. There is one source of truth, and it is the
+curve: it has none of the host's temperatures to read, so a `temp` or load fan
+runs its fallback until a daemon connects. There is one source of truth, and it is the
 config: a daemon connecting pushes the file's list over whatever the receiver
-held — every output, `fallback`, `boost`, input kind and gpio curve — so a
+held — every output, `fallback`, `boost`, input kind and receiver curve — so a
 fan dialled standalone lasts exactly until then, and the phone writes into the
 file whenever a daemon is there.
 

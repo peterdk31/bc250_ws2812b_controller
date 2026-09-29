@@ -27,7 +27,9 @@
 //  - this board's own curve, for a fan whose input is "gpio:N": the duty of a
 //    PWM signal on GPIO N (the BC-250's own fan header, wired over) is
 //    sampled here and run through the slot's curve — so it follows the
-//    board's BIOS fan curve with no daemon and the machine off.
+//    board's BIOS fan curve with no daemon and the machine off. Likewise for
+//    "esp32_temp": the chip's own temperature sensor, a rough reading of
+//    the case air around the receiver (the die runs a few degrees warmer).
 //  - the live duty: what the daemon's fan curves want right now
 //    (CMD_FAN_LIVE), for the fans whose input only the host can read.
 //    Volatile — never persisted — and it expires when the daemon stops
@@ -83,8 +85,9 @@ void setLive(const uint8_t* payload, uint16_t len);
 // output is a header of this board or a GPIO, and its input one this board
 // can run — FAN_KIND_FALLBACK (the fan just runs its fallback),
 // FAN_KIND_GPIO with the input pin and a curve of npts (input %, duty %)
-// pairs sorted by input, or FAN_KIND_HOST (the fallback until a daemon
-// drives it). Called on the NimBLE host task. False, with the reason in
+// pairs sorted by input, FAN_KIND_RECEIVER_TEMP with a curve of (°C, duty %)
+// pairs (refused on a chip with no temperature sensor), or FAN_KIND_HOST
+// (the fallback until a daemon drives it). Called on the NimBLE host task. False, with the reason in
 // *why, when a value is out of range, the curve is malformed, the output is
 // no pin this board can drive a PWM on, or the input none it can read one on
 // (another feature's, a flash or strap pin, the USB pair, another slot's
@@ -141,15 +144,22 @@ struct Snapshot
     uint8_t fallback[proto::FAN_CHANNELS]; // the resting duty in force (what
                                            // the phone's slider edits), NONE undriven
     uint8_t kind[proto::FAN_CHANNELS];   // FAN_KIND_* in force, NONE undriven
-    uint8_t in[proto::FAN_CHANNELS];     // a gpio slot's sampled input %,
-                                         // NONE when there is no reading
+    uint8_t in[proto::FAN_CHANNELS];     // an own-curve slot's input: a gpio
+                                         // slot's sampled %, an esp32_temp
+                                         // slot's whole °C; NONE = no reading
 };
 static const uint8_t SRC_NONE = 0;     // slot drives no pin
 static const uint8_t SRC_FALLBACK = 1;
 static const uint8_t SRC_LIVE = 2;
 static const uint8_t SRC_BOOST = 3;
-static const uint8_t SRC_CURVE = 4;    // this board's own gpio curve
+static const uint8_t SRC_CURVE = 4;    // this board's own curve (gpio, esp32_temp)
 void snapshot(Snapshot& s);
+
+// the chip's temperature, smoothed, in tenths of °C — whether or not a fan
+// follows it; TEMP_NONE on a chip without the sensor, with the fan feature
+// off, or before the first reading. Any task.
+static const int16_t TEMP_NONE = INT16_MIN;
+int16_t tempTenths();
 
 // the standalone settings in force, in CMD_FAN_STANDALONE's layout
 // (FAN_STANDALONE_LEN bytes) — what the phone reads to show and edit the

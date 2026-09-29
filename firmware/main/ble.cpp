@@ -52,7 +52,9 @@
 //                           and input — FAN_KIND_FALLBACK (the fan runs its
 //                           fallback), FAN_KIND_GPIO with the input pin and
 //                           the (input %, duty %) curve this board runs
-//                           itself, or FAN_KIND_HOST (the fallback until a
+//                           itself, FAN_KIND_RECEIVER_TEMP with a (°C,
+//                           duty %) curve over this chip's own temperature,
+//                           or FAN_KIND_HOST (the fallback until a
 //                           daemon drives it); a record with no output
 //                           removes the slot's fan. Applied and persisted by
 //                           the fan module without any daemon — what makes
@@ -374,9 +376,13 @@ static int hostState()
 //     fallback: the resting duty in force — the control op 0x10's record
 //               sets it, so the page's slider shows what is stored (0xFF: drives nothing)
 //     kind: the input kind in force (protocol.hpp FAN_KIND_*, 0xFF: drives nothing)
-//     in: a gpio slot's sampled input percent (0xFF = no reading)
+//     in: a gpio slot's sampled input percent, an esp32_temp slot's whole
+//         °C (0xFF = no reading)
 //   uptime(4): this board's seconds since reset
-static const uint16_t FANS_LEN = 4 + proto::FAN_CHANNELS * 5 + 4;
+//   temp(2, signed): this chip's temperature in tenths of °C (fan::tempTenths),
+//     -32768 = none (no sensor, fan feature off). A tail, not a new ver: a
+//     ver-3 page reads the bytes before it and ignores the rest
+static const uint16_t FANS_LEN = 4 + proto::FAN_CHANNELS * 5 + 4 + 2;
 
 static const uint8_t F_ACTIVE = 0x01, F_BOOST = 0x02, F_HOLD = 0x04, F_LIVE = 0x08,
                      F_HOST = 0x10, F_TELEM = 0x20;
@@ -412,6 +418,10 @@ static uint16_t buildFans(uint8_t* p)
     uint32_t up = (uint32_t)(esp_timer_get_time() / 1000000);
     for (int k = 0; k < 4; k++)
         p[at++] = (uint8_t)(up >> (8 * k));
+
+    uint16_t t = (uint16_t)fan::tempTenths();
+    p[at++] = (uint8_t)t;
+    p[at++] = (uint8_t)(t >> 8);
 
     return at;
 }

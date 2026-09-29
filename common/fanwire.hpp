@@ -24,8 +24,8 @@ struct Header
     uint8_t ramp = proto::FAN_DEFAULT_RAMP;
     uint8_t kind = proto::FAN_KIND_HOST;
     uint8_t gpio = NONE;     // a gpio fan's input pin
-    uint8_t npts = 0;        // a gpio fan's curve: points (0 = none)
-    uint8_t pts[POINTS][2] = {}; // (input %, duty %), sorted by input
+    uint8_t npts = 0;        // the receiver's own curve (ownCurve()): points (0 = none)
+    uint8_t pts[POINTS][2] = {}; // (input % or °C, duty %), sorted by input
     uint8_t outKind = NONE;  // FAN_OUT_HEADER / FAN_OUT_GPIO; anything else = no output
     uint8_t out = NONE;      // the header number (1-based) or the GPIO
 
@@ -34,6 +34,15 @@ struct Header
     {
         return outKind == proto::FAN_OUT_HEADER || outKind == proto::FAN_OUT_GPIO;
     }
+
+    // does the receiver run this fan's curve itself — a gpio input's PWM
+    // duty, or its own chip temperature? (Every other kind's curve, if any,
+    // is the daemon's.)
+    static bool ownCurve(uint8_t kind)
+    {
+        return kind == proto::FAN_KIND_GPIO || kind == proto::FAN_KIND_RECEIVER_TEMP;
+    }
+    bool ownCurve() const { return ownCurve(kind); }
 
     // the record of an unused slot: 0xFF throughout
     static Header unused()

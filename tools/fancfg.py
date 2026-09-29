@@ -8,8 +8,9 @@ list the daemon reads at runtime — so there is one place to describe the
 fans, and the receiver runs the standalone part of it without any daemon at
 all: every fan on a receiver output (a header of the board, or a raw GPIO)
 with its fallback duty, boost and boost length, its ramp, and for a fan whose
-input is "gpio:N" the curve itself — the receiver samples the PWM signal on
-that GPIO and follows the curve on its own. Curves on host inputs
+input is "gpio:N" or "esp32_temp" the curve itself — the receiver samples
+the PWM signal on that GPIO (or reads its own chip temperature) and follows
+the curve on its own. Curves on host inputs
 (temperatures, loads, hwmon pwm outputs), the hysteresis, and every fan on a
 HOST output (a hwmon pwmN the daemon drives) are daemon-only and are not
 encoded, beyond being validated here like the daemon validates them.
@@ -35,9 +36,9 @@ the fan spec's floating-PWM rule). out_kind is 1 (header: out = the header
 number) or 2 (gpio: out = the GPIO); fallback the resting duty percent; boost
 its boost percent, 0xFF = sits the boost out, boost_secs how long it runs;
 ramp the slow-down rate in whole percent per second; kind the input's kind
-(protocol.hpp FAN_KIND_*: 0 fallback, 1 gpio, 2 host); gpio the input pin of
-a gpio fan (0xFF otherwise); the points are (input percent, duty percent)
-pairs, npts of them, sorted. Every tuning is the fan's own; there is nothing
+(protocol.hpp FAN_KIND_*: 0 fallback, 1 gpio, 2 host, 3 esp32_temp); gpio
+the input pin of a gpio fan (0xFF otherwise); the points are (input percent
+or °C, duty percent) pairs, npts of them, sorted. Every tuning is the fan's own; there is nothing
 global. Older layouts are not read: `make flash` writes the firmware and this
 blob together.
 
@@ -66,7 +67,9 @@ MAX_FANS = 6  # LEDC channels on the smallest target (ESP32-C3) = the receiver's
 MAX_POINTS = 8  # common/fancurve.hpp MAX_POINTS = protocol.hpp FAN_CURVE_POINTS
 MAX_GPIO = 48  # daemon/fans.hpp MAX_GPIO
 NONE = 0xFF
-KIND_FALLBACK, KIND_GPIO, KIND_HOST = 0, 1, 2  # protocol.hpp FAN_KIND_*
+KIND_FALLBACK, KIND_GPIO, KIND_HOST, KIND_RECEIVER_TEMP = 0, 1, 2, 3  # protocol.hpp FAN_KIND_*
+OWN_CURVE = (KIND_GPIO, KIND_RECEIVER_TEMP)  # fanwire::Header::ownCurve: the receiver runs the curve
+NO_TEMP_SENSOR = ('esp32',)  # targets whose temperature sensor the IDF driver lacks
 OUT_HEADER, OUT_GPIO = 1, 2  # protocol.hpp FAN_OUT_*
 FAN_KEYS = ('name', 'output', 'input', 'curve', 'fallback', 'boost')
 RECORD_LEN = 9 + 2 * MAX_POINTS  # protocol.hpp FAN_HEADER_LEN
@@ -75,13 +78,13 @@ RECORD_LEN = 9 + 2 * MAX_POINTS  # protocol.hpp FAN_HEADER_LEN
 # default (protocol.hpp FAN_DEFAULT_*, fans.hpp DEFAULT_HYSTERESIS)
 TUNINGS = (
     ('hysteresis', 'a number of °C, 0 or more', 0, float('inf'),
-     lambda f: f['temp'], 'a temperature input', 3),
+     lambda f: f['temp'], 'a temperature this host reads (esp32_temp is smoothed on the receiver)', 3),
     ('ramp', 'percent per second, 0..255 (0 = at once)', 0, 255,
      lambda f: f['curve_kind'], 'an input with a curve', 5),
     ('boost_seconds', 'seconds, 0..255', 0, 255,
      lambda f: f['boost'] != NONE, 'a fan with a boost', 5),
 )
-INPUT_HELP = ('expected fallback, gpio:N, temp, cpu_load, gpu_load, a hwmon chip:label / '
+INPUT_HELP = ('expected fallback, gpio:N, esp32_temp, temp, cpu_load, gpu_load, a hwmon chip:label / '
               'chip:pwmN, pmbus:CPU VRM / pmbus:GPU VRM, smu:VRAM hotspot / smu:VRAM 0..7, '
               'file:/path, or (for a host output) "" for the board\'s own curve')
 OUTPUT_HELP = ('expected headerN (the receiver\'s header N), gpio:N (a receiver GPIO), '
@@ -186,6 +189,8 @@ def parse_input(src, out, where):
         return err(where, 'renamed: the board\'s own curve is a blank input now — write "input": ""')
     if src == 'fallback':
         return KIND_FALLBACK, None, False, False
+    if src == 'esp32_temp':
+        return KIND_RECEIVER_TEMP, None, False, False
     if src == 'temp':
         return KIND_HOST, None, True, False
     if src in ('cpu_load', 'gpu_load'):
@@ -224,6 +229,9 @@ def parse_curve(text, kind, where):
         if kind == KIND_GPIO and not (0 <= x <= 100 and x == int(x)):
             return err(where, f'"{t}": a gpio curve\'s input is whole percents 0..100 '
                               '(it travels to the receiver as bytes)')
+        if kind == KIND_RECEIVER_TEMP and not (0 <= x <= 100 and x == int(x)):
+            return err(where, f'"{t}": an esp32_temp curve\'s input is whole °C 0..100 '
+                              '(it travels to the receiver as bytes)')
         if any(px == x for px, _ in pts):
             return err(where, f'two points at {m.group(1)}')
         pts.append((x, y))
@@ -261,6 +269,13 @@ for i, v in enumerate(block):
         err(f'{where}.input', 'a gpio input is read by the receiver, which can\'t drive a host '
                               'output — put the fan on a receiver output (headerN / gpio:N), or '
                               'give it a host input')
+    if kind == KIND_RECEIVER_TEMP and out[0] == 'host':
+        err(f'{where}.input', 'esp32_temp is read by the receiver, which can\'t drive a host '
+                              'output — put the fan on a receiver output (headerN / gpio:N), or '
+                              'give it a host input')
+    elif kind == KIND_RECEIVER_TEMP and a.target in NO_TEMP_SENSOR:
+        err(f'{where}.input', f'esp32_temp reads the chip\'s temperature sensor, which {a.target} '
+                              'doesn\'t offer (the receiver would only ever run the fallback)')
     if kind == KIND_GPIO and out[0] == 'gpio' and gpio == out[1]:
         err(f'{where}.input', f'GPIO{gpio} can\'t be the fan\'s input and its output at once')
     curve_kind = kind != KIND_FALLBACK and not board
@@ -297,7 +312,7 @@ for i, v in enumerate(block):
         else:
             tunings[key] = tv
     if len(errors) == before:
-        f.update(pts=[(int(x), int(round(y))) for x, y in pts] if kind == KIND_GPIO else [],
+        f.update(pts=[(int(x), int(round(y))) for x, y in pts] if kind in OWN_CURVE else [],
                  boost_secs=int(round(tunings['boost_seconds'])),
                  ramp=int(round(tunings['ramp'])),
                  fallback=int(round(fb)), output=v['output'])

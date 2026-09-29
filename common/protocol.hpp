@@ -183,7 +183,10 @@ static const uint8_t FAN_NONE = 0xFF;
 // (FAN_KIND_*): a FALLBACK fan just runs its fallback; a GPIO fan is one
 // whose curve the RECEIVER evaluates, reading a PWM signal's duty on GPIO
 // `gpio` — the points are (input percent, duty percent) pairs, npts of them,
-// sorted by x — and it keeps doing so with no daemon at all; a HOST fan's
+// sorted by x — and it keeps doing so with no daemon at all; a RECEIVER_TEMP
+// fan is the same with the receiver chip's own temperature sensor as the
+// input (whole °C points; gpio unused — a rough case-air reading, the die
+// runs warmer than the air around it); a HOST fan's
 // curve is the daemon's (a temperature, a load, a hwmon pwm) and the
 // receiver runs the fallback until CMD_FAN_LIVE says otherwise. Every
 // tuning is the fan's own — there is nothing global. The receiver persists
@@ -194,6 +197,7 @@ static const uint8_t CMD_FAN_STANDALONE = 0x11;
 static const uint8_t FAN_KIND_FALLBACK = 0;
 static const uint8_t FAN_KIND_GPIO = 1;
 static const uint8_t FAN_KIND_HOST = 2;
+static const uint8_t FAN_KIND_RECEIVER_TEMP = 3; // firmware before it runs these as HOST
 static const uint8_t FAN_OUT_HEADER = 1;
 static const uint8_t FAN_OUT_GPIO = 2;
 static const uint8_t FAN_CURVE_POINTS = 8; // = fancurve::MAX_POINTS
@@ -206,7 +210,8 @@ static const uint8_t FAN_DEFAULT_BOOST_SECS = 5;
 
 // CMD_FAN_LIVE: the duties the daemon's curves want right now. Payload:
 // FAN_CHANNELS duty percents, by slot (FAN_NONE = not driven — a fallback or
-// gpio fan is always FAN_NONE here: the receiver runs those itself).
+// gpio or esp32_temp fan is always FAN_NONE here: the receiver runs
+// those itself).
 // Volatile: never persisted, and dropped back to the standalone fallback when
 // the host goes silent (the LED service's host timeout), so a crashed daemon
 // can't leave a fan pinned low under load. After a CMD_SHUTDOWN flagged

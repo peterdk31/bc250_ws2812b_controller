@@ -13,6 +13,9 @@
 #include "soc/gpio_reg.h"
 #include "soc/soc.h"
 #include "soc/soc_caps.h"
+#if SOC_TEMP_SENSOR_SUPPORTED
+#include "driver/temperature_sensor.h"
+#endif
 
 #include "cfgstore.hpp"
 #include "dbglog.hpp"
@@ -58,6 +61,15 @@ static const uint32_t HOST_GONE_MS = 3000;
 static const uint32_t IN_PERIOD_MS = 250;
 static const int64_t IN_WINDOW_US = 2000;
 
+// the chip's own temperature sensor (the esp32_temp input, see tempCheck):
+// read once a second and smoothed over TEMP_TAU_S, so the curve sees the case
+// air's drift, not the sensor's ±1 °C of read-to-read noise. The range is
+// the driver's most accurate one (< 1 °C error); a case warmer than 80 °C
+// has bigger problems than this reading
+static const uint32_t TEMP_PERIOD_MS = 1000;
+static const float TEMP_TAU_S = 8.0f;
+static const int TEMP_RANGE_MIN = -10, TEMP_RANGE_MAX = 80;
+
 // ---- the standalone settings (fancfg, NVS, CMD_FAN_STANDALONE) ----
 
 // One shape on every side: which output each slot drives, what it runs when
@@ -74,8 +86,9 @@ struct Standalone
     uint8_t ramp[MAX_FANS];      // slow-down rate, whole percent per second (0 = instant)
     uint8_t kind[MAX_FANS];      // proto::FAN_KIND_*
     uint8_t gpio[MAX_FANS];      // a gpio slot's input pin, else NONE
-    uint8_t npts[MAX_FANS];      // a gpio slot's curve: points (0 = none)
-    uint8_t pts[MAX_FANS][POINTS][2]; // (input %, duty %), sorted by input
+    uint8_t npts[MAX_FANS];      // an own-curve slot's curve (gpio, receiver
+                                 // temp): points (0 = none)
+    uint8_t pts[MAX_FANS][POINTS][2]; // (input % or °C, duty %), sorted by input
     uint8_t outKind[MAX_FANS];   // FAN_OUT_HEADER / FAN_OUT_GPIO, NONE = slot unused
     uint8_t out[MAX_FANS];       // the header number (1-based) or the GPIO
 
@@ -115,8 +128,8 @@ struct Standalone
     }
 
     // one slot's record in, clamped and checked: a duty past 100 is 100, a
-    // kind past HOST is HOST, and a bad curve leaves the slot on its fallback
-    // (a gpio slot with no curve runs that). A record that drives no output
+    // kind this firmware doesn't know is HOST, and a bad curve leaves the
+    // slot on its fallback (an own-curve slot with no curve runs that). A record that drives no output
     // is an unused slot: every field back to its 0xFF, full duty as the rest
     // (a slot with no pin drives nothing, so it is never applied)
     void set(int i, const fanwire::Header& h)
@@ -140,11 +153,11 @@ struct Standalone
         boost[i] = h.boost == NONE ? NONE : pct(h.boost);
         boostSecs[i] = h.boostSecs;
         ramp[i] = h.ramp;
-        kind[i] = h.kind > proto::FAN_KIND_HOST ? proto::FAN_KIND_HOST : h.kind;
+        kind[i] = h.kind > proto::FAN_KIND_RECEIVER_TEMP ? proto::FAN_KIND_HOST : h.kind;
         gpio[i] = kind[i] == proto::FAN_KIND_GPIO ? h.gpio : NONE;
         npts[i] = 0;
         memset(pts[i], 0, sizeof pts[i]);
-        if (kind[i] == proto::FAN_KIND_GPIO && h.curveOk())
+        if (fanwire::Header::ownCurve(kind[i]) && h.curveOk())
         {
             npts[i] = h.npts;
             memcpy(pts[i], h.pts, 2 * h.npts);
@@ -258,6 +271,20 @@ static bool g_curveHave[MAX_FANS];
 static uint32_t g_lastSample = 0;
 static uint8_t g_applied[MAX_FANS]; // the duty last written to each channel
 
+// the chip's temperature sensor (the esp32_temp input): up once start()
+// brought it up — never on a chip without one (the plain ESP32's is not in
+// the driver). g_temp is the smoothed reading in °C, valid once g_tempOk;
+// g_tempTenths is the same for other tasks (tempTenths()) as one aligned
+// 16-bit word, TEMP_NONE without a reading
+#if SOC_TEMP_SENSOR_SUPPORTED
+static temperature_sensor_handle_t g_tsens = nullptr;
+static uint32_t g_lastTemp = 0;
+#endif
+static bool g_tsensUp = false;
+static float g_temp = 0;
+static bool g_tempOk = false;
+static volatile int16_t g_tempTenths = TEMP_NONE;
+
 // host pushes in flight from the led_rx task to this one — each whole blob
 // moves under one short critical section, the hostreq pattern
 static portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -354,6 +381,12 @@ static uint64_t inMask()
     uint64_t m = g_inMask;
     taskEXIT_CRITICAL(&g_pinMux);
     return m;
+}
+
+// does slot i follow the chip's temperature right now?
+static bool readsTemp(int i)
+{
+    return g_outPin[i] >= 0 && g_sa.kind[i] == proto::FAN_KIND_RECEIVER_TEMP;
 }
 
 // is g one of the board's header pins? (a fan connector's PWM wire, whether
@@ -584,6 +617,9 @@ static void setupInputs()
     {
         int8_t was = g_inPin[i];
         g_inPin[i] = -1;
+        if (readsTemp(i) && !g_tsensUp)
+            FLOG("slot %d: input esp32_temp, but this chip has no temperature sensor "
+                 "— running the fallback", i);
         if (g_outPin[i] < 0 || g_sa.kind[i] != proto::FAN_KIND_GPIO)
             continue;
 
@@ -622,12 +658,12 @@ static void setupInputs()
     g_inMask = mask;
     taskEXIT_CRITICAL(&g_pinMux);
 
-    // a slot that stopped reading a pin stops running its curve now. With no
-    // input pin left anywhere inputCheck() never reaches runCurves(), so a
+    // a slot that stopped reading an input stops running its curve now. With
+    // no input left anywhere inputCheck() never reaches runCurves(), so a
     // stale g_curve would outrank the fallback for good — the slot keeps its
     // last curve duty and the fallback slider does nothing
     for (int i = 0; i < MAX_FANS; i++)
-        if (g_inPin[i] < 0)
+        if (g_inPin[i] < 0 && !readsTemp(i))
         {
             g_curve[i] = NONE;
             g_curveHave[i] = false;
@@ -682,14 +718,28 @@ static void sampleInputs()
         g_in[i] = g_inPin[i] < 0 ? NONE : (uint8_t)((hi[i] * 100 + total / 2) / total);
 }
 
-// the board's own curves: each gpio slot's reading through its curve, then
-// the ramp, into g_curve. A slot with no reading or no curve is NONE and
-// falls through to the live duty or the fallback.
+// the board's own curves: each own-curve slot's reading (a gpio input's
+// duty, or the chip's temperature) through its curve, then the ramp, into
+// g_curve. A slot with no reading or no curve is NONE and falls through to
+// the live duty or the fallback.
 static void runCurves(float dt)
 {
     for (int i = 0; i < MAX_FANS; i++)
     {
-        if (g_outPin[i] < 0 || g_inPin[i] < 0 || g_in[i] == NONE || g_sa.npts[i] == 0)
+        float x = 0;
+        bool have = false;
+        if (readsTemp(i))
+        {
+            have = g_tempOk;
+            x = g_temp;
+        }
+        else if (g_inPin[i] >= 0 && g_in[i] != NONE)
+        {
+            have = true;
+            x = (float)g_in[i];
+        }
+
+        if (g_outPin[i] < 0 || !have || g_sa.npts[i] == 0)
         {
             g_curve[i] = NONE;
             g_curveHave[i] = false;
@@ -700,7 +750,7 @@ static void runCurves(float dt)
         for (int j = 0; j < g_sa.npts[i]; j++)
             pts[j] = {(float)g_sa.pts[i][j][0], (float)g_sa.pts[i][j][1]};
 
-        float target = fancurve::eval(pts, g_sa.npts[i], (float)g_in[i]);
+        float target = fancurve::eval(pts, g_sa.npts[i], x);
         g_curveF[i] = fancurve::ramp(target, g_curveF[i], g_curveHave[i], (float)g_sa.ramp[i], dt);
         g_curveHave[i] = true;
         g_curve[i] = (uint8_t)(g_curveF[i] + 0.5f);
@@ -798,7 +848,8 @@ static void drainPending(uint32_t now)
                 snprintf(b2, sizeof b2, "%u%%", (unsigned)g_sa.boost[i]);
             FLOG("phone set slot %d: output %s%u, fallback %u%%, input %s%u (%u points), ramp %u%%/s, boost %s for %us",
                  i, g_sa.outKind[i] == proto::FAN_OUT_HEADER ? "header" : "gpio:", g_sa.out[i], g_sa.duty[i],
-                 g_sa.kind[i] == proto::FAN_KIND_GPIO ? "gpio:" : g_sa.kind[i] == proto::FAN_KIND_FALLBACK ? "fallback " : "host ",
+                 g_sa.kind[i] == proto::FAN_KIND_GPIO ? "gpio:" : g_sa.kind[i] == proto::FAN_KIND_FALLBACK ? "fallback "
+                 : g_sa.kind[i] == proto::FAN_KIND_RECEIVER_TEMP ? "esp32_temp " : "host ",
                  g_sa.kind[i] == proto::FAN_KIND_GPIO ? g_sa.gpio[i] : 0u, g_sa.npts[i], g_sa.ramp[i],
                  g_sa.boost[i] == NONE ? "-" : b2, g_sa.boostSecs[i]);
         }
@@ -960,18 +1011,54 @@ static void boostCheck(uint32_t now)
         applyAll();
 }
 
-// the gpio inputs' turn: a reading every IN_PERIOD_MS, the curves and the
-// ramp every tick (the ramp eases at percent per second, and 100 ms steps
-// keep a slow-down smooth)
+// the chip's temperature, every TEMP_PERIOD_MS whether or not a fan follows
+// it (the phone's input picker shows it). An exponential average over
+// TEMP_TAU_S; the first reading is taken as is. The die sits a few degrees
+// above the air around it (more with the radio busy) — a curve written
+// against this reading absorbs that, which is why the sensor's offset is not
+// guessed at here
+static void tempCheck(uint32_t now)
+{
+#if SOC_TEMP_SENSOR_SUPPORTED
+    if (!g_tsensUp || (g_lastTemp && now - g_lastTemp < TEMP_PERIOD_MS))
+        return;
+    float dt = g_lastTemp ? (now - g_lastTemp) / 1000.0f : 0;
+    g_lastTemp = now ? now : 1;
+
+    float c;
+    if (temperature_sensor_get_celsius(g_tsens, &c) != ESP_OK)
+    {
+        if (g_tempOk)
+            FLOG("temperature sensor stopped reading — esp32_temp fans run their fallback");
+        g_tempOk = false;
+        g_tempTenths = TEMP_NONE;
+        return;
+    }
+    g_temp = g_tempOk ? g_temp + (c - g_temp) * (dt / (TEMP_TAU_S + dt)) : c;
+    g_tempOk = true;
+    g_tempTenths = (int16_t)(g_temp * 10.0f + (g_temp < 0 ? -0.5f : 0.5f));
+#else
+    (void)now;
+#endif
+}
+
+// the own-curve inputs' turn: the temperature once a second, the gpio pins
+// every IN_PERIOD_MS, the curves and the ramp every tick (the ramp eases at
+// percent per second, and 100 ms steps keep a slow-down smooth)
 static void inputCheck(uint32_t now)
 {
-    bool any = false;
+    tempCheck(now);
+
+    bool pins = false, temp = false;
     for (int i = 0; i < MAX_FANS; i++)
-        any |= g_inPin[i] >= 0;
-    if (!any)
+    {
+        pins |= g_inPin[i] >= 0;
+        temp |= readsTemp(i);
+    }
+    if (!pins && !temp)
         return;
 
-    if (!g_lastSample || now - g_lastSample >= IN_PERIOD_MS)
+    if (pins && (!g_lastSample || now - g_lastSample >= IN_PERIOD_MS))
     {
         g_lastSample = now ? now : 1;
         sampleInputs();
@@ -1045,10 +1132,12 @@ bool setHeader(uint8_t slot, const uint8_t* rec, uint16_t len, const char** why)
         r = "a fallback past 100 %";
     else if (h.boost != NONE && h.boost > 100)
         r = "a boost past 100 %";
-    else if (h.kind > proto::FAN_KIND_HOST)
+    else if (h.kind > proto::FAN_KIND_RECEIVER_TEMP)
         r = "not an input kind";
-    else if (h.kind == proto::FAN_KIND_GPIO && !h.curveOk())
+    else if (h.ownCurve() && !h.curveOk())
         r = "a malformed curve";
+    else if (h.kind == proto::FAN_KIND_RECEIVER_TEMP && !g_tsensUp)
+        r = "this chip has no temperature sensor";
     else
     {
         // the output, against the other slots as they stand (this one's own
@@ -1079,11 +1168,15 @@ bool setHeader(uint8_t slot, const uint8_t* rec, uint16_t len, const char** why)
 
     if (!h.used())
         h = fanwire::Header::unused();
-    else if (h.kind != proto::FAN_KIND_GPIO)
+    else
     {
-        h.gpio = NONE;
-        h.npts = 0;
-        memset(h.pts, 0, sizeof h.pts);
+        if (h.kind != proto::FAN_KIND_GPIO)
+            h.gpio = NONE;
+        if (!h.ownCurve())
+        {
+            h.npts = 0;
+            memset(h.pts, 0, sizeof h.pts);
+        }
     }
 
     taskENTER_CRITICAL(&g_mux);
@@ -1159,7 +1252,10 @@ void snapshot(Snapshot& s)
         s.duty[i] = effective(i);
         s.fallback[i] = g_sa.duty[i];
         s.kind[i] = g_sa.kind[i];
-        s.in[i] = g_inPin[i] < 0 ? NONE : g_in[i];
+        if (readsTemp(i))
+            s.in[i] = !g_tempOk ? NONE : g_temp <= 0 ? 0 : g_temp >= 254 ? 254 : (uint8_t)(g_temp + 0.5f);
+        else
+            s.in[i] = g_inPin[i] < 0 ? NONE : g_in[i];
         if (g_boostOn[i])
         {
             s.source[i] = SRC_BOOST;
@@ -1176,6 +1272,8 @@ void snapshot(Snapshot& s)
             s.source[i] = SRC_FALLBACK;
     }
 }
+
+int16_t tempTenths() { return g_tempTenths; }
 
 uint16_t standalone(uint8_t* out, uint16_t max, uint32_t* seq)
 {
@@ -1285,8 +1383,29 @@ void start()
         return;
     }
 
-    // the outputs and the gpio inputs. The strip isn't up yet at this point
-    // of boot, so its pin is the one it saved (stripPin)
+    // the chip's temperature sensor, before the inputs (setupInputs says a
+    // esp32_temp fan it can't serve). The driver shares the SAR block
+    // with the ADC (the power switch's sense) and the radio's own
+    // calibration, and arbitrates that itself
+#if SOC_TEMP_SENSOR_SUPPORTED
+    temperature_sensor_config_t tcfg = {};
+    tcfg.range_min = TEMP_RANGE_MIN;
+    tcfg.range_max = TEMP_RANGE_MAX;
+    tcfg.clk_src = TEMPERATURE_SENSOR_CLK_SRC_DEFAULT;
+    if (temperature_sensor_install(&tcfg, &g_tsens) != ESP_OK)
+        FLOG("temperature sensor init FAILED — esp32_temp fans run their fallback");
+    else if (temperature_sensor_enable(g_tsens) != ESP_OK)
+    {
+        FLOG("temperature sensor enable FAILED — esp32_temp fans run their fallback");
+        temperature_sensor_uninstall(g_tsens);
+        g_tsens = nullptr;
+    }
+    else
+        g_tsensUp = true;
+#endif
+
+    // the outputs and the inputs. The strip isn't up yet at this point of
+    // boot, so its pin is the one it saved (stripPin)
     setupOutputs();
     setupInputs();
 
