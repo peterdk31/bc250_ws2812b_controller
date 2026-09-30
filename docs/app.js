@@ -15,7 +15,6 @@ const hasBt = () => B.HAS_BT || S.demo; // the demo stands in for a receiver
 
 // ---- helpers ----
 const fmt1 = v => (Math.round(v * 10) / 10).toString();
-const fmtIn = (h, v) => B.isTempX(h) ? `${fmt1(v)} °C` : `${fmt1(v)} %`;
 const fmtUptime = s => s < 3600 ? `${Math.floor(s / 60)} min` :
   s < 86400 ? `${Math.floor(s / 3600)} h ${Math.floor(s % 3600 / 60)} min` :
   `${Math.floor(s / 86400)} d ${Math.floor(s % 86400 / 3600)} h`;
@@ -284,40 +283,36 @@ function PowerSheet() {
 }
 
 // ---- Fans ----
-// what a row says under its name: the input, the output, then what the fan
-// runs on right now — the input's reading when the input is in force,
-// otherwise the thing that runs it instead (the chip names the same state).
-// "no reading" is only for an input that is in force and has none. A parked
-// fan shows its input's reading too, so an input can be tried before it
-// drives anything — only a gpio input has none (the receiver samples a pin
-// for a fan it runs).
+// a card is two tiles, input → output: the input's name under its reading,
+// the output's name under the duty it runs. A parked fan is the input tile
+// alone, so an input can be tried before it drives anything — only a gpio
+// input has no reading then (the receiver samples a pin for a fan it runs).
+// While something else runs the fan instead of its input the chip names it
+// and the input tile dims; a line under the tiles adds what the chip can't.
 const INPUT_NAMES = { fallback: 'Fixed speed', host: 'Host curve', temp: 'CPU temperature', cpu_load: 'CPU load',
                       gpu_load: 'GPU load', board: 'Board curve', esp32_temp: 'Receiver temperature' };
-const inputName = c => c.kind === 'gpio' ? `PWM input on GPIO${c.gpio}` : c.kind === 'hwmon' ? c.spec
+const inputName = c => c.kind === 'gpio' ? `PWM on GPIO${c.gpio}` : c.kind === 'hwmon' ? c.spec
   : c.kind === 'pwm' ? `Board fan header ${c.spec}` : INPUT_NAMES[c.kind] ?? c.src;
 const HOST_STATES = { gone: 'not found on this machine', ro: 'read-only driver — the board runs it', busy: 'not driven by this host',
                       board: 'the board runs it' };
-function describe(c) {
-  const out = c.out.kind === 'parked' ? 'No output' : B.outLabel(c.out);
-  const what = `${inputName(c)} · ${out}`;
-  if (c.out.kind === 'parked') {
-    if (c.kind === 'fallback' || c.kind === 'gpio') return what;
-    const now = B.inputOf(c);
-    return now === null ? what : `${what} · ${fmtIn(c, now)}`;
-  }
+// what runs a fan instead of its input when the chip alone can't say it
+// (hold, boost and fallback say it all), or null
+function stateOf(c) {
+  if (c.out.kind === 'parked') return null;
   const f = B.liveOf(c), t = B.telemOf(c);
-  if (B.isReceiverOut(c.out) && f && !f.wired) return `${what} · not driven by the receiver`;
-  if (c.out.kind === 'host' && t && t.st && t.st !== 'host' && !(t.st === 'board' && c.kind === 'board')) return `${what} · ${HOST_STATES[t.st] || t.st}`;
-  if (c.kind === 'fallback') return what;
-  const chip = chipOf(c);
-  if (chip) {
-    const state = { hold: 'held at the last speed', boost: 'power-on boost', fallback: 'fallback speed' };
-    return `${what} · ${state[chip[0]]}`;
-  }
-  if (c.kind === 'board') return what;
-  const now = B.inputOf(c);
-  return `${what} · ${now === null ? 'no reading' : fmtIn(c, now)}`;
+  if (B.isReceiverOut(c.out) && f && !f.wired) return 'not driven by the receiver';
+  if (c.out.kind === 'host' && t && t.st && t.st !== 'host' && !(t.st === 'board' && c.kind === 'board')) return HOST_STATES[t.st] || t.st;
+  return null;
 }
+// the input tile's big value, [number, unit]: a fixed speed is its duty, the
+// board's curve has no reading of its own, anything else reads what the curve sees
+function inputValue(c) {
+  if (c.kind === 'fallback') return [c.fallback, '%'];
+  if (c.kind === 'board') return ['auto', ''];
+  const now = c.kind === 'gpio' && c.out.kind === 'parked' ? null : B.inputOf(c);
+  return now === null ? ['—', ''] : [fmt1(now), B.isTempX(c) ? '°C' : '%'];
+}
+const Val = ({ v: [n, unit] }) => html`<span class="v">${n}${unit && html`<small>${unit}</small>`}</span>`;
 
 // the exception chip: only when the fan is not doing what it is set up for
 function chipOf(c) {
@@ -348,13 +343,27 @@ function FanRow({ c, open, toggle }) {
   const chip = chipOf(c);
   const editable = c.route === 'daemon' ? !!(S.cfg && S.cfg.editable) : true;
   const hasCurve = c.pts.length > 0 && !B.isFixed(c);
+  const parked = c.out.kind === 'parked';
+  const state = stateOf(c);
   return html`<div class="card fan ${open && hasCurve ? 'open' : ''}">
     <div class="head" onClick=${hasCurve ? toggle : null}>
       <div class="nm"><span class="name">${c.name || B.outLabel(c.out)}</span>${chip && html`<span class="chip ${chip[0]}">${chip[1]}</span>`}</div>
-      <span class="duty">${duty === null ? '—' : duty}<small>%</small></span>
       ${editable ? html`<button class="cog" aria-label="Settings" onClick=${e => { e.stopPropagation(); go({ editor: c.key }); }}><${Icon} d=${I.cog} sw=${1.8} /></button>` : html`<span class="cog"></span>`}
-      <div class="what">${describe(c)}</div>
-      <div class="bar ${chip ? chip[0] : ''}"><i style=${`width: ${duty === null ? 0 : duty}%`}></i></div>
+      <div class="flow ${parked ? 'solo' : ''}">
+        <div class="tile ${state || chip ? 'idle' : ''}">
+          <span class="k">Input</span>
+          <${Val} v=${inputValue(c)} />
+          <span class="s">${inputName(c)}</span>
+        </div>
+        ${!parked && html`<span class="to"><${Icon} d=${I.right} size=${18} /></span>
+        <div class="tile">
+          <span class="k">Output</span>
+          <${Val} v=${duty === null ? ['—', ''] : [duty, '%']} />
+          <span class="s">${B.outLabel(c.out)}</span>
+          <div class="bar ${chip ? chip[0] : ''}"><i style=${`width: ${duty === null ? 0 : duty}%`}></i></div>
+        </div>`}
+      </div>
+      ${state && html`<div class="what">${state}</div>`}
     </div>
     ${open && hasCurve && html`<${Curve} h=${c} now=${B.inputOf(c)} />`}
   </div>`;
