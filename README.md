@@ -1334,14 +1334,15 @@ just run `systemctl poweroff`, which is all it guards. `name` is the
 advertised device name (public by definition).
 
 Several machines: the page keeps every receiver the Bluetooth chooser has
-ever granted and lists them in the header's dropdown and on the Receiver
-tab — pick one to
-switch (the page holds one connection at a time, and reconnects to the last
-pick on its own), "Add a receiver…" opens the chooser for a new board. Tokens
+ever granted and lists them on the Receiver tab (tap the receiver's name in
+the header to get there), each marked on / booting / off / nearby / out of
+range from its advertisements while the tab is open — pick one to switch (the
+page holds one connection at a time, and reconnects to the last pick on its
+own), "add a receiver" opens the chooser for a new board. Tokens
 are remembered per receiver: a new board first tries the token you entered
 first; if that board was flashed with a different one, its first command is
 rejected and the page asks for that board's token. Give each board its own
-`name` so the dropdown reads as more than `BC250`, `BC250 (2)`.
+`name` so the list reads as more than `BC250`, `BC250 (2)`.
 
 What the remote can *do* to the machine is deliberately narrow — the same
 gestures as the physical button, and nothing else (the fan dashboard below
@@ -1363,7 +1364,7 @@ edits the daemon's curves, never the power):
 The page is four tabs, each fitting a phone screen; the tabs, the editors
 and the shutdown sheet are history entries, so the phone's back gesture
 steps out of them the way a native app does. A sticky header on every tab
-names the receiver (a dropdown when the phone knows several), shows the PSU
+names the receiver (a tap opens the Receiver tab), shows the PSU
 state, and — while the daemon reports — the host's readings: CPU
 temperature (the top-level `sensors` pick), CPU load and GPU load.
 
@@ -1476,6 +1477,14 @@ for exactly this coexistence: the earlier RMT path refilled its buffer from an
 interrupt, and the BLE controller's interrupts delayed that refill enough to
 tear bits — random LEDs flickering while a phone was connected. The RMT path
 is still there should a board ever need it: `make flash-source STRIP_USE_RMT=1`.
+
+The advertisement also carries the host's state (manufacturer data under the
+unregistered id 0xFFFF: a version byte, then 0 off / 1 booting / 2 on), so the
+page's Receiver tab can show which boards are nearby and which are on without
+connecting to each. Chrome only hands a page that data for a receiver granted
+with it asked for: a receiver added before this page version shows as nearby
+only until it is added again (Receiver tab → add a receiver, pick the same
+board).
 
 Guardrails, mirroring the fans': the chip must run a firmware whose partition
 table has the `blecfg` entry — `make flash-ble` against an older layout is a

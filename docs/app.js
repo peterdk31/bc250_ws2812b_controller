@@ -8,7 +8,7 @@
 // Nothing here talks to the receiver directly: the actions are ble.js's.
 // Anything that must survive a redraw (a slider under the finger, an editor's
 // working copy) is component state; everything else is a function of `S`.
-import { html, render, useState, useEffect, useRef, useMemo } from './vendor/preact-htm.mjs';
+import { html, render, useState, useEffect, useRef } from './vendor/preact-htm.mjs';
 import * as B from './ble.js';
 const { S } = B;
 const hasBt = () => B.HAS_BT || S.demo; // the demo stands in for a receiver
@@ -28,15 +28,6 @@ function useStore() {
   // (boot() fires right after the first render) is picked up
   useEffect(() => { const off = B.subscribe(() => tick(n => n + 1)); tick(n => n + 1); return off; }, []);
 }
-
-// a <select> built once per distinct `key` (a string naming its options and
-// value): the page redraws on every telemetry frame, and Preact's diff blanks
-// and rewrites each option's value on every pass (its guard against text
-// children clobbering the value) — Android Chrome dismisses an open dropdown
-// the moment an option changes under it, so a select under the finger closed
-// a second after it opened. Handing the diff the same vnode back skips the
-// subtree wholesale; the vnode is rebuilt only when the key changes.
-const useSteadySelect = (key, make) => useMemo(make, [key]);
 
 // ---- icons: stroke SVGs on a 24 px grid, colored by currentColor ----
 const Icon = ({ d, size = 20, sw = 2 }) => html`<svg class="ic" width=${size} height=${size} viewBox="0 0 24 24" fill="none"
@@ -139,17 +130,13 @@ function Header({ back: backLabel, title }) {
   const cur = B.currentId();
   const live = S.fans && S.fans.telem && S.telem;
   const sel = ids.includes(cur) ? cur : '';
-  const pickReceiver = useSteadySelect(JSON.stringify([ids, ids.map(id => labels[id]), sel, !!S.busy]), () => html`
-            <select aria-label="Receiver" value=${sel} disabled=${S.busy}
-              onChange=${e => { const v = e.target.value; e.target.value = sel; if (v === '+') B.connect(); else if (v) B.select(v); }}>
-              ${!sel && html`<option value="" disabled>Receiver…</option>`}
-              ${ids.map(id => html`<option key=${id} value=${id}>${labels[id]}</option>`)}
-              <option value="+">Add a receiver…</option>
-            </select>`);
+  // the receiver's name: a tap goes to the Receiver tab, where the boards are listed
+  const toReceivers = () => { if (route.tab !== 'receiver') go({ tab: 'receiver', editor: null, sheet: false }); };
   return html`<header>
     <div class="top">
       ${backLabel ? html`<button class="back" onClick=${back}><${Icon} d=${I.left} /><span>${backLabel}</span></button>`
-        : B.anyKnown() && hasBt() ? html`<div class="pill">${pickReceiver}<${Icon} d=${I.down} size=${16} /></div>`
+        : B.anyKnown() && hasBt() ? html`<button class="pill" aria-label="Receivers" onClick=${toReceivers}>
+            <span class="nm">${sel ? labels[sel] : 'Receiver…'}</span><${Icon} d=${I.down} size=${16} /></button>`
         : html`<h1>BC-250</h1>`}
       ${title && html`<span class="ttl">${title}</span>`}
       <div class="st"><i style=${`background: ${color}; box-shadow: 0 0 10px ${color}`}></i><span>${state}</span></div>
@@ -223,13 +210,9 @@ function PowerEditor() {
   const dirty = () => JSON.stringify(t) !== JSON.stringify(orig);
   useEffect(() => { leaveGuard = () => !dirty() || confirm('Leave without saving?'); return () => { leaveGuard = null; }; });
   const set = patch => setT(x => ({ ...x, ...patch }));
-  // the wake pin's picker, built once per distinct option list (see useSteadySelect)
   const wakeRoute = B.wakeRoute(), wakeRo = wakeRoute === 'readonly';
   const wake = t ? t.wake : null;
   const wakeOpts = B.wakePinOptions(wake);
-  const wakeSelect = useSteadySelect(wakeOpts ? `${wakeOpts.join()}=${wake}${wakeRo ? '!' : ''}` : '', () => wakeOpts && html`
-          <select value=${wake === null ? '' : wake} disabled=${wakeRo} onChange=${e => set({ wake: e.target.value === '' ? null : +e.target.value })}>
-            <option value="">None</option>${wakeOpts.map(g => html`<option key=${g} value=${g}>GPIO${g}</option>`)}</select>`);
   const p = S.pwr;
   if (!B.connected() || !p || !t) return html`<${Header} back="Power" title="Power switch" /><div class="empty">${B.connected() ? 'No power switch on this receiver.' : 'Not connected.'}</div>`;
   const route = B.powerRoute();
@@ -266,10 +249,10 @@ function PowerEditor() {
         : html`<div class="note">What a short press does is the host's setting — available when on.</div>`}
       </div>
       <div class="card">
-        <h2>Wake input${route !== 'receiver' && wakeRoute === 'receiver' && html`<span class="r">receiver only</span>`}</h2>
         ${wakeOpts
-          ? html`<label class="frow"><span>Pin</span>${wakeSelect}</label>`
-          : html`<label class="frow"><span>Pin</span><${NumField} min=${0} max=${63} step=${1} placeholder="none" disabled=${wakeRo} value=${wake}
+          ? html`<${Fold} title="Wake input" rows=${pinRows(wakeOpts, wake, 'None')} pick=${wake === null ? 'None' : `GPIO${wake}`} disabled=${wakeRo}
+              onPick=${r => set({ wake: r.pin })} />`
+          : html`<h2>Wake input</h2><label class="frow"><span>Pin</span><${NumField} min=${0} max=${63} step=${1} placeholder="none" disabled=${wakeRo} value=${wake}
               blank=${true} round=${true} onValue=${v => set({ wake: v === null ? null : clamp(v, 0, 63) })} /><small>a free receiver pin, blank = none</small></label>`}
         <div class="note">A 3.3 V pulse on this pin powers the host on and can do nothing else — an OpenPuck's ColdBoot output, for one (GPIO20 on the carrier's J11, with the puck's ground beside it). ${wakeOpts ? 'The list is the receiver\u2019s free pins.' : 'This receiver doesn\u2019t list its free pins; it refuses one it can\u2019t use.'}${route !== 'receiver' && wakeRoute === 'receiver' ? ' The host\u2019s daemon predates this setting, so the pin is kept on the receiver alone.' : ''}</div>
       </div>
@@ -553,19 +536,28 @@ function outputRows(h, fkey) {
 // a card's fold-open picker: the heading with the pick and its reading while
 // shut, a row per choice (label, hint, live reading) while open; picking a
 // row shuts it. Rows are keyed, so a refresh updates them in place
-function Fold({ title, pick, value, rows, onPick }) {
+function Fold({ title, pick, value, rows, onPick, disabled = false }) {
   const [open, setOpen] = useState(false);
-  return html`<button class="fold" onClick=${() => setOpen(o => !o)}>
+  const shown = open && !disabled;
+  return html`<button class="fold" disabled=${disabled} onClick=${() => setOpen(o => !o)}>
       <h2>${title}</h2>
-      ${!open && html`<span class="pick">${pick}</span>${value && html`<span class="rd on">${value}</span>`}`}
-      <${Icon} d=${open ? I.up : I.down} size=${18} />
+      ${!shown && html`<span class="pick">${pick}</span>${value && html`<span class="rd on">${value}</span>`}`}
+      <${Icon} d=${shown ? I.up : I.down} size=${18} />
     </button>
-    ${open && html`<div class="srcs">${rows.map(r => html`<button key=${r.id} class="src ${r.on ? 'on' : ''}" disabled=${r.disabled}
+    ${shown && html`<div class="srcs">${rows.map(r => html`<button key=${r.id} class="src ${r.on ? 'on' : ''}" disabled=${r.disabled}
         onClick=${() => { onPick(r); setOpen(false); }}>
         <span class="mark">${r.on ? html`<${Icon} d=${I.check} size=${18} />` : html`<i></i>`}</span>
         <span class="lbl"><span>${r.label}</span>${r.hint && html`<small>${r.hint}</small>`}</span>
         <span class="rd">${r.value}</span></button>`)}</div>`}`;
 }
+
+// a Fold's rows for a receiver pin: `opts` as listed, the current pick marked,
+// and one the receiver doesn't list as free (kept so the pick stays visible) says so
+const pinRows = (opts, cur, none) => [
+  ...(none ? [{ id: '', label: none, hint: '', value: '', disabled: false, on: cur === null, pin: null }] : []),
+  ...opts.map(g => ({ id: String(g), label: `GPIO${g}`, hint: S.info && S.info.pins && !S.info.pins.includes(g) ? 'not free on the receiver' : '',
+                      value: '', disabled: false, on: g === cur, pin: g })),
+];
 
 function FanEditor({ fkey }) {
   // the card as it was when the editor opened (or when it first showed up,
@@ -583,8 +575,6 @@ function FanEditor({ fkey }) {
   // the receiver's free input pins (plus the configured one, should it not be free), or null for a typed pin
   const pins = S.info && S.info.pins;
   const pinOpts = h && pins && (pins.includes(h.gpio) ? pins : [...pins, h.gpio].sort((a, b) => a - b));
-  const pinSelect = useSteadySelect(pinOpts ? `${pinOpts.join()}=${h.gpio}` : '', () => pinOpts && html`
-          <select value=${h.gpio} onChange=${e => set({ gpio: +e.target.value })}>${pinOpts.map(g => html`<option key=${g} value=${g}>GPIO${g}</option>`)}</select>`);
   if (!h) return html`<${Header} back="Fans" /><div class="empty">${fkey === 'new' ? 'No free output for another fan.' : 'This fan is gone.'}</div>`;
   const daemon = h.route === 'daemon';
   const hostOut = h.out.kind === 'host';
@@ -638,7 +628,7 @@ function FanEditor({ fkey }) {
                           else if (r.other) n.spec = inCatalogue(x.spec) || isFileSpec(x.spec) ? '' : (x.spec || '');       // keep a spec being typed
                           return n; }); setOther(!!r.other || !!r.file); }} />
         ${h.kind === 'gpio' && (pinOpts
-          ? html`<label class="frow"><span>Pin</span>${pinSelect}</label>`
+          ? html`<${Fold} title="Pin" rows=${pinRows(pinOpts, h.gpio)} pick=${`GPIO${h.gpio}`} onPick=${r => set({ gpio: r.pin })} />`
           : html`<label class="frow"><span>Pin</span><${NumField} value=${h.gpio} min=${0} max=${48} step=${1} round=${true} onValue=${v => { if (v !== null) set({ gpio: clamp(v, 0, 48) }); }} /><small>a free receiver pin</small></label>`)}
         ${typedFile ? html`<label class="frow"><span>file:</span>
           <input class="text" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder=${FILE_ROW.placeholder}
@@ -745,11 +735,16 @@ function LedsScreen() {
 }
 
 // ---- Receiver ----
+// a list row's state: [class, word], or null where the page can't tell
+const presenceState = p => p.near === null ? null : !p.near ? ['away', 'Out of range']
+  : p.psu === 2 ? ['on', 'On'] : p.psu === 1 ? ['booting', 'Booting'] : p.psu === 0 ? ['off', 'Off'] : ['near', 'Nearby'];
 function ReceiverScreen() {
   const { ids, labels } = B.labels();
   const cur = B.currentId();
   const on = B.connected();
   const d = S.device;
+  // watch the known boards' advertisements while the list is on screen
+  useEffect(() => { B.watchNearby(true); return () => B.watchNearby(false); }, []);
   const rows = [];
   if (S.info) {
     rows.push(['Firmware', S.info.version || '?']);
@@ -762,10 +757,13 @@ function ReceiverScreen() {
   }
   return html`<div class="list">
     ${hasBt() && html`<${Card} title="Receivers">
-      ${ids.map(id => html`<button key=${id} class="recv ${id === cur ? 'on' : ''}" disabled=${S.busy} onClick=${() => B.select(id)}>
+      ${ids.map(id => { const p = B.presenceOf(id), st = presenceState(p);
+        return html`<button key=${id} class="recv ${id === cur ? 'on' : ''} ${p.near === false ? 'away' : ''}" disabled=${S.busy} onClick=${() => B.select(id)}>
         <span class="mark">${id === cur ? html`<${Icon} d=${I.check} size=${18} />` : ''}</span>
-        <span class="lbl"><span>${labels[id]}</span><small>${id === cur ? (on ? (S.psu === 2 ? 'connected · on' : S.psu === 1 ? 'connected · booting' : 'connected · off') : 'not connected') : ''}</small></span>
-      </button>`)}
+        <span class="lbl"><span>${labels[id]}</span><small>${id !== cur ? '' : on ? 'connected' : S.attempt || S.busy ? 'connecting…' : 'not connected'}</small></span>
+        ${st && html`<span class="state ${st[0]}"><i></i>${st[1]}</span>`}
+      </button>`; })}
+      ${ids.some(id => id !== cur && B.presenceOf(id).near && B.presenceOf(id).psu === null) && html`<div class="note">A receiver nearby with no on/off runs older firmware, or was added before this page asked for its state — add it again (and pick the same board) to see it.</div>`}
       <button class="rowlink add" disabled=${S.busy} onClick=${B.connect}><${Icon} d=${I.plus} size=${16} /><span>add a receiver</span></button>
     <//>`}
     ${d && html`<${Card} title=${B.label(d.id)}>

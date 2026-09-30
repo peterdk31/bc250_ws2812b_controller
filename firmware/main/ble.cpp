@@ -178,6 +178,14 @@ static const uint32_t POLL_MS = 250; // policy task cadence
 static const uint16_t ADV_ITVL_OFF = 0x01E0; // 480 × 0.625 ms = 300 ms
 static const uint16_t ADV_ITVL_ON = 0x0800;  // 2048 × 0.625 ms = 1.28 s
 
+// The advertisement also says what the host is doing, so the page's receiver
+// list can show which boards are on without connecting to each: manufacturer
+// data under 0xFFFF (the SIG's id for unregistered use) = ver(1) = 1,
+// state(1) = hostState(). Flags (3) + the service UUID (18) + this (6) = 27
+// of the 31-byte PDU.
+static const uint16_t ADV_MFG_ID = 0xFFFF;
+static const uint8_t ADV_MFG_VER = 1;
+
 static const uint16_t TOKEN_LEN = 16;
 static const uint16_t NAME_LEN = 16;
 
@@ -343,6 +351,7 @@ static int g_lastState = -2;   // last hostState() seen (-2 = never)
 static uint16_t g_advItvl = 0; // interval the running advertisement was
                                // started with (0 = none), to restart it when
                                // the PSU state calls for the other pace
+static int g_advState = -2;    // hostState() the running advertisement carries
 static uint32_t g_lastPoll = 0;    // last 1 Hz notify of the fans and pwr values
 static uint32_t g_lastWatch = 0;   // last MSG_FAN_WATCH 1 sent
 static bool g_watching = false;    // the daemon has been told a phone watches
@@ -796,15 +805,19 @@ static int gapEvent(ble_gap_event* ev, void*)
     return 0;
 }
 
-static void startAdv(uint16_t itvl)
+static void startAdv(uint16_t itvl, int st)
 {
-    // service UUID in the advertisement (Web Bluetooth filters on it), name
-    // in the scan response — together they'd overflow the 31-byte adv PDU
+    // service UUID and host state in the advertisement (Web Bluetooth
+    // filters on the UUID), name in the scan response — together they'd
+    // overflow the 31-byte adv PDU
     ble_hs_adv_fields f = {};
     f.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     f.uuids128 = const_cast<ble_uuid128_t*>(&SVC_UUID);
     f.num_uuids128 = 1;
     f.uuids128_is_complete = 1;
+    const uint8_t mfg[4] = {(uint8_t)(ADV_MFG_ID & 0xFF), (uint8_t)(ADV_MFG_ID >> 8), ADV_MFG_VER, (uint8_t)st};
+    f.mfg_data = mfg;
+    f.mfg_data_len = sizeof mfg;
 
     ble_hs_adv_fields rsp = {};
     rsp.name = (const uint8_t*)g_cfg.name;
@@ -824,7 +837,10 @@ static void startAdv(uint16_t itvl)
         rc = ble_gap_adv_start(g_ownAddrType, nullptr, BLE_HS_FOREVER, &p,
                                gapEvent, nullptr);
     if (rc == 0)
+    {
         g_advItvl = itvl;
+        g_advState = st;
+    }
     else
         BLOG("adv start failed rc=%d", rc);
 }
@@ -926,13 +942,14 @@ static void loop()
     bool connected = g_conn != BLE_HS_CONN_HANDLE_NONE;
     uint16_t itvl = st == 0 ? ADV_ITVL_OFF : ADV_ITVL_ON;
 
-    // a pace change restarts the advertisement (stop is synchronous, so the
-    // branch below starts it again at the new interval within this poll)
-    if (ble_gap_adv_active() && g_advItvl != itvl)
+    // a pace or state change restarts the advertisement (stop is synchronous,
+    // so the branch below starts it again with the new interval and state
+    // within this poll)
+    if (ble_gap_adv_active() && (g_advItvl != itvl || g_advState != st))
         ble_gap_adv_stop();
 
     if (g_synced && !connected && !ble_gap_adv_active())
-        startAdv(itvl);
+        startAdv(itvl, st);
     else if (connected && ble_gap_adv_active())
         ble_gap_adv_stop();
 }

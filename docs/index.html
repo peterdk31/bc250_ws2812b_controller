@@ -68,9 +68,7 @@
   header .ttl { font-size: .95rem; font-weight: 600; }
   header .pill { position: relative; display: flex; align-items: center; gap: .25rem; padding: .35rem .6rem .35rem .75rem;
                  background: var(--panel); border: 1px solid var(--border); border-radius: 999px; color: var(--muted); min-height: 2.4rem; }
-  header .pill select { appearance: none; -webkit-appearance: none; background: none; border: 0; color: var(--text);
-                        font: inherit; font-size: .95rem; font-weight: 600; padding: 0; max-width: 11rem; text-overflow: ellipsis; }
-  header .pill select:disabled { opacity: .45; }
+  header .pill .nm { color: var(--text); font-size: .95rem; font-weight: 600; max-width: 11rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   header .back { display: flex; align-items: center; gap: .3rem; color: var(--muted); font-size: .95rem; min-height: 2.4rem; padding-right: .5rem; }
   header .st { display: flex; align-items: center; gap: .45rem; font-size: .82rem; color: var(--muted); }
   header .st i { display: block; width: 9px; height: 9px; border-radius: 50%; }
@@ -221,6 +219,7 @@
   /* ---- the fan editor ---- */
   .fold { display: flex; align-items: center; gap: .6rem; width: 100%; min-height: 2rem; color: var(--muted); text-align: left; }
   .fold h2 { flex: 1 1 auto; }
+  .fold:disabled .ic { opacity: .3; }
   .fold .pick { font-weight: 600; font-size: .95rem; color: var(--text); }
   .fold .rd { font-size: .95rem; font-variant-numeric: tabular-nums; }
   .fold .rd.on { color: var(--on); }
@@ -261,6 +260,14 @@
           background: var(--bg); border-radius: .6rem; }
   .recv:disabled { opacity: .6; }
   .recv .lbl > span { font-weight: 600; }
+  .recv.away .lbl, .recv.away .state { opacity: .55; }
+  .recv .state { display: flex; align-items: center; gap: .4rem; flex: none; font-size: .82rem; color: var(--muted); }
+  .recv .state i { display: block; width: 9px; height: 9px; border-radius: 50%; }
+  .recv .state.on i { background: var(--on); box-shadow: 0 0 8px var(--on); }
+  .recv .state.on { color: var(--text); }
+  .recv .state.booting i { background: var(--booting); box-shadow: 0 0 8px var(--booting); }
+  .recv .state.off i { background: var(--off); }
+  .recv .state.near i { border: 1.5px solid var(--muted); }
   .facts { display: grid; grid-template-columns: auto 1fr; gap: .25rem .9rem; font-size: .88rem; }
   .facts .k { color: var(--muted); }
 

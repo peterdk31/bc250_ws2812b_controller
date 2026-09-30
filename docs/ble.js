@@ -160,6 +160,7 @@ function remember(d) {
   if (d.name) r.name = d.name;
   known.set(d.id, d);
   saveReceivers();
+  syncPresence();
 }
 
 export function say(text, hint = false, html = false) { S.msg = { text, hint, html }; emit(); }
@@ -233,6 +234,7 @@ function attach(d) {
   watchAbort?.abort(); // a pick/switch supersedes any pending auto-attempt
   if (S.device && S.device !== d && S.device.gatt.connected) S.device.gatt.disconnect();
   S.device = d;
+  syncPresence(); // the reconnect's watch takes over this board's advertisements
   S.ctrl = S.stat = null;
   S.psu = -1;
   S.editToken = false;
@@ -352,7 +354,9 @@ export async function resume() {
 
 // the chooser: grants (and thereby adds) a receiver, then connects to it
 async function pick() {
-  const d = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] });
+  // the manufacturer data is the advertised host state (see presence below):
+  // Chrome only passes it to a page whose grant asked for it
+  const d = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }], optionalManufacturerData: [ADV_MFG_ID] });
   remember(d);
   if (S.device && S.device.id === d.id && S.device.gatt.connected) {
     store.set('ble-current', d.id);
@@ -378,6 +382,7 @@ export async function connect() {
 // (through the advertisement dance); anything else needs the chooser
 export async function select(id) {
   if (S.busy) return; // never yank a board mid-write
+  if (S.demo) { if (id !== S.device.id) say('The demo’s other receivers are for show.', true); return; }
   if (id && known.has(id)) {
     store.set('ble-current', id);
     if (S.device?.id === id) { reconnect(); return; }
@@ -388,6 +393,66 @@ export async function select(id) {
   }
   await connect();
 }
+
+// ---- presence: which known receivers are nearby, and what their host is doing ----
+// While the Receiver tab is up, the page watches every receiver Chrome handed
+// it this session for advertisements. Each one carries the host state
+// (firmware ble.cpp: manufacturer data under 0xFFFF = ver(1) = 1, state(1)),
+// absent on older firmware or on a grant from before this page asked for it.
+// A board counts as nearby for NEARBY_MS after its last advertisement — the
+// receiver advertises every 1.3 s at its slowest, and Android batches scan
+// results. The selected board is left to the reconnect's own watch (two
+// watches on one device cancel each other in Chrome); its advertisements
+// land in the same handler. A connected board doesn't advertise: the link
+// is the proof, and S.psu its state.
+const ADV_MFG_ID = 0xFFFF;
+const NEARBY_MS = 10000;
+const presence = new Map(); // id -> { at, psu: 0..2 | null }
+const presenceWatch = new Map(); // id -> AbortController
+let scanning = false, presenceTick = 0;
+
+const onAdvertisement = e => {
+  const m = e.manufacturerData && e.manufacturerData.get(ADV_MFG_ID);
+  const psu = m && m.byteLength >= 2 && m.getUint8(0) === 1 && m.getUint8(1) <= 2 ? m.getUint8(1) : null;
+  const was = presence.get(e.device.id);
+  presence.set(e.device.id, { at: Date.now(), psu });
+  if (!was || Date.now() - was.at > NEARBY_MS || was.psu !== psu) emit();
+};
+
+function syncPresence() {
+  for (const [id, d] of known) {
+    d.addEventListener('advertisementreceived', onAdvertisement); // deduped: the same ref
+    const want = scanning && d !== S.device && !IOS && !!d.watchAdvertisements;
+    const ac = presenceWatch.get(id);
+    if (want && !ac) {
+      const c = new AbortController();
+      presenceWatch.set(id, c);
+      d.watchAdvertisements({ signal: c.signal }).catch(() => { if (presenceWatch.get(id) === c) presenceWatch.delete(id); });
+    } else if (!want && ac) { presenceWatch.delete(id); ac.abort(); }
+  }
+}
+
+// the Receiver tab's on/off switch for the watch: scanning costs the phone's
+// battery, so it runs only while the list is on screen
+export function watchNearby(on) {
+  scanning = on;
+  clearInterval(presenceTick);
+  if (on) presenceTick = setInterval(emit, 2000); // "nearby" ages out without an event
+  syncPresence();
+}
+
+// what the list says about a receiver: { near: true|false|null, psu: 0..2|null }.
+// near is null where the page can't tell (no watch API, the demo, or a board
+// Chrome hasn't handed over this session)
+export function presenceOf(id) {
+  if (S.device?.id === id && connected()) return { near: true, psu: S.psu >= 0 ? S.psu : null };
+  if (S.demo) return DEMO_PRESENCE[id] || { near: null, psu: null };
+  const d = known.get(id);
+  if (IOS || !d || !d.watchAdvertisements) return { near: null, psu: null };
+  const p = presence.get(id);
+  return p && Date.now() - p.at < NEARBY_MS ? { near: true, psu: p.psu } : { near: false, psu: null };
+}
+const DEMO_PRESENCE = {};
 
 async function writeOp(op, ...args) {
   const buf = new Uint8Array(TOKEN_LEN + 1 + args.length);
@@ -1471,6 +1536,11 @@ export function demo() {
   S.device = { id: 'demo', gatt: { connected: true, disconnect() {} }, addEventListener() {} };
   receivers.demo = { name: 'BC250 (demo)', token: 'demo-token' };
   known.set('demo', S.device);
+  // two more boards for the Receiver tab: one in range with its host off, one out of range
+  receivers['demo-desk'] = { name: 'Desk ESP32', token: '' };
+  receivers['demo-media'] = { name: 'Media PC', token: '' };
+  DEMO_PRESENCE['demo-desk'] = { near: true, psu: 0 };
+  DEMO_PRESENCE['demo-media'] = { near: false, psu: null };
   S.fansChr = S.telemChr = S.saChr = S.pwrChr = {};
   S.stat = {};
   S.pcfgChr = { writeValueWithResponse: async buf => {
