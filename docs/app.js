@@ -284,10 +284,13 @@ function PowerSheet() {
 }
 
 // ---- Fans ----
-// what a row says under its name: the output, the input, then what the fan
+// what a row says under its name: the input, the output, then what the fan
 // runs on right now — the input's reading when the input is in force,
 // otherwise the thing that runs it instead (the chip names the same state).
-// "no reading" is only for an input that is in force and has none.
+// "no reading" is only for an input that is in force and has none. A parked
+// fan shows its input's reading too, so an input can be tried before it
+// drives anything — only a gpio input has none (the receiver samples a pin
+// for a fan it runs).
 const INPUT_NAMES = { fallback: 'Fixed speed', host: 'Host curve', temp: 'CPU temperature', cpu_load: 'CPU load',
                       gpu_load: 'GPU load', board: 'Board curve', esp32_temp: 'Receiver temperature' };
 const inputName = c => c.kind === 'gpio' ? `PWM input on GPIO${c.gpio}` : c.kind === 'hwmon' ? c.spec
@@ -296,8 +299,12 @@ const HOST_STATES = { gone: 'not found on this machine', ro: 'read-only driver �
                       board: 'the board runs it' };
 function describe(c) {
   const out = c.out.kind === 'parked' ? 'No output' : B.outLabel(c.out);
-  const what = `${out} · ${inputName(c)}`;
-  if (c.out.kind === 'parked') return what;
+  const what = `${inputName(c)} · ${out}`;
+  if (c.out.kind === 'parked') {
+    if (c.kind === 'fallback' || c.kind === 'gpio') return what;
+    const now = B.inputOf(c);
+    return now === null ? what : `${what} · ${fmtIn(c, now)}`;
+  }
   const f = B.liveOf(c), t = B.telemOf(c);
   if (B.isReceiverOut(c.out) && f && !f.wired) return `${what} · not driven by the receiver`;
   if (c.out.kind === 'host' && t && t.st && t.st !== 'host' && !(t.st === 'board' && c.kind === 'board')) return `${what} · ${HOST_STATES[t.st] || t.st}`;
@@ -453,8 +460,9 @@ function withKind(h, kind) {
   return n;
 }
 // the output changed: an input the new output can't have becomes a fixed
-// speed (a PWM input on a host output, the board's own curve anywhere but its
-// own output), and a host output drops the boost (the receiver's alone)
+// speed (the board's own curve anywhere but its own output; a receiver-run
+// input on a host output, which the picker doesn't offer), and a host output
+// drops the boost (the receiver's alone)
 function withOutput(h, output) {
   let n = { ...h, output, out: B.outInfo(output) };
   if (h.kind === 'board' && n.out.kind !== 'host') n = withKind(n, 'fallback');
@@ -509,9 +517,11 @@ function pickerRows(h, kinds) {
 
 // the output picker's rows: the board's headers, the receiver's free pins,
 // and (with a daemon) the host's pwm outputs it can drive, plus none — each
-// output another fan has is listed but can't be picked. The fan's own output
-// is always there, whatever the lists say. A host output's live duty and rpm
-// sit in the reading column, so a refresh changes a row's text, never the rows
+// output another fan has is listed but can't be picked, and so is a host
+// output for an input the receiver runs (the input is picked first, and
+// picking the output mustn't undo it). The fan's own output is always there,
+// whatever the lists say. A host output's live duty and rpm sit in the
+// reading column, so a refresh changes a row's text, never the rows
 function outputRows(h, fkey) {
   const daemon = h.route === 'daemon';
   const taken = new Map(B.cards().filter(c => c.key !== fkey && c.output).map(c => [c.output, c.name || B.outLabel(c.out)]));
@@ -519,7 +529,9 @@ function outputRows(h, fkey) {
   const add = (v, label, hint, value = '') => {
     if (rows.some(r => r.id === v)) return;
     const by = taken.get(v);
-    rows.push({ id: v, label, hint: by ? `used by ${by}` : hint, value, disabled: by !== undefined, on: v === h.output });
+    const ownOnHost = B.ownCurve(h) && B.outInfo(v).kind === 'host' && v !== h.output;
+    rows.push({ id: v, label, hint: by ? `used by ${by}` : ownOnHost ? 'the receiver runs this input — it can’t drive a host header' : hint,
+                value, disabled: by !== undefined || ownOnHost, on: v === h.output });
   };
   if (daemon) add('', 'None — parked', 'keeps its settings, drives nothing');
   for (const n of B.headerList()) add(`header${n}`, `Header ${n}`, 'a fan header on the receiver');
@@ -612,16 +624,7 @@ function FanEditor({ fkey }) {
     <div class="list">
       ${daemon && html`<div class="card"><input class="text" type="text" maxlength=${B.NAME_CHARS} autocomplete="off" aria-label="Name" placeholder="name" value=${h.name} onInput=${e => set({ name: e.target.value })} /></div>`}
       <div class="card">
-        <${Fold} title="Output" rows=${outRows} pick=${outPick ? outPick.label : B.outLabel(h.out)} value=${outPick ? outPick.value : ''}
-          onPick=${r => setH(x => withOutput(x, r.id))} />
-        ${h.out.kind === 'gpio' && !(S.info && S.info.outPins) && html`<label class="frow"><span>Pin</span>
-          <${NumField} value=${h.out.num} min=${0} max=${48} step=${1} round=${true} onValue=${v => { if (v !== null) setH(x => withOutput(x, `gpio:${clamp(v, 0, 48)}`)); }} /><small>a free receiver pin</small></label>`}
-        <div class="note">${hostOut ? 'A fan header on the host itself, driven by its daemon. It goes back to the board’s own curve whenever the daemon stops.'
-          : h.out.kind === 'parked' ? 'Nothing: the fan keeps its settings and drives no output.'
-          : 'A header on the receiver, or one of its pins.'}</div>
-      </div>
-      <div class="card">
-        <${Fold} title="Follows" rows=${pickerRows(h, kinds)} pick=${curLabel} value=${fmtReading(h.kind, readingFor(h))}
+        <${Fold} title="Input" rows=${pickerRows(h, kinds)} pick=${curLabel} value=${fmtReading(h.kind, readingFor(h))}
           onPick=${r => { setH(x => { const n = withKind(x, r.kind);
                           if (r.spec) n.spec = r.spec;                                                                       // a listed sensor
                           else if (r.file) n.spec = isFileSpec(x.spec) && !inCatalogue(x.spec) ? x.spec : B.FILE_PREFIX;     // keep a path being typed, start an empty one otherwise
@@ -637,7 +640,16 @@ function FanEditor({ fkey }) {
         : typed && html`<label class="frow"><span>${h.kind === 'pwm' ? 'Header' : 'Sensor'}</span>
           <input class="text" type="text" autocomplete="off" placeholder=${cur.hint} value=${h.spec || ''} onInput=${e => set({ spec: e.target.value.trim() })} /></label>`}
         ${h.kind === 'board' && html`<div class="note">The board runs this output with its own curve, as it would with no daemon at all. Pick an input to have the host run it instead.</div>`}
-        ${h.kind === 'esp32_temp' && html`<div class="note">The receiver chip’s own sensor: a rough reading of the air around the receiver, a few degrees warmer than it. The receiver runs this curve itself, with or without the host.</div>`}
+        ${h.kind === 'esp32_temp' && html`<div class="note">A sensor inside the receiver’s chip. It reads a few degrees above the air in the case, since the chip warms itself a little.</div>`}
+      </div>
+      <div class="card">
+        <${Fold} title="Output" rows=${outRows} pick=${outPick ? outPick.label : B.outLabel(h.out)} value=${outPick ? outPick.value : ''}
+          onPick=${r => setH(x => withOutput(x, r.id))} />
+        ${h.out.kind === 'gpio' && !(S.info && S.info.outPins) && html`<label class="frow"><span>Pin</span>
+          <${NumField} value=${h.out.num} min=${0} max=${48} step=${1} round=${true} onValue=${v => { if (v !== null) setH(x => withOutput(x, `gpio:${clamp(v, 0, 48)}`)); }} /><small>a free receiver pin</small></label>`}
+        <div class="note">${hostOut ? 'A fan header on the host itself, driven by its daemon. It goes back to the board’s own curve whenever the daemon stops.'
+          : h.out.kind === 'parked' ? 'Nothing: the fan keeps its settings and drives no output.'
+          : 'A header on the receiver, or one of its pins.'}</div>
       </div>
       ${h.kind === 'host' && html`<div class="card"><div class="note">This fan follows a curve the host runs; with the host off it sits at its fallback speed. Pick Fixed speed, PWM input or Receiver temperature for something the receiver runs on its own.</div></div>`}
       ${!B.isFixed(h) && h.kind !== 'host' && html`<div class="card">

@@ -419,7 +419,7 @@ public:
             claims_->begin();
         for (auto& f : fans_)
         {
-            int d = compute(f, dt);
+            int d = compute(f, dt, watch);
             f.rt.duty = d;
             if (f.slot >= 0)
                 p[f.slot] = (uint8_t)d;
@@ -1127,7 +1127,7 @@ private:
         for (auto& f : fans_)
         {
             if (f.out == Fan::Parked)
-                continue;
+                continue; // a parked fan's input is read only for a watcher, who wants both anyway
             wantCpu |= f.kind == Fan::CpuLoad;
             wantGpu |= f.kind == Fan::GpuLoad;
         }
@@ -1250,13 +1250,17 @@ private:
     // fallback; a fan this side doesn't run is FAN_NONE — parked, the
     // receiver's own (a fallback, gpio or esp32_temp fan on a receiver
     // output), or the
-    // board's (its reading is kept for the dashboard).
-    int compute(Fan& f, float dt)
+    // board's (its reading is kept for the dashboard, as a parked fan's is
+    // while a phone watches: an input can be tried before it drives anything).
+    int compute(Fan& f, float dt, bool watch)
     {
         const size_t idx = &f - fans_.data();
         if (f.out == Fan::Parked)
         {
-            f.rt.lastInOk = false;
+            float in;
+            f.rt.lastInOk = watch && readInput(f, in, idx);
+            if (f.rt.lastInOk)
+                f.rt.lastIn = in;
             return proto::FAN_NONE;
         }
 
@@ -1478,7 +1482,8 @@ private:
     //          "fans": [ null, { "in": 58.3, "duty": 52 }, { "duty": 60, "st": "host" }, ... ] }
     // — indexed like the config's list. A reading is absent when there is
     // none; a fan the receiver runs (a fallback or gpio fan on a receiver
-    // output: its own view carries those) and a parked fan are null. "st" is
+    // output: its own view carries those) is null, a parked fan has only its
+    // "in". "st" is
     // a host output's state: host (this daemon drives it), board (its own
     // curve), gone (not found), ro (read-only driver), busy (not driven here)
     std::string telemetryJson() const
@@ -1499,7 +1504,7 @@ private:
             if (i)
                 list += ",";
             bool receiverRun = f.receiverOut() && !f.hostInput();
-            if (f.out == Fan::Parked || receiverRun)
+            if (receiverRun)
             {
                 list += "null";
                 continue;
@@ -1508,7 +1513,8 @@ private:
             auto field = [&](const char* s) { if (e.size() > 1) e += ','; e += s; };
             if (f.rt.lastInOk)
                 snprintf(buf, sizeof buf, "\"in\":%.1f", f.rt.lastIn), field(buf);
-            int duty = f.kind == Fan::Board ? (f.rt.lastInOk ? (int)(f.rt.lastIn + 0.5f) : -1)
+            int duty = f.out == Fan::Parked ? -1
+                     : f.kind == Fan::Board ? (f.rt.lastInOk ? (int)(f.rt.lastIn + 0.5f) : -1)
                      : f.out == Fan::Host && f.rt.host != Fan::Runtime::HDrive ? -1
                      : f.rt.duty == proto::FAN_NONE ? -1 : f.rt.duty;
             if (duty >= 0)

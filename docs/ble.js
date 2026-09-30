@@ -529,7 +529,7 @@ export async function forget() {
 export const SRC_KINDS = {
   fallback: { label: 'Fixed speed', hint: 'runs at the fallback speed, always' },
   gpio:     { label: 'PWM input', hint: 'a fan wire on a receiver pin' },
-  esp32_temp: { label: 'Receiver temperature', hint: 'the receiver chip’s own sensor — the air around it, a few °C warm' },
+  esp32_temp: { label: 'Receiver temperature', hint: 'the temperature of the receiver’s own chip' },
   temp:     { label: 'CPU temperature' },
   hwmon:    { label: 'Sensor', hint: 'chip:label, e.g. amdgpu:edge, pmbus:GPU VRM or smu:VRAM hotspot' },
   pwm:      { label: 'Board fan header', hint: 'chip:pwmN, e.g. nct6686:pwm1' },
@@ -1484,7 +1484,8 @@ export function demo() {
       { p: '/tmp/led-night', e: 'drift', on: false } ] }));
   const demoTelem = () => S.telem = parseTelem(JSON.stringify({ temp: 58.3, cpu: 37, gpu: 62,
     fans: demoFans.map(f => f.o === 'header2' ? { in: 58.3, duty: 52 } : f.o === 'header4' ? { in: 62, duty: 45 }
-                        : f.o === 'nct6686:pwm2' ? (f.i === '' ? { in: 48, duty: 48, st: 'board' } : { in: 58.3, duty: 57, st: 'host' }) : null) }));
+                        : f.o === 'nct6686:pwm2' ? (f.i === '' ? { in: 48, duty: 48, st: 'board' } : { in: 58.3, duty: 57, st: 'host' })
+                        : !f.o ? (f.i === 'fallback' || /^gpio:/.test(f.i) ? {} : { in: f.i === 'cpu_load' ? 37 : f.i === 'gpu_load' ? 62 : 58.3 }) : null) }));
   demoTelem();
   S.sens = parseSensors(JSON.stringify({ amdgpu: { edge: 61.0, junction: 64.5, mem: 58.0 },
     k10temp: { Tctl: 58.3 }, nct6686: { CPU: 52.0, System: 38.5, 'VRM MOS': 41.0, 'pwm1-8': 48 },
