@@ -159,13 +159,14 @@ inline int sourceOf(const std::string& label)
 // same window from another process, taking flock(LOCK_EX) on this config file
 // around its accesses. We take the same lock — but around a whole mailbox
 // command (Guard, held by message()), not each register. That makes each SMU
-// command atomic against the governor's window use, and because the lock is
-// acquired once per command rather than a dozen times, it minimises the one
-// race that stays: the governor locks per single dword, so its own
-// address→data pair can still be split by any other window user between its
-// two writes. In steady state that barely matters anyway — the governor sets
-// GPU clocks on queue 0 while we only read on queue 3, so the queues never
-// collide and only the window is shared.
+// command atomic against the governor's window use. The governor locks per
+// single dword, so our command can land between its address write and its
+// data access; the Guard therefore saves the selected address on taking the
+// lock and restores it before releasing, so the governor's next access still
+// hits its own register instead of our last mailbox register (as
+// BC250-Telemetry v0.3.1 does). Selecting an address has no side effect, so
+// the restore is harmless when nobody was mid-pair. The queues themselves
+// never collide — the governor sets GPU clocks on queue 0, we read on queue 3.
 class Bus
 {
 public:
@@ -185,17 +186,24 @@ public:
     ~Bus() { close(); }
 
     // flock(LOCK_EX) for the span of one mailbox command, released at scope
-    // exit; EINTR-safe. An uncontended flock is a cheap kernel call.
+    // exit; EINTR-safe. An uncontended flock is a cheap kernel call. The
+    // window address selected when the lock was taken is put back before it
+    // is released (see above).
     struct Guard
     {
         int fd;
+        uint32_t selected = 0;
+        bool saved = false;
         explicit Guard(int f) : fd(f)
         {
             while (flock(fd, LOCK_EX) != 0 && errno == EINTR)
                 ;
+            saved = pread(fd, &selected, 4, PCI_REG) == 4;
         }
         ~Guard()
         {
+            if (saved)
+                (void)!pwrite(fd, &selected, 4, PCI_REG);
             while (flock(fd, LOCK_UN) != 0 && errno == EINTR)
                 ;
         }
