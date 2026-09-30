@@ -11,7 +11,7 @@
 import { html, render, useState, useEffect, useRef } from './vendor/preact-htm.mjs';
 import * as B from './ble.js';
 const { S } = B;
-const hasBt = () => B.HAS_BT || S.demo; // the demo stands in for a receiver
+const hasBt = () => B.HAS_BT;
 
 // ---- helpers ----
 const fmt1 = v => (Math.round(v * 10) / 10).toString();
@@ -826,8 +826,8 @@ function App() {
 }
 
 // the root entry: back from here leaves the app. ?tab=fans (&edit=<card key>,
-// e.g. f1 or new; &sheet; ?tab=power&edit=p) opens elsewhere — for the demo,
-// and for a bookmark straight to a tab
+// e.g. f1 or new; &sheet; ?tab=power&edit=p) opens elsewhere — for a bookmark
+// straight to a tab
 const q = new URLSearchParams(location.search);
 const ed = q.get('edit');
 go({ tab: TABS.includes(q.get('tab')) ? q.get('tab') : 'power', editor: null, sheet: false }, true);

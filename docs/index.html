@@ -3,7 +3,8 @@
 
      A Web Bluetooth client in three files, no build step:
        ble.js  — the link: GATT queue, auto-reconnect, the parsers, the
-                 writes, the demo data; a store (`S`) the UI renders from.
+                 writes; a store (`S`) the UI renders from. Its transport
+                 is a provider: the browser's Web Bluetooth by default.
                  The protocol is documented at the top of that file.
        app.js  — the screens, as Preact components written with htm
                  (vendor/preact-htm.mjs: Preact 10 + htm 3, one ES module,
@@ -27,9 +28,9 @@
      Web Bluetooth needs Chrome or Edge — on Android or desktop — and HTTPS
      (GitHub Pages qualifies); on iOS, the Bluefy or WebBLE browser apps.
      Installed from Chrome's "Add to Home screen", the service worker (sw.js)
-     makes it work fully offline. ?demo shows the dashboard on sample data
-     without a receiver (?demo&nodaemon: the same board with the host
-     off). -->
+     makes it work fully offline. ?demo runs the same page against
+     demo-ble.js, a provider that simulates receivers and their hosts over
+     the real protocol — nothing else in the page knows. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -290,6 +291,11 @@
 </head>
 <body>
 <div id="app"></div>
-<script type="module" src="app.js"></script>
+<script type="module">
+  // the composition root: pick the provider, then start the page on it
+  import { useProvider } from './ble.js';
+  if (new URLSearchParams(location.search).has('demo')) useProvider((await import('./demo-ble.js')).provider());
+  await import('./app.js');
+</script>
 </body>
 </html>

@@ -87,7 +87,21 @@ export const BLUEFY_STORE = 'https://apps.apple.com/app/bluefy-web-ble-browser/i
 // Bluefy registers a URL scheme that opens a page inside it (its vendor's
 // documented way to hand a page over from Safari)
 export const bluefyLink = () => 'bluefy://open?url=' + encodeURIComponent(location.href.split('#')[0]);
-export const HAS_BT = 'bluetooth' in navigator;
+
+// ---- the provider: the link and the stored settings come from here ----
+// The page's transport is a strategy: anything shaped like Web Bluetooth
+// (getDevices, requestDevice, and the devices, GATT servers and
+// characteristics they hand out) plus anything shaped like localStorage.
+// The browser's own by default; useProvider() swaps in another before boot()
+// — demo-ble.js's simulated receiver, or any other source speaking the
+// protocol above. Nothing below knows which one it is talking to.
+let bt = navigator.bluetooth || null, storage = null; // null: localStorage, looked up late (it can throw)
+export let HAS_BT = !!bt;
+export function useProvider(p) {
+  bt = p.bluetooth || null; storage = p.storage || null;
+  HAS_BT = !!bt;
+  loadReceivers();
+}
 
 // ---- the store ----
 export const S = {
@@ -107,7 +121,6 @@ export const S = {
   outs: null,      // the host's pwm outputs: [{ spec, duty, rpm, writable }] (parseSensors)
   saving: null,    // 'p' or a fan card's key: a write waiting for its answer
   note: null,      // the one status line: { text, cls } — a save's progress, or a refusal
-  demo: false,
 };
 const subs = new Set();
 export const subscribe = fn => { subs.add(fn); return () => subs.delete(fn); };
@@ -117,8 +130,8 @@ let retryTimer = 0, watchAbort = null, saveTimer = 0;
 
 // ---- storage (localStorage; wrapped — storage can throw in private windows) ----
 const store = {
-  get(k) { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+  get(k) { try { return (storage || localStorage).getItem(k) || ''; } catch { return ''; } },
+  set(k, v) { try { (storage || localStorage).setItem(k, v); } catch {} },
 };
 export const prefs = store;
 
@@ -127,21 +140,25 @@ export const prefs = store;
 // renders before (or without) getDevices(); the token is per board because
 // each is flashed with its own ble_remote.token — a board without one of
 // its own uses the shared 'ble-token', the first token ever entered here.
-export const receivers = (() => {
-  try { return JSON.parse(store.get('ble-receivers')) || {}; } catch { return {}; }
-})();
+export const receivers = {};
 const saveReceivers = () => store.set('ble-receivers', JSON.stringify(receivers));
 // devices Chrome has handed out this session (getDevices / chooser), by id —
 // only these can be connected without going through the chooser again
 export const known = new Map();
 
-// earlier versions of this page knew exactly one receiver
-if (store.get('ble-device')) {
-  receivers[store.get('ble-device')] ||= { name: '', token: '' };
-  store.set('ble-current', store.get('ble-device'));
-  store.set('ble-device', '');
-  saveReceivers();
+// (re)read from the provider's storage
+function loadReceivers() {
+  for (const k of Object.keys(receivers)) delete receivers[k];
+  try { Object.assign(receivers, JSON.parse(store.get('ble-receivers')) || {}); } catch {}
+  // earlier versions of this page knew exactly one receiver
+  if (store.get('ble-device')) {
+    receivers[store.get('ble-device')] ||= { name: '', token: '' };
+    store.set('ble-current', store.get('ble-device'));
+    store.set('ble-device', '');
+    saveReceivers();
+  }
 }
+loadReceivers();
 
 export const token = () => (S.device && receivers[S.device.id]?.token) || store.get('ble-token');
 export const anyKnown = () => Object.keys(receivers).length > 0;
@@ -199,8 +216,7 @@ export const label = id => labels().labels[id] || receivers[id]?.name || DEFAULT
 const GATT_OP_TIMEOUT_MS = 10000;
 export const SUPERSEDED = new Error('another receiver was selected');
 let gattChain = Promise.resolve();
-// the board a characteristic is on (the demo's stand-ins have no service:
-// the selected one)
+// the board a characteristic is on
 const deviceOf = c => c?.service?.device || S.device;
 function gattQueue(c, op) {
   const d = deviceOf(c);
@@ -318,10 +334,9 @@ function scheduleReconnect(ms) {
 // background), pick up the boards the chooser permitted before and connect
 // to the one used last
 export async function resume() {
-  if (S.demo) return;
   if (S.device) { reconnect(); return; }
   if (!token() || !HAS_BT) return;
-  if (!navigator.bluetooth.getDevices) {
+  if (!bt.getDevices) {
     // stock Chrome (2026): persistent-device APIs still flag-gated; on iOS
     // it is the browser app — there is no flag to name
     say(IOS
@@ -331,7 +346,7 @@ export async function resume() {
     return;
   }
   try {
-    const list = await navigator.bluetooth.getDevices();
+    const list = await bt.getDevices();
     for (const d of list) remember(d);
     const d = list.find(x => x.id === store.get('ble-current')) || list[0];
     if (!d) {
@@ -356,7 +371,7 @@ export async function resume() {
 async function pick() {
   // the manufacturer data is the advertised host state (see presence below):
   // Chrome only passes it to a page whose grant asked for it
-  const d = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }], optionalManufacturerData: [ADV_MFG_ID] });
+  const d = await bt.requestDevice({ filters: [{ services: [SVC] }], optionalManufacturerData: [ADV_MFG_ID] });
   remember(d);
   if (S.device && S.device.id === d.id && S.device.gatt.connected) {
     store.set('ble-current', d.id);
@@ -382,7 +397,6 @@ export async function connect() {
 // (through the advertisement dance); anything else needs the chooser
 export async function select(id) {
   if (S.busy) return; // never yank a board mid-write
-  if (S.demo) { if (id !== S.device.id) say('The demo’s other receivers are for show.', true); return; }
   if (id && known.has(id)) {
     store.set('ble-current', id);
     if (S.device?.id === id) { reconnect(); return; }
@@ -442,17 +456,15 @@ export function watchNearby(on) {
 }
 
 // what the list says about a receiver: { near: true|false|null, psu: 0..2|null }.
-// near is null where the page can't tell (no watch API, the demo, or a board
+// near is null where the page can't tell (no watch API, or a board
 // Chrome hasn't handed over this session)
 export function presenceOf(id) {
   if (S.device?.id === id && connected()) return { near: true, psu: S.psu >= 0 ? S.psu : null };
-  if (S.demo) return DEMO_PRESENCE[id] || { near: null, psu: null };
   const d = known.get(id);
   if (IOS || !d || !d.watchAdvertisements) return { near: null, psu: null };
   const p = presence.get(id);
   return p && Date.now() - p.at < NEARBY_MS ? { near: true, psu: p.psu } : { near: false, psu: null };
 }
-const DEMO_PRESENCE = {};
 
 async function writeOp(op, ...args) {
   const buf = new Uint8Array(TOKEN_LEN + 1 + args.length);
@@ -1067,7 +1079,7 @@ export const whenSaved = fn => { onSaved = fn; };
 // does this receiver speak the fan list (the page characteristic, info ver
 // 3, the 25-byte record)? A receiver on older firmware — and the daemon that
 // matches it — still powers the host, but its fans are the old shape
-export const fansCurrent = () => S.demo || !!S.pageChr;
+export const fansCurrent = () => !!S.pageChr;
 
 // the dashboard of the board open() just connected; a switch while it
 // loads stops it (SUPERSEDED, out of the first GATT op after), and an
@@ -1460,170 +1472,8 @@ document.addEventListener('visibilitychange', () => {
   else watchAbort?.abort();
 });
 
-// ?demo: the dashboard on sample data, no receiver needed — to see the
-// layout on a desktop, or to try the editor before wiring anything. Saves
-// land locally after a moment, the way a round trip would. ?demo&nodaemon
-// is the same board with the host off.
-export function demo() {
-  S.demo = true;
-  // the daemon's list: four receiver headers and the board's own fan header,
-  // taken over on a CPU curve (a fifth, parked, keeps its settings)
-  let demoRev = 1;
-  const demoFans = [
-    { n: 'pump', o: 'header1', i: 'fallback', b: 100, f: 65 },
-    { n: 'radiator', o: 'header2', i: 'temp', c: '45:35 60:55 75:100', f: 100 },
-    { n: 'exhaust', o: 'header3', i: 'gpio:0', c: '0:25 100:80', f: 100, r: 0 },
-    { n: 'intake', o: 'header4', i: 'gpu_load', c: '0:20 40:20 100:60', f: 60 },
-    { n: 'board fan', o: 'nct6686:pwm2', i: 'k10temp:Tctl', c: '50:30 80:100', f: 60 },
-    { n: 'spare', o: '', i: 'fallback', f: 40 } ];
-  const cfgJson = err => JSON.stringify({ editable: true, rev: String(demoRev), ...(err ? { err } : {}), fans: demoFans });
-  S.cfg = parseCfg(cfgJson());
-  S.scfg = parseStripCfg(JSON.stringify({ editable: true, leds: 33, pin: 4, reverse: false, brightness: 1,
-    gamma: '2.2', white_balance: 'ffb0f0', scenes: [
-      { p: '/tmp/led-static-color', e: 'solid', on: false, color: 'ffffff', l: 0.6 },
-      { p: '/tmp/led-night', e: 'drift', on: false } ] }));
-  const demoTelem = () => S.telem = parseTelem(JSON.stringify({ temp: 58.3, cpu: 37, gpu: 62,
-    fans: demoFans.map(f => f.o === 'header2' ? { in: 58.3, duty: 52 } : f.o === 'header4' ? { in: 62, duty: 45 }
-                        : f.o === 'nct6686:pwm2' ? (f.i === '' ? { in: 48, duty: 48, st: 'board' } : { in: 58.3, duty: 57, st: 'host' })
-                        : !f.o ? (f.i === 'fallback' || /^gpio:/.test(f.i) ? {} : { in: f.i === 'cpu_load' ? 37 : f.i === 'gpu_load' ? 62 : 58.3 }) : null) }));
-  demoTelem();
-  S.sens = parseSensors(JSON.stringify({ amdgpu: { edge: 61.0, junction: 64.5, mem: 58.0 },
-    k10temp: { Tctl: 58.3 }, nct6686: { CPU: 52.0, System: 38.5, 'VRM MOS': 41.0, 'pwm1-8': 48 },
-    _outs: [['nct6686:pwm1', 48, -1, 1], ['nct6686:pwm2', 57, 1420, 1], ['amdgpu:pwm1', 30, 900, 0]] }));
-  // the receiver's stored standalone settings: the config's receiver fans,
-  // as the daemon pushes them, in list order
-  const saBytes = new Uint8Array(SA_LEN).fill(NONE);
-  [[1, 65, 100, 'fallback', NONE, [], 5], [2, 100, NONE, 'host', NONE, [], 5], [3, 100, NONE, 'gpio', 0, [[0, 25], [100, 80]], 0],
-   [4, 60, NONE, 'host', NONE, [], 5]]
-    .forEach(([hdr, fb, b, k, g, pts, ramp], i) =>
-      saBytes.set(encodeRecord({ out: { kind: 'header', num: hdr }, fallback: fb, boost: b, boostSecs: 5, ramp, kind: k, gpio: g,
-                                 pts: pts.map(([x, y]) => ({ x, y })) }), i * SA_HEADER_LEN));
-  S.sa = parseSa(new DataView(saBytes.buffer));
-  const f = new Uint8Array(FANS_LEN(3) + 2), dv = new DataView(f.buffer);
-  f[0] = 3; f[1] = 0x01 | 0x08 | 0x10 | 0x20; f[2] = 2; f[3] = 1;
-  // state: driving | src<<1 (1 = fallback, 2 = live, 3 = boost, 4 = the
-  // receiver's own curve); duty; the stored fallback; the input kind; a gpio
-  // slot's reading
-  [[0x03, 65, 65, 0, NONE], [0x05, 52, 100, 2, NONE], [0x09, 61, 100, 1, 65], [0x05, 45, 60, 2, NONE],
-   [0, NONE, NONE, NONE, NONE], [0, NONE, NONE, NONE, NONE]]
-    .forEach(([st, d, fb, k, inp], i) => { f.set([st, d, fb, k, inp], 4 + i * 5); });
-  dv.setUint32(4 + CHANNELS * 5, 5 * 3600 + 17 * 60, true);
-  dv.setInt16(FANS_LEN(3), 342, true); // the receiver's chip: 34.2 °C
-  S.fans = parseFans(dv);
-  if (location.search.includes('nodaemon')) {
-    S.cfg = S.telem = S.scfg = S.sens = S.outs = null; // nothing from the daemon
-    S.fans.live = S.fans.telem = S.fans.host = false; S.fans.age = 255; S.fans.psu = 0;
-    // the receiver alone: a gpio slot keeps its own curve, everything else runs its fallback
-    S.fans.h.forEach(h => { if (!h.wired) return; if (h.kind === KIND_BYTE.gpio || h.kind === KIND_BYTE.esp32_temp) h.src = 4; else { h.src = 1; h.duty = h.fb; } });
-  }
-  S.info = { ver: 3, version: 'v1.31.0-demo', heap: 143 * 1024, minHeap: 121 * 1024, pins: [0, 20, 21],
-             headerPins: [5, 6, 7, 10, null, null], outPins: [0, 1, 2, 3, 20, 21] };
-  S.psu = S.fans.psu;
-  // the receiver's power switch: the shipped wiring, the config's tunings, a
-  // sense wire reading the board's rail (and the daemon's view of the block)
-  const pwrBytes = new Uint8Array(PWR_LEN), pdv = new DataView(pwrBytes.buffer);
-  const setPwr = (hold, boot, low, high) => { pdv.setUint16(5, hold, true); pdv.setUint16(7, boot, true); pdv.setUint16(9, low, true); pdv.setUint16(11, high, true); };
-  pwrBytes[0] = 1; pwrBytes[1] = 0x03; pwrBytes[2] = S.psu; pdv.setUint16(3, S.psu === 2 ? 2910 : 12, true);
-  setPwr(2000, 10000, 800, 2000);
-  pwrBytes.set([3, 1, 0xFF, 2, 8, 0xFF], 13);
-  S.pwr = parsePwr(pdv);
-  S.pcfg = parsePwrCfg(JSON.stringify({ editable: true, hold_seconds: 2, boot_timeout_seconds: 10, sense_low_mv: 800, sense_high_mv: 2000, wake: null, short_press: 'systemctl poweroff' }));
-  // the wake pin moving is what the free-pin list follows: the pin taken leaves it, the old one returns
-  const setWake = pin => { pwrBytes[18] = pin === null ? 0xFF : pin; S.pwr = parsePwr(pdv); S.info = { ...S.info, pins: [0, 20, 21].filter(g => g !== pin) }; };
-  if (location.search.includes('nodaemon')) S.pcfg = null;
-  // the wire drifts a little, as a real reading does
-  setInterval(() => { if (!S.pwr || !S.pwr.sense) return; pwrBytes[2] = S.psu; pdv.setUint16(3, S.psu === 2 ? 2890 + Math.round(Math.random() * 40) : 5 + Math.round(Math.random() * 12), true); S.pwr = parsePwr(pdv); emit(); }, 1000);
-  // stand-ins for the GATT objects so the page believes it is connected
-  S.device = { id: 'demo', gatt: { connected: true, disconnect() {} }, addEventListener() {} };
-  receivers.demo = { name: 'BC250 (demo)', token: 'demo-token' };
-  known.set('demo', S.device);
-  // two more boards for the Receiver tab: one in range with its host off, one out of range
-  receivers['demo-desk'] = { name: 'Desk ESP32', token: '' };
-  receivers['demo-media'] = { name: 'Media PC', token: '' };
-  DEMO_PRESENCE['demo-desk'] = { near: true, psu: 0 };
-  DEMO_PRESENCE['demo-media'] = { near: false, psu: null };
-  S.fansChr = S.telemChr = S.saChr = S.pwrChr = {};
-  S.stat = {};
-  S.pcfgChr = { writeValueWithResponse: async buf => {
-    // merge the partial edit the way the daemon would, then push the receiver
-    const edit = JSON.parse(utf8.decode(buf.subarray(TOKEN_LEN))), c = S.pcfg;
-    const out = { editable: true, hold_seconds: edit.hold_seconds ?? c.hold, boot_timeout_seconds: edit.boot_timeout_seconds ?? c.boot,
-                  sense_low_mv: edit.sense_low_mv ?? c.low, sense_high_mv: edit.sense_high_mv ?? c.high,
-                  wake: 'wake' in edit ? edit.wake : c.wake,
-                  short_press: 'short_press' in edit ? edit.short_press : c.shortPress };
-    setPwr(Math.round(out.hold_seconds * 1000), Math.round(out.boot_timeout_seconds * 1000), out.sense_low_mv, out.sense_high_mv);
-    S.pwr = parsePwr(pdv);
-    if ('wake' in edit) setWake(edit.wake); // the receiver, pushed
-    setTimeout(() => onPcfg(new DataView(new TextEncoder().encode(JSON.stringify(out)).buffer)), 600); } };
-  S.ctrl = { writeValueWithResponse: async buf => {
-    const op = buf[TOKEN_LEN], slot = buf[TOKEN_LEN + 1], h = S.fans.h[slot], st = S.sa.h[slot];
-    if (op === OP_ON) { S.psu = S.fans.psu = 1; emit(); setTimeout(() => { S.psu = S.fans.psu = 2; emit(); }, 3000); return; }
-    if (op === OP_SHUTDOWN || op === OP_HARD_OFF) { S.psu = S.fans.psu = 0; emit(); return; }
-    if (op === OP_PWR_TUNING) {
-      const a = new DataView(buf.buffer, buf.byteOffset + TOKEN_LEN + 1), v = [0, 2, 4, 6].map(o => a.getUint16(o, true));
-      if (v[0] < 100 || v[1] < 1000 || v[2] >= v[3]) throw new Error('GATT operation failed'); // what the receiver refuses
-      setPwr(...v); S.pwr = parsePwr(pdv); return;
-    }
-    if (op === OP_PWR_WAKE) {
-      const pin = buf[TOKEN_LEN + 1];
-      if (pin !== NONE && ![0, 20, 21].includes(pin)) throw new Error('GATT operation failed'); // a pin the receiver refuses
-      setWake(pin === NONE ? null : pin); emit(); return;
-    }
-    if (op === OP_FAN_HEADER) {
-      const rec = buf.subarray(TOKEN_LEN + 2, TOKEN_LEN + 2 + SA_HEADER_LEN), r = decodeRecord(new DataView(rec.buffer, rec.byteOffset), 0);
-      if (r.used && r.kind === 'gpio' && (r.gpio === 4 || r.gpio === 9 || r.gpio > 21)) throw new Error('GATT operation failed'); // a pin the receiver refuses
-      Object.assign(st, r);
-      if (!r.used) { Object.assign(h, { wired: false, src: 0, duty: NONE, fb: NONE, kind: NONE, in: NONE }); }
-      else {
-        h.wired = true; h.fb = r.fb; h.kind = KIND_BYTE[r.kind];
-        if (r.kind === 'gpio') { h.in = 50; h.src = 4; h.duty = Math.round(r.pts.length ? r.pts[0].y : 50); }
-        else if (r.kind === 'esp32_temp') { h.in = 34; h.src = 4; h.duty = Math.round(r.pts.length ? r.pts[0].y : 50); }
-        else { h.in = NONE; h.src = 1; h.duty = h.fb; }
-      }
-      saBytes.set(rec, slot * SA_HEADER_LEN); // the stored value, as the receiver would echo it
-      setTimeout(() => onSa(new DataView(saBytes.buffer)), 400);
-    } } };
-  S.cfgChr = { writeValueWithResponse: async buf => {
-    // apply the edit the way the daemon would (fans.hpp applyJson), and
-    // answer with the list — or with why not
-    const edit = JSON.parse(utf8.decode(buf.subarray(TOKEN_LEN)));
-    const answer = err => setTimeout(() => onCfg(new DataView(new TextEncoder().encode(cfgJson(err)).buffer)), 600);
-    if (edit.rev !== String(demoRev)) return answer('the fan list changed on the host since the phone read it — look again and retry');
-    let next = demoFans.map(x => ({ ...x }));
-    if ('del' in edit) next.splice(edit.del, 1);
-    else {
-      const f = 'add' in edit ? edit.add : { ...next[edit.fan], ...edit.edit };
-      for (const k of Object.keys(f)) if (f[k] === undefined) delete f[k];
-      if (f.b === null) delete f.b;
-      if (next.some((x, i) => x.o && x.o === f.o && ('add' in edit || i !== edit.fan))) return answer(`"${f.o}" is another fan's output already — one fan per output`);
-      if (f.o && !/^header[1-4]$|^gpio:\d+$/.test(f.o) && !['nct6686:pwm1', 'nct6686:pwm2'].includes(f.o)) return answer(`"${f.o}" is not a pwm output on this machine`);
-      if ('add' in edit) next.push(f); else next[edit.fan] = f;
-    }
-    demoFans.splice(0, demoFans.length, ...next);
-    demoRev++;
-    demoTelem();
-    answer();
-  } };
-  S.stripChr = { writeValueWithResponse: async buf => {
-    // apply the partial edit the way the daemon would, scenes by path
-    const edit = JSON.parse(utf8.decode(buf.subarray(TOKEN_LEN)));
-    const sc = S.scfg;
-    const out = { editable: true, leds: sc.leds, pin: sc.pin, reverse: edit.reverse ?? sc.reverse,
-                  brightness: edit.brightness ?? sc.brightness,
-                  gamma: edit.gamma ?? (sc.gamma.every(x => x === sc.gamma[0]) ? String(sc.gamma[0]) : sc.gamma.join(' ')),
-                  white_balance: edit.white_balance ?? sc.wb.map(hex2).join(''),
-                  scenes: sc.scenes.map(s => { const e = (edit.scenes || []).find(x => x.p === s.p) || {};
-                    const o = { p: s.p, e: s.e, on: e.on ?? s.on };
-                    if (s.color !== null) o.color = e.color ?? s.color;
-                    if (s.l !== null) o.l = e.l ?? s.l;
-                    return o; }) };
-    setTimeout(() => onStripCfg(new DataView(new TextEncoder().encode(JSON.stringify(out)).buffer)), 600); } };
-  say('Demo data — not connected to a receiver.', true);
-}
-
 export function boot() {
-  if (location.search.includes('demo')) demo();
-  else if (!HAS_BT)
+  if (!HAS_BT)
     say(IOS
       ? 'Safari has no Web Bluetooth. Open this page in ' +
         `<a href="${bluefyLink()}">Bluefy</a>, a free browser that has it ` +
