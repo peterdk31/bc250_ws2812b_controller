@@ -1480,5 +1480,12 @@ export function boot() {
         `(<a href="${BLUEFY_STORE}">App Store</a>), and bookmark it there.`
       : 'No Web Bluetooth here — use Chrome or Edge.', false, true);
   else resume();
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    // A new worker (a deploy) claims this page after the old cache already
+    // served it — reload once so the update shows now, not on the next open.
+    // No controller yet = first install, nothing stale to replace.
+    if (navigator.serviceWorker.controller)
+      navigator.serviceWorker.addEventListener('controllerchange', () => location.reload(), { once: true });
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
 }

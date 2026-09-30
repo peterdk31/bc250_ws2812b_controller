@@ -2,12 +2,16 @@
 // internet at all (a LAN party, a hotel), so everything is pre-cached on
 // install and served cache-first forever. Bump VERSION when any cached file
 // changes — the new worker drops the old cache on activation.
-const VERSION = 'v37';
+const VERSION = 'v38';
 const CACHE = `bc250-power-${VERSION}`;
 const FILES = ['./', 'index.html', 'app.js', 'ble.js', 'demo-ble.js', 'vendor/preact-htm.mjs', 'manifest.webmanifest', 'icon.svg'];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
+  // cache: 'reload' skips the HTTP cache — Pages serves max-age=600, so a plain
+  // addAll right after a deploy can bake the previous files into the new cache.
+  e.waitUntil(caches.open(CACHE)
+    .then(c => c.addAll(FILES.map(f => new Request(f, { cache: 'reload' }))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {
