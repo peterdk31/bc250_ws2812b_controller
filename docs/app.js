@@ -283,8 +283,8 @@ function PowerSheet() {
 }
 
 // ---- Fans ----
-// a card is two tiles, input → output: the input's name under its reading,
-// the output's name under the duty it runs. A parked fan is the input tile
+// a card is two tiles, input → output: the input's name over its reading,
+// the output's name over the duty it runs. A parked fan is the input tile
 // alone, so an input can be tried before it drives anything — only a gpio
 // input has no reading then (the receiver samples a pin for a fan it runs).
 // While something else runs the fan instead of its input the chip names it
@@ -351,15 +351,13 @@ function FanRow({ c, open, toggle }) {
       ${editable ? html`<button class="cog" aria-label="Settings" onClick=${e => { e.stopPropagation(); go({ editor: c.key }); }}><${Icon} d=${I.cog} sw=${1.8} /></button>` : html`<span class="cog"></span>`}
       <div class="flow ${parked ? 'solo' : ''}">
         <div class="tile ${state || chip ? 'idle' : ''}">
-          <span class="k">Input</span>
-          <${Val} v=${inputValue(c)} />
           <span class="s">${inputName(c)}</span>
+          <${Val} v=${inputValue(c)} />
         </div>
         ${!parked && html`<span class="to"><${Icon} d=${I.right} size=${18} /></span>
         <div class="tile">
-          <span class="k">Output</span>
-          <${Val} v=${duty === null ? ['—', ''] : [duty, '%']} />
           <span class="s">${B.outLabel(c.out)}</span>
+          <${Val} v=${duty === null ? ['—', ''] : [duty, '%']} />
           <div class="bar ${chip ? chip[0] : ''}"><i style=${`width: ${duty === null ? 0 : duty}%`}></i></div>
         </div>`}
       </div>
