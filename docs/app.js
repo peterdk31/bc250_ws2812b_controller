@@ -524,24 +524,47 @@ function pickerRows(h, kinds) {
   return rows;
 }
 
-// the output picker's options: the board's headers, the receiver's free
-// pins, and (with a daemon) the host's pwm outputs it can drive, plus none —
-// each output another fan has is listed but can't be picked. The fan's own
-// output is always there, whatever the lists say
-function outputOptions(h, fkey) {
+// the output picker's rows: the board's headers, the receiver's free pins,
+// and (with a daemon) the host's pwm outputs it can drive, plus none — each
+// output another fan has is listed but can't be picked. The fan's own output
+// is always there, whatever the lists say. A host output's live duty and rpm
+// sit in the reading column, so a refresh changes a row's text, never the rows
+function outputRows(h, fkey) {
   const daemon = h.route === 'daemon';
   const taken = new Map(B.cards().filter(c => c.key !== fkey && c.output).map(c => [c.output, c.name || B.outLabel(c.out)]));
-  const opts = [];
-  const add = (v, label) => { if (!opts.some(o => o.v === v)) opts.push({ v, label: taken.has(v) ? `${label} (${taken.get(v)})` : label, dis: taken.has(v) }); };
-  if (daemon) add('', 'None — parked');
-  for (const n of B.headerList()) add(`header${n}`, `Header ${n}`);
+  const rows = [];
+  const add = (v, label, hint, value = '') => {
+    if (rows.some(r => r.id === v)) return;
+    const by = taken.get(v);
+    rows.push({ id: v, label, hint: by ? `used by ${by}` : hint, value, disabled: by !== undefined, on: v === h.output });
+  };
+  if (daemon) add('', 'None — parked', 'keeps its settings, drives nothing');
+  for (const n of B.headerList()) add(`header${n}`, `Header ${n}`, 'a fan header on the receiver');
   const pins = S.info && S.info.outPins;
-  if (pins) for (const g of pins) add(`gpio:${g}`, `GPIO${g}`);
+  if (pins) for (const g of pins) add(`gpio:${g}`, `GPIO${g}`, 'a free receiver pin');
   if (daemon && S.outs) for (const o of S.outs) if (o.writable || o.spec === h.output)
-    add(o.spec, `${o.spec.replace(':', ' ')} — ${o.duty} %${o.rpm !== null ? ` · ${o.rpm} rpm` : ''}${o.writable ? '' : ' (read-only)'}`);
-  if (!opts.some(o => o.v === h.output))
-    opts.push({ v: h.output, label: h.out.kind === 'parked' ? 'None — parked' : B.outLabel(h.out), dis: false });
-  return opts;
+    add(o.spec, o.spec.replace(':', ' '), o.writable ? 'a fan header on the host' : 'a fan header on the host (read-only)',
+        `${o.duty} %${o.rpm !== null ? ` · ${o.rpm} rpm` : ''}`);
+  if (!rows.some(r => r.on))
+    rows.push({ id: h.output, label: h.out.kind === 'parked' ? 'None — parked' : B.outLabel(h.out), hint: '', value: '', disabled: false, on: true });
+  return rows;
+}
+
+// a card's fold-open picker: the heading with the pick and its reading while
+// shut, a row per choice (label, hint, live reading) while open; picking a
+// row shuts it. Rows are keyed, so a refresh updates them in place
+function Fold({ title, pick, value, rows, onPick }) {
+  const [open, setOpen] = useState(false);
+  return html`<button class="fold" onClick=${() => setOpen(o => !o)}>
+      <h2>${title}</h2>
+      ${!open && html`<span class="pick">${pick}</span>${value && html`<span class="rd on">${value}</span>`}`}
+      <${Icon} d=${open ? I.up : I.down} size=${18} />
+    </button>
+    ${open && html`<div class="srcs">${rows.map(r => html`<button key=${r.id} class="src ${r.on ? 'on' : ''}" disabled=${r.disabled}
+        onClick=${() => { onPick(r); setOpen(false); }}>
+        <span class="mark">${r.on ? html`<${Icon} d=${I.check} size=${18} />` : html`<i></i>`}</span>
+        <span class="lbl"><span>${r.label}</span>${r.hint && html`<small>${r.hint}</small>`}</span>
+        <span class="rd">${r.value}</span></button>`)}</div>`}`;
 }
 
 function FanEditor({ fkey }) {
@@ -553,7 +576,6 @@ function FanEditor({ fkey }) {
   const copy = o => o && { ...o, out: { ...o.out }, pts: o.pts.map(p => ({ ...p })) };
   const [h, setH] = useState(() => copy(orig));
   useEffect(() => { if (!h && orig) setH(copy(orig)); }, [!!orig]);
-  const [open, setOpen] = useState(false);
   const [other, setOther] = useState(false); // "Other sensor…" or "Temperature file…" picked: the spec is typed, whatever the catalogue lists
   const dirty = () => JSON.stringify(h) !== JSON.stringify(orig);
   useEffect(() => { leaveGuard = () => !dirty() || confirm('Leave without saving?'); return () => { leaveGuard = null; }; });
@@ -563,13 +585,10 @@ function FanEditor({ fkey }) {
   const pinOpts = h && pins && (pins.includes(h.gpio) ? pins : [...pins, h.gpio].sort((a, b) => a - b));
   const pinSelect = useSteadySelect(pinOpts ? `${pinOpts.join()}=${h.gpio}` : '', () => pinOpts && html`
           <select value=${h.gpio} onChange=${e => set({ gpio: +e.target.value })}>${pinOpts.map(g => html`<option key=${g} value=${g}>GPIO${g}</option>`)}</select>`);
-  const outOpts = h ? outputOptions(h, fkey) : [];
-  const outSelect = useSteadySelect(h ? JSON.stringify([outOpts, h.output]) : '', () => h && html`
-          <select value=${h.output} onChange=${e => { const v = e.target.value; setH(x => withOutput(x, v)); }}>
-            ${outOpts.map(o => html`<option key=${o.v} value=${o.v} disabled=${o.dis}>${o.label}</option>`)}</select>`);
   if (!h) return html`<${Header} back="Fans" /><div class="empty">${fkey === 'new' ? 'No free output for another fan.' : 'This fan is gone.'}</div>`;
   const daemon = h.route === 'daemon';
   const hostOut = h.out.kind === 'host';
+  const outRows = outputRows(h, fkey), outPick = outRows.find(r => r.on);
   // the receiver's own temperature, where its chip has the sensor (or the
   // fan follows it already, so the row that says so stays)
   const own = ['gpio', ...(S.fans && S.fans.temp !== null || h.kind === 'esp32_temp' ? ['esp32_temp'] : [])];
@@ -603,8 +622,8 @@ function FanEditor({ fkey }) {
     <div class="list">
       ${daemon && html`<div class="card"><input class="text" type="text" maxlength=${B.NAME_CHARS} autocomplete="off" aria-label="Name" placeholder="name" value=${h.name} onInput=${e => set({ name: e.target.value })} /></div>`}
       <div class="card">
-        <h2>Output</h2>
-        <label class="frow"><span>Drives</span>${outSelect}</label>
+        <${Fold} title="Output" rows=${outRows} pick=${outPick ? outPick.label : B.outLabel(h.out)} value=${outPick ? outPick.value : ''}
+          onPick=${r => setH(x => withOutput(x, r.id))} />
         ${h.out.kind === 'gpio' && !(S.info && S.info.outPins) && html`<label class="frow"><span>Pin</span>
           <${NumField} value=${h.out.num} min=${0} max=${48} step=${1} round=${true} onValue=${v => { if (v !== null) setH(x => withOutput(x, `gpio:${clamp(v, 0, 48)}`)); }} /><small>a free receiver pin</small></label>`}
         <div class="note">${hostOut ? 'A fan header on the host itself, driven by its daemon. It goes back to the board’s own curve whenever the daemon stops.'
@@ -612,20 +631,12 @@ function FanEditor({ fkey }) {
           : 'A header on the receiver, or one of its pins.'}</div>
       </div>
       <div class="card">
-        <button class="fold" onClick=${() => setOpen(o => !o)}>
-          <h2>Follows</h2>
-          ${!open && html`<span class="pick">${curLabel}</span><span class="rd on">${fmtReading(h.kind, readingFor(h))}</span>`}
-          <${Icon} d=${open ? I.up : I.down} size=${18} />
-        </button>
-        ${open && html`<div class="srcs">${pickerRows(h, kinds).map(r => html`<button key=${r.id} class="src ${r.on ? 'on' : ''}" disabled=${r.disabled}
-            onClick=${() => { setH(x => { const n = withKind(x, r.kind);
-                              if (r.spec) n.spec = r.spec;                                                                       // a listed sensor
-                              else if (r.file) n.spec = isFileSpec(x.spec) && !inCatalogue(x.spec) ? x.spec : B.FILE_PREFIX;     // keep a path being typed, start an empty one otherwise
-                              else if (r.other) n.spec = inCatalogue(x.spec) || isFileSpec(x.spec) ? '' : (x.spec || '');       // keep a spec being typed
-                              return n; }); setOther(!!r.other || !!r.file); setOpen(false); }}>
-            <span class="mark">${r.on ? html`<${Icon} d=${I.check} size=${18} />` : html`<i></i>`}</span>
-            <span class="lbl"><span>${r.label}</span>${r.hint && html`<small>${r.hint}</small>`}</span>
-            <span class="rd">${r.value}</span></button>`)}</div>`}
+        <${Fold} title="Follows" rows=${pickerRows(h, kinds)} pick=${curLabel} value=${fmtReading(h.kind, readingFor(h))}
+          onPick=${r => { setH(x => { const n = withKind(x, r.kind);
+                          if (r.spec) n.spec = r.spec;                                                                       // a listed sensor
+                          else if (r.file) n.spec = isFileSpec(x.spec) && !inCatalogue(x.spec) ? x.spec : B.FILE_PREFIX;     // keep a path being typed, start an empty one otherwise
+                          else if (r.other) n.spec = inCatalogue(x.spec) || isFileSpec(x.spec) ? '' : (x.spec || '');       // keep a spec being typed
+                          return n; }); setOther(!!r.other || !!r.file); }} />
         ${h.kind === 'gpio' && (pinOpts
           ? html`<label class="frow"><span>Pin</span>${pinSelect}</label>`
           : html`<label class="frow"><span>Pin</span><${NumField} value=${h.gpio} min=${0} max=${48} step=${1} round=${true} onValue=${v => { if (v !== null) set({ gpio: clamp(v, 0, 48) }); }} /><small>a free receiver pin</small></label>`)}
