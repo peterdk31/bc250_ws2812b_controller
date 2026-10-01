@@ -97,9 +97,8 @@
         },
         {
             "name": "board fan",
-            "output": "nct6686:pwm2",
-            "input": "",
-            "fallback": 100
+            "output": "",
+            "input": "nct6686:pwm2"
         }
     ],
     "strip": {

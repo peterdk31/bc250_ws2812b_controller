@@ -41,12 +41,14 @@
 //           "curve": "45:35 60:55 75:100", "hysteresis": 3, "ramp": 5, "fallback": 100 },
 //         { "name": "board fan", "output": "nct6686:pwm2", "input": "k10temp:Tctl",
 //           "curve": "50:30 80:100", "fallback": 60 },
+//         { "name": "chipset", "output": "", "input": "nct6686:pwm1" },
 //         ...
 //     ]
 //
 // The list's order is the phone's; nothing else hangs on it. Every fan has a
 // name, an output, an input and a fallback, a curve for every input but
-// "fallback" (and the board's own, below), optionally a boost, and optionally
+// "fallback" (a parked fan's curve and fallback are optional: it drives
+// nothing), optionally a boost, and optionally
 // its tunings — hysteresis, ramp, boost_seconds (TUNINGS below: each has a
 // default and applies to some fans only; on the others it is refused).
 // There is nothing global.
@@ -63,7 +65,8 @@
 //   ""           nothing: the fan is parked, its settings kept. A receiver
 //                header no fan names is not driven at all (a 4-pin fan on it
 //                runs full); a host output no fan names runs the board's own
-//                curve
+//                curve. To watch one of those, park a fan with that output
+//                as its input: "output": "", "input": "nct6686:pwm2"
 //
 // Receiver outputs take the receiver's slots (FAN_CHANNELS of them) in list
 // order; every one of them moves at runtime — the pin travels in the slot's
@@ -93,10 +96,6 @@
 //   file:/path   a file holding one temperature, °C         (this daemon)
 //   chip:pwmN    a hwmon pwm output, read as 0..100 %        (this daemon)
 //   cpu_load / gpu_load   0..100 %                           (this daemon)
-//   ""           a host output only: the board drives it, with its own
-//                curve — "output": "nct6686:pwm2", "input": "". This daemon
-//                never takes the output, and shows the board's duty; any
-//                other input takes it over
 //
 // A daemon-evaluated ("host") curve on a receiver output goes out as
 // CMD_FAN_LIVE whole percents on the rules' 0.5 s tick, sharing the reads the
@@ -188,7 +187,7 @@ struct Fan
     int slot = -1;                   // the receiver slot (Header/GpioOut), else -1
 
     std::string input;               // as written
-    enum Kind { Fallback, Gpio, RecvTemp, Temp, Pwm, CpuLoad, GpuLoad, Board } kind = Fallback;
+    enum Kind { Fallback, Gpio, RecvTemp, Temp, Pwm, CpuLoad, GpuLoad } kind = Fallback;
     int gpio = -1;                   // Gpio: the receiver's input pin
     std::string spec;                // hwmon candidates (Temp) / chip (Pwm)
     std::string pwmFile;             // "pwm1" (Pwm)
@@ -216,7 +215,7 @@ struct Fan
         int duty = proto::FAN_NONE;  // what this side ran it at this tick (NONE = not ours)
         // a host output
         std::string outPath;         // the resolved pwmN file, "" = not found (yet)
-        enum HostSt { HNone, HDrive, HBoard, HRefused, HGone, HReadOnly, HBusy } host = HNone;
+        enum HostSt { HNone, HDrive, HRefused, HGone, HReadOnly, HBusy } host = HNone;
         bool saidGone = false, saidRo = false;
     } rt;
 
@@ -227,10 +226,10 @@ struct Fan
     bool receiverCurve() const { return kind == Gpio || kind == RecvTemp; }
 
     // does this fan's curve read something only this daemon can?
-    bool hostInput() const { return kind != Fallback && !receiverCurve() && kind != Board; }
+    bool hostInput() const { return kind != Fallback && !receiverCurve(); }
 
     // does it take a curve?
-    bool hasCurve() const { return kind != Fallback && kind != Board; }
+    bool hasCurve() const { return kind != Fallback; }
 
     float eval(float x) const
     {
@@ -358,7 +357,7 @@ public:
         present_ = true;
 
         for (auto& f : fans_)
-            if (f.out == Fan::Host && f.kind != Fan::Board)
+            if (f.out == Fan::Host)
                 resolveOutput(f);
 
         return true;
@@ -508,7 +507,6 @@ public:
             {
                 lastTelemSent_ = lastSensorsSent_ = -1e9; // answer a fresh watcher on the next tick
                 lastSensors_.clear();
-                pwmSplit_.clear(); // the pwm outputs start out as one entry again
             }
         }
         else if (kind == proto::MSG_FAN_CONFIG)
@@ -550,17 +548,10 @@ public:
             if (f.slot >= 0)
                 fprintf(out, " (receiver slot %d)", f.slot);
             if (f.out == Fan::Host)
-            {
-                // the board's own is only read, through its input path
-                const std::string& p = f.kind == Fan::Board ? f.rt.path : f.rt.outPath;
-                fprintf(out, " -> %s", p.empty() ? "(not found)" : p.c_str());
-            }
+                fprintf(out, " -> %s", f.rt.outPath.empty() ? "(not found)" : f.rt.outPath.c_str());
             fprintf(out, "\n      ");
 
-            if (f.kind == Fan::Board)
-                fprintf(out, "input: the board's own curve (not taken over)%s",
-                        f.rt.lastInOk ? (", at " + std::to_string((int)(f.rt.lastIn + 0.5f)) + "%").c_str() : "");
-            else if (f.kind == Fan::Fallback)
+            if (f.kind == Fan::Fallback)
                 fprintf(out, "input: none — runs its fallback, %d%%%s", f.fallback,
                         f.receiverOut() ? " (the receiver runs it)" : "");
             else if (f.kind == Fan::Gpio)
@@ -573,19 +564,30 @@ public:
             else
             {
                 fprintf(out, "input: %s", f.input.c_str());
+                if (f.out == Fan::Parked) // read only while a phone watches; this look reads it too
+                {
+                    float in;
+                    if ((f.rt.lastInOk = readInput(f, in, i)))
+                        f.rt.lastIn = in;
+                }
                 if (f.kind == Fan::Temp || f.kind == Fan::Pwm)
                     fprintf(out, " -> %s", f.rt.path.empty() ? "(not found)" : f.rt.path.c_str());
                 if (f.rt.lastInOk)
                     fprintf(out, " = %g%s", f.rt.lastIn, f.kind == Fan::Temp ? " °C" : " %");
                 else
-                    fprintf(out, " = (no reading — runs the fallback)");
+                    fprintf(out, f.out == Fan::Parked ? " = (no reading)" : " = (no reading — runs the fallback)");
                 if (f.out != Fan::Parked && f.rt.duty != proto::FAN_NONE)
                     fprintf(out, "  -> %d%%", f.rt.duty);
             }
 
-            if (f.out == Fan::Host && f.kind != Fan::Board)
+            if (f.out == Fan::Host)
                 fprintf(out, " [%s]", hostState(f).text);
 
+            if (f.out == Fan::Parked)
+            {
+                fprintf(out, "\n");
+                continue; // drives nothing: its settings do nothing either
+            }
             fprintf(out, "\n      fallback %d%%", f.fallback);
             if (f.boost >= 0)
                 fprintf(out, ", boost %d%%", f.boost);
@@ -655,7 +657,7 @@ private:
     {
         return "expected fallback, gpio:N, esp32_temp, temp, cpu_load, gpu_load, a hwmon chip:label / "
                "chip:pwmN, pmbus:CPU VRM / pmbus:GPU VRM, smu:VRAM hotspot / smu:VRAM 0..7, "
-               "file:/path, or (for a host output) \"\" for the board's own curve";
+               "or file:/path";
     }
 
     static const char* OUTPUT_HELP()
@@ -731,29 +733,28 @@ private:
 
     // what an input string means: kind, and for gpio the pin, for hwmon
     // inputs the spec. "" when it parses, else what is wrong with it. Only
-    // the input fields of f are touched; the output must be parsed first (the
-    // board's own spelling is the output's).
+    // the input fields of f are touched; the output must be parsed first (a
+    // host output can't follow itself).
     static std::string parseInput(const std::string& src, const std::string& sensors, Fan& f)
     {
         f.gpio = -1;
         f.spec.clear();
         f.pwmFile.clear();
 
+        // the board's own curve is what a host output no fan names runs;
+        // watching it is a parked fan with the output as its input
+        static const char* WATCH_HELP = "to leave a host output to the board's own curve and watch it, "
+                                        "give it to no fan and make it a parked fan's input — "
+                                        "\"output\": \"\", \"input\": \"nct6686:pwm2\"";
         if (src.empty())
-        {
-            if (f.out != Fan::Host)
-                return "a blank input is the board's own curve, which only a host output has — "
-                       "a fixed speed is input \"fallback\"";
-            f.kind = Fan::Board;
-            return "";
-        }
+            return std::string("removed: a blank input was the board's own curve — ") + WATCH_HELP;
 
         if (src == "constant")
             return "renamed: a fixed speed is input \"fallback\" — the fan runs its "
                    "fallback value and takes no curve (move the constant into fallback)";
 
         if (f.out == Fan::Host && src == f.output)
-            return "renamed: the board's own curve is a blank input now — write \"input\": \"\"";
+            return std::string("a host output can't follow itself — ") + WATCH_HELP;
 
         if (src == "fallback")
         {
@@ -920,7 +921,7 @@ private:
             if (!known)
                 return bad(where + "." + m.first, "unknown key");
         }
-        for (const char* k : {"name", "output", "input", "fallback"})
+        for (const char* k : {"name", "output", "input"})
             if (!v.find(k))
                 return bad(where, std::string("missing \"") + k +
                                       "\" (every fan has a name, an output, an input and a fallback, "
@@ -965,12 +966,10 @@ private:
         if (!f.hasCurve())
         {
             if (curve)
-                return bad(where + ".curve", f.kind == Fan::Board
-                                                 ? "the board's own curve runs this output — delete this key"
-                                                 : "a fallback input takes no curve — the fan runs its "
-                                                   "fallback value; delete this key");
+                return bad(where + ".curve", "a fallback input takes no curve — the fan runs its "
+                                             "fallback value; delete this key");
         }
-        else
+        else if (curve || f.out != Fan::Parked) // a parked fan's is optional
         {
             if (!curve)
                 return bad(where, "missing \"curve\" (input:percent points, e.g. "
@@ -997,10 +996,13 @@ private:
                                              "output; write null");
         }
 
-        const json::Value& fb = *v.find("fallback");
-        if (!fb.isNumber() || fb.number < 0 || fb.number > 100)
+        const json::Value* fb = v.find("fallback");
+        if (!fb && f.out != Fan::Parked) // a parked fan's is optional
+            return bad(where, "missing \"fallback\" (every fan has a name, an output, an input and a "
+                              "fallback, and a curve unless the input is fallback)");
+        if (fb && (!fb->isNumber() || fb->number < 0 || fb->number > 100))
             return bad(where + ".fallback", "expected a percent 0..100");
-        f.fallback = (int)(fb.number + 0.5);
+        f.fallback = fb ? (int)(fb->number + 0.5) : 100;
 
         for (auto& t : TUNINGS)
         {
@@ -1054,7 +1056,7 @@ private:
             // daemon drives for another fan would read our own writes back
             if (f.kind == Fan::Pwm)
                 for (size_t j = 0; j < out.size(); j++)
-                    if (out[j].out == Fan::Host && out[j].kind != Fan::Board && out[j].outChip == f.spec &&
+                    if (out[j].out == Fan::Host && out[j].outChip == f.spec &&
                         out[j].outFile == f.pwmFile)
                         return bad(at + ".input", "\"" + f.input + "\" is fans[" + std::to_string(j) +
                                                       "]'s output — this daemon drives it, so it would "
@@ -1100,8 +1102,6 @@ private:
             f.rt.path = hwmon::findSensorFromSpec(f.spec);
         else if (f.kind == Fan::Pwm)
             f.rt.path = findChipFile(f.spec, f.pwmFile);
-        else if (f.kind == Fan::Board)
-            f.rt.path = findChipFile(f.outChip, f.outFile);
     }
 
     // find a host output's pwmN file, saying once when there is none (yet:
@@ -1189,7 +1189,6 @@ private:
 
             case Fan::Temp:
             case Fan::Pwm:
-            case Fan::Board:
                 if (f.rt.path.empty())
                 {
                     resolve(f);
@@ -1264,15 +1263,6 @@ private:
             return proto::FAN_NONE;
         }
 
-        if (f.kind == Fan::Board)
-        {
-            float in;
-            f.rt.lastInOk = readInput(f, in, idx);
-            if (f.rt.lastInOk)
-                f.rt.lastIn = in;
-            return proto::FAN_NONE;
-        }
-
         if (f.kind == Fan::Fallback)
             return f.receiverOut() ? proto::FAN_NONE : f.fallback;
 
@@ -1308,16 +1298,10 @@ private:
     }
 
     // a host output's turn: find its pwmN, then have the claims drive it at
-    // `duty` — or not, and say why on the dashboard. The board's own (a blank
-    // input) is never driven: not naming it is what hands it back.
+    // `duty` — or not, and say why on the dashboard. The board's own curve
+    // is never this: not naming an output is what hands it back.
     void driveHost(Fan& f, int duty, double now)
     {
-        if (f.kind == Fan::Board)
-        {
-            f.rt.host = Fan::Runtime::HBoard;
-            return;
-        }
-
         // the path found once must still be there AND still be the named
         // chip's: a driver reloaded mid-run hands its hwmonN to whichever
         // chip registers next, and that chip may have a pwmN too — driving
@@ -1384,8 +1368,7 @@ private:
     static constexpr HostStateRow HOST_STATES[] = {
         {Fan::Runtime::HNone, nullptr, ""},
         {Fan::Runtime::HDrive, "host", "driven by this daemon"},
-        {Fan::Runtime::HBoard, "board", "the board's own curve"},
-        // the phone shows both as the board's; the journal says why this one is
+        // the phone shows it as the board's; the journal says why
         {Fan::Runtime::HRefused, "board", "the board's own curve (the takeover failed — see the journal)"},
         {Fan::Runtime::HGone, "gone", "no such output on this machine (yet)"},
         {Fan::Runtime::HReadOnly, "ro", "read-only driver: the board's own curve"},
@@ -1428,7 +1411,7 @@ private:
         char buf[40];
         std::string j = "{\"n\":\"" + cfgedit::escape(f.name) + "\",\"o\":\"" + cfgedit::escape(f.output) +
                         "\",\"i\":\"" + cfgedit::escape(f.input) + "\"";
-        if (f.hasCurve())
+        if (!f.curve.empty())
             j += ",\"c\":\"" + f.curveText + "\"";
         if (f.boost >= 0)
             j += ",\"b\":" + std::to_string(f.boost);
@@ -1514,7 +1497,6 @@ private:
             if (f.rt.lastInOk)
                 snprintf(buf, sizeof buf, "\"in\":%.1f", f.rt.lastIn), field(buf);
             int duty = f.out == Fan::Parked ? -1
-                     : f.kind == Fan::Board ? (f.rt.lastInOk ? (int)(f.rt.lastIn + 0.5f) : -1)
                      : f.out == Fan::Host && f.rt.host != Fan::Runtime::HDrive ? -1
                      : f.rt.duty == proto::FAN_NONE ? -1 : f.rt.duty;
             if (duty >= 0)
@@ -1532,21 +1514,18 @@ private:
     // the phone's pickers — hwmon::enumerate() as JSON grouped by chip, and
     // every host pwm output (from the same scan) under "_outs":
     //   {"amdgpu":{"edge":61.0,"junction":64.5},
-    //    "nct6686":{"CPU":52.0,"System":38.5,"pwm1-8":48},
+    //    "nct6686":{"CPU":52.0,"System":38.5},
     //    "_outs":[["nct6686:pwm1",48,1450,1],["nct6686:pwm2",48,-1,1],...]}
     // an output is [spec, duty %, rpm of the same-numbered tachometer (-1 =
-    // none), 1 = can be driven]. A chip's pwm outputs are one input entry
-    // while they have all read alike since the watch began (a board whose
-    // firmware drives them from one curve shows one line, named for the
-    // range; the spec to follow is its first); the moment two differ they
-    // are listed apart for the rest of the watch. DASH_FAN_SENSORS_MAX is the
-    // receiver's buffer, so a machine with more sensors than fit loses input
-    // entries by priority: pwm outputs first, then labelled temperatures from
-    // the end — never an input or output a fan names or the `sensors` pick,
-    // which the pickers must be able to show as chosen. "_outs" is held to
-    // half the ceiling the same way (the outputs a fan names always kept).
-    // What was left out is counted in "_more", so the page can say so (the
-    // typed field still reaches them). Said once in the journal as well.
+    // none), 1 = can be driven]; it is both an output a fan can drive and an
+    // input a fan can follow, so the chips' groups hold the temperatures
+    // alone. DASH_FAN_SENSORS_MAX is the receiver's buffer, so a machine with
+    // more sensors than fit loses temperatures from the end — never an input
+    // or output a fan names or the `sensors` pick, which the pickers must be
+    // able to show as chosen. "_outs" is held to half the ceiling the same
+    // way (the outputs a fan names always kept). What was left out is
+    // counted in "_more", so the page can say so (the typed field still
+    // reaches them). Said once in the journal as well.
     std::string sensorsJson()
     {
         auto all = hwmon::enumerate();
@@ -1619,39 +1598,16 @@ private:
         struct Entry { std::string chip, key, val; int prio; };
         std::vector<Entry> entries;
         char buf[32];
-        auto push = [&](const std::string& chip, const std::string& key, const std::string& spec, float v, bool pwm) {
-            if (pwm)
-                snprintf(buf, sizeof buf, "%d", (int)(v + 0.5f));
-            else
-                snprintf(buf, sizeof buf, "%.1f", (double)v);
-            bool inUse = std::find(used.begin(), used.end(), spec) != used.end();
-            entries.push_back({chip, key, buf, inUse ? 0 : pwm ? 2 : 1});
-        };
-
         std::vector<std::string> chips;
         for (auto& r : all)
+        {
+            if (r.pwm)
+                continue; // in "_outs"
             if (std::find(chips.begin(), chips.end(), r.chip) == chips.end())
                 chips.push_back(r.chip);
-        for (auto& chip : chips)
-        {
-            std::vector<hwmon::Reading*> pwms;
-            for (auto& r : all)
-                if (r.chip == chip)
-                {
-                    if (r.pwm) pwms.push_back(&r);
-                    else push(chip, r.label, chip + ":" + r.label, r.value, false);
-                }
-            if (pwms.empty())
-                continue;
-            bool& split = pwmSplit_[chip];
-            for (auto* p : pwms)
-                if ((int)(p->value + 0.5f) != (int)(pwms[0]->value + 0.5f))
-                    split = true;
-            if (split || pwms.size() == 1)
-                for (auto* p : pwms) push(chip, p->label, chip + ":" + p->label, p->value, true);
-            else
-                push(chip, pwms.front()->label + "-" + pwms.back()->label.substr(3),
-                     chip + ":" + pwms.front()->label, pwms[0]->value, true);
+            snprintf(buf, sizeof buf, "%.1f", (double)r.value);
+            bool inUse = std::find(used.begin(), used.end(), r.chip + ":" + r.label) != used.end();
+            entries.push_back({r.chip, r.label, buf, inUse ? 0 : 1});
         }
 
         // fit: take entries by priority (order kept within a priority) while
@@ -1662,7 +1618,7 @@ private:
         std::vector<bool> take(entries.size(), false);
         std::vector<std::string> open; // chips already counted
         size_t dropped = 0;
-        for (int prio = 0; prio <= 2; prio++)
+        for (int prio = 0; prio <= 1; prio++)
             for (size_t i = 0; i < entries.size(); i++)
             {
                 auto& e = entries[i];
@@ -1693,9 +1649,10 @@ private:
                 continue;
             j += (j.size() > 1 ? "," : "") + std::string("\"") + cfgedit::escape(chip) + "\":{" + g + "}";
         }
+        if (dropped || outsLeft)
+            j += (j.size() > 1 ? "," : "") + std::string("\"_more\":") + std::to_string(dropped + outsLeft);
         if (dropped)
         {
-            j += (j.size() > 1 ? "," : "") + std::string("\"_more\":") + std::to_string(dropped);
             if (!warnedSensors_)
                 fprintf(stderr, "fans: the sensor catalogue is over the dashboard's %u bytes — %zu of %zu "
                                 "sensors are left out of the phone's picker (they can still be typed)\n",
@@ -1859,8 +1816,6 @@ private:
             if ((!old || old->name != n.name) && (n.name.empty() || utf8Chars(n.name) > NAME_CHARS))
                 return bad(at + ".n", "a name is 1.." + std::to_string(NAME_CHARS) + " characters");
 
-            // what the input reads depends on the output too (the board's own
-            // curve, a blank input, reads the output)
             bool inputMoved = !old || old->input != n.input || old->output != n.output;
             bool outputMoved = !old || old->output != n.output;
 
@@ -1873,15 +1828,12 @@ private:
                     return bad(at + ".i", "\"" + n.input + "\" is not a sensor on this machine "
                                           "(nothing in " + hwmon::root() + " matches)");
             }
-            // an output handed from the board to the host is checked like a
-            // new one: taking it over is what needs a writable driver
-            bool takenOver = old && old->kind == Fan::Board && n.kind != Fan::Board;
-            if ((outputMoved || takenOver) && n.out == Fan::Host)
+            if (outputMoved && n.out == Fan::Host)
             {
                 std::string p = findChipFile(n.outChip, n.outFile);
                 if (p.empty())
                     return bad(at + ".o", "\"" + n.output + "\" is not a pwm output on this machine");
-                if (n.kind != Fan::Board && !pwmout::writable(p))
+                if (!pwmout::writable(p))
                     return bad(at + ".o", "\"" + n.output + "\" is read-only here — its driver can't set "
                                           "it (on the BC-250 the nct6687 driver can, the in-kernel nct6683 "
                                           "can't)");
@@ -1908,7 +1860,7 @@ private:
                 }
                 n.rt = rt;
             }
-            if (n.out == Fan::Host && n.kind != Fan::Board && n.rt.outPath.empty())
+            if (n.out == Fan::Host && n.rt.outPath.empty())
                 resolveOutput(n);
         }
 
@@ -2184,7 +2136,6 @@ private:
     bool warnedSensors_ = false;
     bool warnedOuts_ = false;        // host outputs left out of the catalogue (said once)
     bool warnedSensorsSize_ = false; // the catalogue over the ceiling even trimmed (said once)
-    std::map<std::string, bool> pwmSplit_; // chip -> its pwm outputs have differed this watch
 
     double lastTick_ = 0;
     double lastSent_ = -1e9;

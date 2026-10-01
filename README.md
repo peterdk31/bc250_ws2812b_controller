@@ -835,7 +835,8 @@ NCT6686D — the way CoolerControl does (see [Host outputs](#host-outputs)).
 Everything about the fans is the config's `fans` block: a list of fans, each
 an **input** read through a **curve** onto an **output**. Every fan has a
 `name`, an `output`, an `input` and a `fallback`, a `curve` for every input
-but `fallback` (and the board's own, below), optionally a `boost`, and
+but `fallback` (a parked fan's curve and fallback are optional — it drives
+nothing), optionally a `boost`, and
 optionally its tunings — `hysteresis`, `ramp`, `boost_seconds`. The list's
 order is the phone's; there is nothing global in the block.
 
@@ -883,7 +884,7 @@ order is the phone's; there is nothing global in the block.
 | `headerN` | header N of the receiver's board — the board's header → GPIO map (`tools/pincheck.py` `FAN_PINS`; the carrier's FAN1–FAN4 = GPIO5, 6, 7, 10) |
 | `gpio:N` | a receiver GPIO by number, for a hand-wired build |
 | `chip:pwmN` | a pwm output of the host, driven by the daemon — see [Host outputs](#host-outputs) |
-| `""` | nothing: the fan is *parked*, its settings kept for later |
+| `""` | nothing: the fan is *parked*, its settings kept for later. Its input still shows on the phone — a host fan header as the input (`"output": "", "input": "nct6686:pwm2"`) is how to watch what the board runs there, duty and rpm |
 
 Every output is a runtime setting: the phone can move a fan to another header
 or pin, and the receiver attaches its PWM there at once. The fans on receiver
@@ -907,15 +908,14 @@ so does *where the curve runs* — on whichever side can read the input:
 | `pmbus:CPU VRM` / `pmbus:GPU VRM` | the BC-250's two VRM rails, read from the board's PMBus controller over I2C by the daemon itself — see [VRM and GDDR6 temperatures](#vrm-and-gddr6-temperatures) for the two-wire mod that exposes the bus. Listed in the picker once the controller answers | °C | daemon |
 | `smu:VRAM hotspot` / `smu:VRAM average` / `smu:VRAM 0`..`7` | the eight GDDR6 chips, read from the SMU by the daemon — the hottest, the mean, or a named chip. Off unless `"vram_temps": true` and the SMU has been unlocked by a patched BIOS; see [VRM and GDDR6 temperatures](#vrm-and-gddr6-temperatures). Code 80 saturates the sensor at 120 °C. Listed in the picker once patched | °C | daemon |
 | `file:/path` | one temperature in a plain file, in millidegrees (the sysfs convention: 1000 and up) or degrees. For telemetry some other program publishes as files. Files under `/run/bc250` named `*_temp` are listed in the picker; any other path goes in through its *Temperature file…* row | °C | daemon |
-| `chip:pwmN` | a hwmon pwm *output* — the board's own fan header, i.e. what its BIOS fan curve is asking for, read over the host instead of a wire. Outputs that read alike are one line in the phone's picker (`pwm 1–8`, following the first) until they differ | % (0..255 read as 0..100) | daemon |
+| `chip:pwmN` | a hwmon pwm *output* — the board's own fan header, i.e. what its BIOS fan curve is asking for, read over the host instead of a wire. The phone's picker lists each one with its rpm. Not one the daemon drives (it would read its own duty back), so not the fan's own output either | % (0..255 read as 0..100) | daemon |
 | `cpu_load` / `gpu_load` | the rule conditions' readings | % | daemon |
-| `""` (blank) | a host output only: `"output": "nct6686:pwm2", "input": ""` — the **board's own curve** runs it, as if the daemon weren't there. No curve | — | the board |
 
 **`curve`** is `x:percent` points in one string (up to eight), linear
 between points and flat beyond the ends, so a curve never has to spell out 0
 or 100 on the x axis. Floors, ceilings and scaling all live in the curve
-(`"0:25 100:80"` is a floor of 25 scaled to 80 %). A `fallback` input (and the
-board's own) takes no curve and every other input needs one — the daemon (and
+(`"0:25 100:80"` is a floor of 25 scaled to 80 %). A `fallback` input takes
+no curve and every other input needs one (a parked fan's is optional) — the daemon (and
 `make flash`) refuse the other combinations, along with an unknown or missing
 key, so a typo is a startup error rather than a silently odd fan. A `gpio`
 curve's inputs are whole percents 0..100, an `esp32_temp` curve's whole °C
@@ -1050,10 +1050,9 @@ output to the board, and the phone's card reads "read-only". Only one program
 may drive an output: stop CoolerControl or `fancontrol` for the outputs the
 config names (the daemon notices a pwm value it didn't write and says so).
 
-Switching between the board and the host is the input, from the phone or the
-file: a blank input (`"input": ""` on that output)
-hands it to the board, any other input takes it over again, and `""` parks the
-fan the same way. A host output's `fallback` is what it runs while its input
+Switching between the board and the host is the output, from the phone or the
+file: a host output no fan names is the board's — park the fan (`"output": ""`)
+to hand it back, and make the header its input to keep watching it there. A host output's `fallback` is what it runs while its input
 can't be read; it has no `boost`.
 
 **The board always gets its output back.** Every write to a `pwmN_enable`

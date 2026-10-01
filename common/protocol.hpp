@@ -279,10 +279,9 @@ static const uint8_t CMD_FAN_TELEM = 0x0B;
 static const uint8_t CMD_STRIP_CONFIG = 0x0C;
 
 // CMD_FAN_SENSORS: the catalogue a fan could follow — every hwmon
-// temperature with a label and every pwm output, grouped by chip, with its
-// reading right now: {"amdgpu":{"edge":61.0},"nct6686":{"CPU":52.0,"pwm1":48}}
-// (pwm outputs that have read alike since the phone started watching are one
-// entry, "pwm1-8") — and "_outs", every host pwm output a fan could drive
+// temperature with a label, grouped by chip, with its reading right now:
+// {"amdgpu":{"edge":61.0},"nct6686":{"CPU":52.0}} — and "_outs", every host
+// pwm output with its duty and rpm, one a fan could drive or follow
 // (daemon/fans.hpp sensorsJson). JSON text, at most DASH_FAN_SENSORS_MAX
 // bytes. Only while a phone is watching, every 5 s (a stale reading is fine
 // for choosing an input; the per-fan readings the rows need travel in

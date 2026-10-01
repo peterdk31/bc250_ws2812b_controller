@@ -83,10 +83,9 @@ class Host {
   }
   // what the daemon reports per fan (fans.hpp telemetryJson)
   telemOf(f) {
-    const out = outInfo(f.o), s = srcInfo(f.i, f.o), x = this.reading(s.kind, s.spec);
+    const out = outInfo(f.o), s = srcInfo(f.i), x = this.reading(s.kind, s.spec);
     const pts = parseCurve(f.c), fb = f.f ?? 100;
     if (out.kind === 'host') {
-      if (s.kind === 'board') { const o = this.outs.find(q => q[0] === f.o); return { in: o ? o[1] : 48, duty: o ? o[1] : 48, st: 'board' }; }
       if (x === undefined) return { duty: fb, st: 'host' };
       return { in: x, duty: curveAt(pts, x) ?? fb, st: 'host' };
     }
@@ -122,6 +121,7 @@ class Host {
       if (f.b === null) delete f.b;
       if (next.some((x, i) => x.o && x.o === f.o && ('add' in edit || i !== edit.fan))) return `"${f.o}" is another fan's output already — one fan per output`;
       if (f.o && outInfo(f.o).kind === 'host' && !this.outs.some(o => o[0] === f.o && o[3])) return `"${f.o}" is not a pwm output on this machine`;
+      if (f.o && f.i === f.o) return 'a host output can\'t follow itself';
       if ('add' in edit) next.push(f); else next[edit.fan] = f;
     }
     this.fans = next;
@@ -175,7 +175,7 @@ class Board {
     for (const f of fans) {
       const out = outInfo(f.o);
       if ((out.kind !== 'header' && out.kind !== 'gpio') || slot >= CHANNELS) continue;
-      const s = srcInfo(f.i, f.o);
+      const s = srcInfo(f.i);
       const kind = s.kind === 'fallback' || s.kind === 'gpio' || s.kind === 'esp32_temp' ? s.kind : 'host';
       this.slots[slot++] = { out, fallback: f.f ?? 100, boost: f.b ?? NONE, boostSecs: f.t ?? 5, ramp: f.r ?? 5, kind,
                              gpio: s.kind === 'gpio' ? s.gpio : NONE, pts: ownCurve(s) ? parseCurve(f.c) : [] };
@@ -423,14 +423,15 @@ const bc250 = new Board({
       { n: 'exhaust', o: 'header3', i: 'gpio:0', c: '0:25 100:80', f: 100, r: 0 },
       { n: 'intake', o: 'header4', i: 'gpu_load', c: '0:20 40:20 100:60', f: 60 },
       { n: 'board fan', o: 'nct6686:pwm2', i: 'k10temp:Tctl', c: '50:30 80:100', f: 60 },
+      { n: 'chipset', o: '', i: 'nct6686:pwm1' },
       { n: 'spare', o: '', i: 'fallback', f: 40 } ],
     strip: { leds: 33, pin: 4, reverse: false, brightness: 1, gamma: '2.2', white_balance: 'ffb0f0', scenes: [
       { p: '/tmp/led-static-color', e: 'solid', on: false, color: 'ffffff', l: 0.6 },
       { p: '/tmp/led-night', e: 'drift', on: false } ] },
     power: { hold_seconds: 2, boot_timeout_seconds: 10, sense_low_mv: 800, sense_high_mv: 2000, wake: null, short_press: 'systemctl poweroff' },
     chips: { amdgpu: { edge: 61.0, junction: 64.5, mem: 58.0 }, k10temp: { Tctl: 58.3 },
-             nct6686: { CPU: 52.0, System: 38.5, 'VRM MOS': 41.0, 'pwm1-8': 48 } },
-    outs: [['nct6686:pwm1', 48, -1, 1], ['nct6686:pwm2', 57, 1420, 1], ['amdgpu:pwm1', 30, 900, 0]],
+             nct6686: { CPU: 52.0, System: 38.5, 'VRM MOS': 41.0 } },
+    outs: [['nct6686:pwm1', 48, 1100, 1], ['nct6686:pwm2', 57, 1420, 1], ['amdgpu:pwm1', 30, 900, 0]],
   }),
 });
 const desk = new Board({

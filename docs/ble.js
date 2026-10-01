@@ -27,7 +27,7 @@
 //                          write  token(16) + a partial edit, same shape
 //   fansa   a5f20009-... : read/notify  the receiver's standalone fan settings
 //   sensors a5f2000a-... : read/notify  the daemon's sensor catalogue, JSON text
-//                          {"chip":{"label":61.0,"pwm1-8":48}} (fans.hpp sensorsJson)
+//                          {"chip":{"label":61.0},"_outs":[...]} (fans.hpp sensorsJson)
 //   pwr     a5f2000b-... : read/notify  the receiver's own power switch view
 //                          (parsePwr): wiring, tunings in force, the sense
 //                          wire's live reading — notified 1 Hz while subscribed
@@ -536,25 +536,22 @@ export async function forget() {
 // ---- the dashboard's data ----
 // A fan is an input read through a curve onto an output (daemon/fans.hpp).
 // Its input: the config's string ("fallback", "gpio:0", "esp32_temp", "temp",
-// "amdgpu:edge", "nct6686:pwm1", "cpu_load", "gpu_load" — or, on a host
-// output, "": the board drives it) → its kind and parts
+// "amdgpu:edge", "nct6686:pwm1", "cpu_load", "gpu_load") → its kind and parts
 export const SRC_KINDS = {
   fallback: { label: 'Fixed speed', hint: 'runs at the fallback speed, always' },
   gpio:     { label: 'PWM input', hint: 'a fan wire on a receiver pin' },
   esp32_temp: { label: 'Receiver temperature', hint: 'the temperature of the receiver’s own chip' },
   temp:     { label: 'CPU temperature' },
   hwmon:    { label: 'Sensor', hint: 'chip:label, e.g. amdgpu:edge, pmbus:GPU VRM or smu:VRAM hotspot' },
-  pwm:      { label: 'Board fan header', hint: 'chip:pwmN, e.g. nct6686:pwm1' },
+  pwm:      { label: 'Host fan header', hint: 'chip:pwmN, e.g. nct6686:pwm1' },
   cpu_load: { label: 'CPU load' },
   gpu_load: { label: 'GPU load' },
-  board:    { label: 'Board curve', hint: 'the board runs this output itself, not the host' },
   host:     { label: 'Host curve', hint: 'an input only the host reads' },
 };
 export const HOST_KINDS = ['temp', 'hwmon', 'pwm', 'cpu_load', 'gpu_load']; // the daemon runs these
 export const FILE_PREFIX = 'file:'; // hwmon.hpp: a spec naming a file holding one temperature
-export function srcInfo(s, output = '') {
+export function srcInfo(s) {
   s = String(s || '');
-  if (!s && outInfo(output).kind === 'host') return { kind: 'board', src: '' };
   if (s === 'fallback' || s === 'constant') return { kind: 'fallback', src: 'fallback' };
   if (s === 'temp' || s === 'cpu_load' || s === 'gpu_load' || s === 'esp32_temp') return { kind: s, src: s };
   const i = s.indexOf(':'), chip = i < 0 ? s : s.slice(0, i), lbl = i < 0 ? '' : s.slice(i + 1);
@@ -563,7 +560,7 @@ export function srcInfo(s, output = '') {
   return { kind: 'hwmon', src: s, spec: s };
 }
 // the config string a working copy's input stands for
-export const srcText = h => h.kind === 'gpio' ? `gpio:${h.gpio}` : h.kind === 'board' ? ''
+export const srcText = h => h.kind === 'gpio' ? `gpio:${h.gpio}`
   : (h.kind === 'hwmon' || h.kind === 'pwm') ? (h.spec || '') : h.kind;
 // its output: "" (parked), "headerN", "gpio:N", "chip:pwmN" (a host output)
 export function outInfo(o) {
@@ -585,7 +582,10 @@ export function outPin(o) {
 }
 export const outLabel = o => o.kind === 'header' ? `Header ${o.num}` : o.kind === 'gpio' ? `GPIO${o.num}`
   : o.kind === 'host' ? o.spec.replace(':', ' ') : 'No output';
-export const isFixed = h => h.kind === 'fallback' || h.kind === 'board'; // no curve
+export const isFixed = h => h.kind === 'fallback'; // no curve
+// a parked fan following a host header: it only shows what the board runs
+// there (curve, fallback and boost do nothing until it has an output)
+export const watchOnly = h => h.out.kind === 'parked' && h.kind === 'pwm';
 export const isTempX = h => h.kind === 'temp' || h.kind === 'hwmon' || h.kind === 'esp32_temp'; // the curve's x is °C
 export const TEMP_MAX = 200; // °C, the daemon's hwmon::TEMP_MAX: no reading goes above it
 // the receiver runs this fan's curve itself (fanwire::Header::ownCurve): its
@@ -731,7 +731,7 @@ export const liveOf = c => c && c.slot >= 0 && S.fans ? S.fans.h[c.slot] : null;
 export const telemOf = c => c && c.index >= 0 && S.fans && S.fans.telem && S.telem ? S.telem.fans[c.index] || null : null;
 // the reading a card's curve sees right now: a gpio input's from the
 // receiver (it samples the pin), the receiver's temperature from its own
-// view, a host input's (and the board's own duty) from the daemon's telemetry
+// view, a host input's from the daemon's telemetry
 export function inputOf(c) {
   if (!c) return null;
   if (c.kind === 'gpio') { const f = liveOf(c); return f && f.in !== NONE ? f.in : null; }
@@ -747,20 +747,26 @@ export function readingOf(kind, c) {
   if (kind === 'gpu_load') return t && t.gpu !== undefined ? t.gpu : null;
   if (kind === 'gpio') { const f = liveOf(c); return f && f.kind === KIND_BYTE.gpio && f.in !== NONE ? f.in : null; }
   if (kind === 'esp32_temp') return S.fans ? S.fans.temp : null;
-  if (kind === 'board' && c) { const o = S.outs && S.outs.find(x => x.spec === c.output); return o ? o.duty : null; }
   return null;
 }
-// a catalogue entry's reading by its spec ("amdgpu:edge", "nct6686:pwm1"), null when not listed
+// the rpm a host pwm output's tachometer reads ("nct6686:pwm2"), null with none
+export function rpmOf(spec) {
+  const o = S.outs && S.outs.find(x => x.spec === spec);
+  return o ? o.rpm : null;
+}
+// a catalogue entry's reading by its spec ("amdgpu:edge", "nct6686:pwm1" —
+// a host output's duty), null when not listed
 export function sensorReading(spec) {
   const e = S.sens && S.sens.find(x => x.spec === spec);
-  return e ? e.value : null;
+  if (e) return e.value;
+  const o = S.outs && S.outs.find(x => x.spec === spec);
+  return o ? o.duty : null;
 }
 
 // the daemon's sensor catalogue (fans.hpp sensorsJson): chips → labelled
-// readings; a "pwm1-8" key is one entry standing for a run of pwm outputs
-// that read alike — its spec is the first of them. "_more" counts sensors
-// that did not fit (S.sensMore); they can still be typed. "_outs" lists the
-// host's pwm outputs a fan could drive (S.outs)
+// temperatures. "_outs" lists the host's pwm outputs (S.outs), each one an
+// output a fan could drive and an input a fan could follow. "_more" counts
+// what did not fit (S.sensMore); it can still be typed
 export function parseSensors(text) {
   let j;
   try { j = JSON.parse(text); } catch { return null; }
@@ -773,11 +779,8 @@ export function parseSensors(text) {
     if (chip === '_outs' || chip === '_more') continue;
     const g = j[chip];
     if (!g || typeof g !== 'object') continue;
-    for (const k of Object.keys(g)) {
-      const m = /^pwm(\d+)(?:-(\d+))?$/.exec(k);
-      if (m) out.push({ spec: `${chip}:pwm${m[1]}`, chip, label: m[2] ? `pwm ${m[1]}–${m[2]}` : `pwm ${m[1]}`, pwm: true, value: +g[k] });
-      else out.push({ spec: `${chip}:${k}`, chip, label: chip === 'file' ? k.split('/').pop() : k, pwm: false, value: +g[k] }); // a file entry's key is its path
-    }
+    for (const k of Object.keys(g)) // a file entry's key is its path
+      out.push({ spec: `${chip}:${k}`, chip, label: chip === 'file' ? k.split('/').pop() : k, value: +g[k] });
   }
   return out;
 }
@@ -798,7 +801,7 @@ export function parseCfg(text) {
   if (!j || typeof j !== 'object' || !Array.isArray(j.fans)) return null;
   return { editable: !!j.editable, rev: String(j.rev || ''), err: typeof j.err === 'string' ? j.err : '',
            fans: j.fans.map(h => {
-             const output = String(h.o ?? ''), s = srcInfo(h.i, output);
+             const output = String(h.o ?? ''), s = srcInfo(h.i);
              return { name: String(h.n || ''), output, out: outInfo(output), ...s, pts: isFixed(s) ? [] : parseCurve(h.c),
                       boost: h.b === null || h.b === undefined ? NONE : +h.b,
                       fallback: h.f === undefined ? 100 : +h.f,
@@ -809,8 +812,8 @@ export function parseCfg(text) {
 // which settings a fan has (fans.hpp TUNINGS, and the boost's rule): the
 // editor shows these, the daemon refuses the others
 export const hasHyst = h => h.kind === 'temp' || h.kind === 'hwmon'; // a temperature the host reads (the receiver smooths its own)
-export const hasRamp = h => !isFixed(h);                // an input with a curve
-export const hasBoost = h => h.out.kind !== 'host';     // the receiver runs a boost, before the host is up
+export const hasRamp = h => !isFixed(h) && !watchOnly(h);                // an input with a curve
+export const hasBoost = h => h.out.kind !== 'host' && !watchOnly(h);     // the receiver runs a boost, before the host is up
 export const hasBoostSecs = h => hasBoost(h) && h.boost !== NONE; // a fan with a boost
 
 // the daemon's telemetry JSON -> { temp, cpu, gpu, fans[index]: { in, duty, st } | null }
@@ -1160,15 +1163,15 @@ export function checkEdit(h, key) {
   if (h.out.kind === 'host' && !/^[^:\s]+:pwm\d+$/.test(h.output)) return 'a host output is chip:pwmN, e.g. nct6686:pwm2';
   if (h.kind === 'gpio' && h.out.kind === 'host') return 'a PWM input is read by the receiver, which can’t drive a host output';
   if (h.kind === 'esp32_temp' && h.out.kind === 'host') return 'the receiver’s temperature is read by the receiver, which can’t drive a host output';
-  if (h.kind === 'board' && h.out.kind !== 'host') return 'only a host output has a board curve';
+  if (h.kind === 'pwm' && h.out.kind === 'host' && h.spec === h.output) return 'a host header can’t follow itself';
   if (h.kind === 'gpio' && !(Number.isInteger(h.gpio) && h.gpio >= 0 && h.gpio <= 48)) return 'the pin is a number 0–48';
   if (h.kind === 'gpio' && h.out.kind === 'gpio' && h.gpio === h.out.num) return 'a pin can’t be the input and the output';
   if (h.kind === 'hwmon' && (h.spec || '').startsWith(FILE_PREFIX) && !/^\/\S/.test(h.spec.slice(FILE_PREFIX.length))) // the daemon insists on an absolute path
     return 'a temperature file is its full path, e.g. /tmp/some_custom_temp_reading';
   if ((h.kind === 'hwmon' || h.kind === 'pwm') && !/^[^:\s]+:\S[^:]*$/.test(h.spec || '')) // a label may hold spaces ("AMD TSI Addr 98h", "CPU VRM")
-    return h.kind === 'pwm' ? 'a board fan header is chip:pwmN, e.g. nct6686:pwm1' : 'a sensor is chip:label, e.g. amdgpu:edge';
-  if (h.kind === 'pwm' && !/:pwm\d+$/.test(h.spec)) return 'a board fan header is chip:pwmN, e.g. nct6686:pwm1';
-  if (!isFixed(h)) {
+    return h.kind === 'pwm' ? 'a host fan header is chip:pwmN, e.g. nct6686:pwm1' : 'a sensor is chip:label, e.g. amdgpu:edge';
+  if (h.kind === 'pwm' && !/:pwm\d+$/.test(h.spec)) return 'a host fan header is chip:pwmN, e.g. nct6686:pwm1';
+  if (!isFixed(h) && !watchOnly(h)) {
     if (!h.pts.length) return 'a curve needs at least one point';
     if (h.pts.length > MAX_POINTS) return `at most ${MAX_POINTS} points`;
     const xs = new Set();
@@ -1185,7 +1188,7 @@ export function checkEdit(h, key) {
   if (hasHyst(h) && !(h.hyst >= 0)) return 'hysteresis is 0 °C or more';
   if (hasRamp(h) && !(h.ramp >= 0 && h.ramp <= 255)) return 'the ramp is 0–255 % per second';
   if (hasBoostSecs(h) && !(Number.isInteger(h.boostSecs) && h.boostSecs >= 0 && h.boostSecs <= 255)) return 'the boost runs 0–255 whole seconds';
-  if (!(h.fallback >= 0 && h.fallback <= 100)) return 'the fallback speed is 0–100 %';
+  if (!watchOnly(h) && !(h.fallback >= 0 && h.fallback <= 100)) return 'the fallback speed is 0–100 %';
   return '';
 }
 
@@ -1247,8 +1250,9 @@ async function writeRecord(slot, h, key) {
 // a card's fan in the daemon's short keys (fans.hpp): everything that
 // applies to it, so the daemon holds the whole fan to its rules
 function fanEdit(h) {
-  const e = { n: h.name.trim(), o: h.output, i: srcText(h), f: h.fallback };
-  if (!isFixed(h)) e.c = curveText(h.pts);
+  const e = { n: h.name.trim(), o: h.output, i: srcText(h) };
+  if (!watchOnly(h)) e.f = h.fallback;
+  if (!isFixed(h) && !watchOnly(h)) e.c = curveText(h.pts); // a watch-only fan's stays as the config has it
   if (hasBoost(h)) e.b = h.boost === NONE ? null : h.boost;
   if (hasHyst(h)) e.h = h.hyst;
   if (hasRamp(h)) e.r = h.ramp;

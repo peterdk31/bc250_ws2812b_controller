@@ -284,15 +284,17 @@ function PowerSheet() {
 
 // ---- Fans ----
 // a card is two tiles, input → output: the input's name over its reading,
-// the output's name over the duty it runs. A parked fan is the input tile
-// alone, so an input can be tried before it drives anything — only a gpio
-// input has no reading then (the receiver samples a pin for a fan it runs).
-// While something else runs the fan instead of its input the chip names it
-// and the input tile dims; a line under the tiles adds what the chip can't.
+// the output's name over the duty it runs (and the rpm, where a tachometer
+// reads one). A parked fan is the input tile alone, so an input can be tried
+// before it drives anything — a host header as its input shows what the
+// board runs there; only a gpio input has no reading then (the receiver
+// samples a pin for a fan it runs). While something else runs the fan
+// instead of its input the chip names it and the input tile dims; a line
+// under the tiles adds what the chip can't.
 const INPUT_NAMES = { fallback: 'Fixed speed', host: 'Host curve', temp: 'CPU temperature', cpu_load: 'CPU load',
-                      gpu_load: 'GPU load', board: 'Board curve', esp32_temp: 'Receiver temperature' };
+                      gpu_load: 'GPU load', esp32_temp: 'Receiver temperature' };
 const inputName = c => c.kind === 'gpio' ? `PWM on GPIO${c.gpio}` : c.kind === 'hwmon' ? c.spec
-  : c.kind === 'pwm' ? `Board fan header ${c.spec}` : INPUT_NAMES[c.kind] ?? c.src;
+  : c.kind === 'pwm' ? c.spec.replace(':', ' ') : INPUT_NAMES[c.kind] ?? c.src;
 const HOST_STATES = { gone: 'not found on this machine', ro: 'read-only driver — the board runs it', busy: 'not driven by this host',
                       board: 'the board runs it' };
 // what runs a fan instead of its input when the chip alone can't say it
@@ -301,24 +303,26 @@ function stateOf(c) {
   if (c.out.kind === 'parked') return null;
   const f = B.liveOf(c), t = B.telemOf(c);
   if (B.isReceiverOut(c.out) && f && !f.wired) return 'not driven by the receiver';
-  if (c.out.kind === 'host' && t && t.st && t.st !== 'host' && !(t.st === 'board' && c.kind === 'board')) return HOST_STATES[t.st] || t.st;
+  if (c.out.kind === 'host' && t && t.st && t.st !== 'host') return HOST_STATES[t.st] || t.st;
   return null;
 }
-// the input tile's big value, [number, unit]: a fixed speed is its duty, the
-// board's curve has no reading of its own, anything else reads what the curve sees
+// the input tile's big value, [number, unit]: a fixed speed is its duty,
+// anything else reads what the curve sees
 function inputValue(c) {
   if (c.kind === 'fallback') return [c.fallback, '%'];
-  if (c.kind === 'board') return ['auto', ''];
   const now = c.kind === 'gpio' && c.out.kind === 'parked' ? null : B.inputOf(c);
   return now === null ? ['—', ''] : [fmt1(now), B.isTempX(c) ? '°C' : '%'];
 }
 const Val = ({ v: [n, unit] }) => html`<span class="v">${n}${unit && html`<small>${unit}</small>`}</span>`;
+// a tile's rpm line, where a tachometer reads one
+const Rpm = ({ rpm }) => rpm !== null && rpm !== undefined ? html`<span class="rpm">${rpm} rpm</span>` : null;
+const withRpm = (text, rpm) => rpm !== null && rpm !== undefined ? `${text} · ${rpm} rpm` : text;
 
 // the exception chip: only when the fan is not doing what it is set up for
 function chipOf(c) {
   if (c.out.kind === 'host') {
     const t = B.telemOf(c);
-    if (!t || !t.st || t.st === 'host' || (t.st === 'board' && c.kind === 'board')) return null;
+    if (!t || !t.st || t.st === 'host') return null;
     return ['fallback', t.st === 'gone' ? 'no output' : t.st === 'ro' ? 'read-only' : t.st === 'busy' ? 'not driven' : 'board'];
   }
   const f = B.liveOf(c);
@@ -331,7 +335,7 @@ function chipOf(c) {
 }
 
 // the duty a card runs right now: the receiver's for its outputs, the
-// daemon's telemetry for a host output (the board's own duty included)
+// daemon's telemetry for a host output
 function dutyOf(c) {
   if (B.isReceiverOut(c.out)) { const f = B.liveOf(c); return f && f.wired && f.duty !== B.NONE ? f.duty : null; }
   const t = B.telemOf(c);
@@ -342,7 +346,7 @@ function FanRow({ c, open, toggle }) {
   const duty = dutyOf(c);
   const chip = chipOf(c);
   const editable = c.route === 'daemon' ? !!(S.cfg && S.cfg.editable) : true;
-  const hasCurve = c.pts.length > 0 && !B.isFixed(c);
+  const hasCurve = c.pts.length > 0 && !B.isFixed(c) && !B.watchOnly(c);
   const parked = c.out.kind === 'parked';
   const state = stateOf(c);
   return html`<div class="card fan ${open && hasCurve ? 'open' : ''}">
@@ -353,11 +357,13 @@ function FanRow({ c, open, toggle }) {
         <div class="tile ${state || chip ? 'idle' : ''}">
           <span class="s">${inputName(c)}</span>
           <${Val} v=${inputValue(c)} />
+          ${c.kind === 'pwm' && html`<${Rpm} rpm=${B.rpmOf(c.spec)} />`}
         </div>
         ${!parked && html`<span class="to"><${Icon} d=${I.right} size=${18} /></span>
         <div class="tile">
           <span class="s">${B.outLabel(c.out)}</span>
           <${Val} v=${duty === null ? ['—', ''] : [duty, '%']} />
+          ${c.out.kind === 'host' && html`<${Rpm} rpm=${B.rpmOf(c.output)} />`}
           <div class="bar ${chip ? chip[0] : ''}"><i style=${`width: ${duty === null ? 0 : duty}%`}></i></div>
         </div>`}
       </div>
@@ -455,7 +461,7 @@ function Curve({ h, now = null, editing = false, onChange }) {
 const defaultCurve = h => h.kind === 'esp32_temp' ? [{ x: 30, y: 30 }, { x: 50, y: 100 }] // the case air, not a die
   : B.isTempX(h) ? [{ x: 40, y: 30 }, { x: 70, y: 100 }] : [{ x: 0, y: 20 }, { x: 100, y: 100 }];
 // the input changed kind: keep a curve whose x unit still fits, start a
-// fresh one otherwise, none for a fixed speed or the board's own curve
+// fresh one otherwise, none for a fixed speed
 function withKind(h, kind) {
   const wasTemp = B.isTempX(h), hadCurve = !B.isFixed(h);
   const n = { ...h, kind, pts: h.pts.map(p => ({ ...p })) };
@@ -467,58 +473,67 @@ function withKind(h, kind) {
   return n;
 }
 // the output changed: an input the new output can't have becomes a fixed
-// speed (the board's own curve anywhere but its own output; a receiver-run
-// input on a host output, which the picker doesn't offer), and a host output
-// drops the boost (the receiver's alone)
+// speed (a receiver-run input on a host output, which the picker doesn't
+// offer), a host output drops the boost (the receiver's alone), and a fan
+// that only watched a host header gets a curve to drive with
 function withOutput(h, output) {
   let n = { ...h, output, out: B.outInfo(output) };
-  if (h.kind === 'board' && n.out.kind !== 'host') n = withKind(n, 'fallback');
   if (B.ownCurve(h) && n.out.kind === 'host') n = withKind(n, 'fallback');
   if (n.out.kind === 'host') n.boost = B.NONE;
+  if (!B.isFixed(n) && !B.watchOnly(n) && !n.pts.length) n.pts = defaultCurve(n);
   return n;
 }
 const fmtReading = (kind, v) => v === null ? '—' : B.isTempX({ kind }) ? `${fmt1(v)} °C` : `${fmt1(v)} %`;
 // what a fan reads right now, for the picker: a catalogue spec's reading
-// for the hwmon kinds, the telemetry's otherwise
+// for the hwmon kinds, the telemetry's otherwise — with the rpm of the host
+// header a pwm input follows
 const readingFor = h => (h.kind === 'hwmon' || h.kind === 'pwm') ? B.sensorReading(h.spec) : B.readingOf(h.kind, h);
-// the picker's rows: the fixed kinds, then the catalogue (a row per sensor
-// and per board pwm output, picking fills the spec), then a row for a
-// temperature file (a typed path — the daemon lists /run/bc250's *_temp files
-// itself, anything else is named here), then an "other" row (the typed spec)
-// only when the catalogue can't stand in for typing: it was cut for size, the
-// fan follows a spec it doesn't list, or a chip's pwm outputs are still
-// one grouped entry (following one of them by name)
-const inCatalogue = spec => !!(spec && S.sens && S.sens.some(e => e.spec === spec));
+const rpmFor = h => h.kind === 'pwm' ? B.rpmOf(h.spec) : null;
+// the picker's rows: the fixed kinds, then the host's fan headers (a header
+// another fan drives can't be followed — it would read the daemon's own
+// duty — and the fan's own output isn't listed), then the catalogue's
+// temperatures (picking fills the spec), then a row for a temperature file
+// (a typed path — the daemon lists /run/bc250's *_temp files itself,
+// anything else is named here), then an "other" row (the typed spec) only
+// when the catalogue can't stand in for typing: it was cut for size, or the
+// fan follows a spec it doesn't list
+const hostOutOf = spec => S.outs && S.outs.find(o => o.spec === spec);
+const inCatalogue = spec => !!(spec && (S.sens && S.sens.some(e => e.spec === spec) || hostOutOf(spec)));
 const isFileSpec = spec => typeof spec === 'string' && spec.startsWith(B.FILE_PREFIX);
 const FILE_ROW = { label: 'Temperature file…', hint: 'a file another program keeps a temperature in',
                    placeholder: '/tmp/some_custom_temp_reading',
                    help: 'A plain text file holding one number: a temperature in degrees, or in millidegrees the way sysfs writes them (1000 and up). Give the full path. This is for a reading some other program of yours publishes as a file; files under /run/bc250 named *_temp are already listed above. The reading shows once the fan is saved and the daemon has read the file.' };
-function pickerRows(h, kinds) {
+function pickerRows(h, kinds, fkey) {
   const rows = [];
   const inCat = inCatalogue(h.spec);
   const typedFile = h.kind === 'hwmon' && isFileSpec(h.spec) && !inCat;
-  const grouped = !!(S.sens && S.sens.some(e => e.pwm && e.label.includes('–')));
-  const needOther = k => S.sensMore > 0 || (h.kind === k && !inCat && !typedFile) || (k === 'pwm' && grouped);
+  const needOther = k => S.sensMore > 0 || (h.kind === k && !inCat && !typedFile);
   for (const k of kinds) {
     if (k === 'hwmon' || k === 'pwm') continue;
     rows.push({ id: k, kind: k, label: B.SRC_KINDS[k].label, hint: B.SRC_KINDS[k].hint, disabled: k === 'host',
                 on: h.kind === k, value: fmtReading(k, B.readingOf(k, h)) });
   }
-  if (kinds.includes('hwmon') && S.sens) {
-    for (const e of S.sens) {
-      const kind = e.pwm ? 'pwm' : 'hwmon';
-      if (kind === 'pwm' && h.out.kind === 'host' && e.spec === h.output) continue; // following its own output is the board's curve, above
-      rows.push({ id: e.spec, kind, spec: e.spec, label: e.pwm ? `${e.chip} ${e.label}` : e.label, hint: e.pwm ? 'board fan header' : e.chip,
-                  on: h.kind === kind && h.spec === e.spec, value: fmtReading(kind, e.value) });
+  if (kinds.includes('pwm') && S.outs) {
+    const driven = new Map(B.cards().filter(c => c.key !== fkey && c.out.kind === 'host').map(c => [c.output, c.name || B.outLabel(c.out)]));
+    for (const o of S.outs) {
+      if (h.out.kind === 'host' && o.spec === h.output) continue;
+      const by = driven.get(o.spec);
+      rows.push({ id: o.spec, kind: 'pwm', spec: o.spec, label: o.spec.replace(':', ' '), hint: by ? `used by ${by}` : '',
+                  disabled: by !== undefined, on: h.kind === 'pwm' && h.spec === o.spec, value: withRpm(`${o.duty} %`, o.rpm) });
     }
+  }
+  if (kinds.includes('hwmon') && S.sens) {
+    for (const e of S.sens)
+      rows.push({ id: e.spec, kind: 'hwmon', spec: e.spec, label: e.label, hint: e.chip,
+                  on: h.kind === 'hwmon' && h.spec === e.spec, value: fmtReading('hwmon', e.value) });
   }
   if (kinds.includes('hwmon'))
     rows.push({ id: 'file', kind: 'hwmon', file: true, label: FILE_ROW.label, hint: FILE_ROW.hint,
                 on: typedFile, value: typedFile ? fmtReading('hwmon', B.sensorReading(h.spec)) : '' });
   for (const k of ['hwmon', 'pwm']) if (kinds.includes(k) && needOther(k))
-    rows.push({ id: 'other-' + k, kind: k, other: true, label: `Other ${k === 'pwm' ? 'board fan header' : 'sensor'}…`,
+    rows.push({ id: 'other-' + k, kind: k, other: true, label: `Other ${k === 'pwm' ? 'host fan header' : 'sensor'}…`,
                 hint: (k === 'hwmon' && S.sensMore ? `${S.sensMore} more than fit here — ` : '') + B.SRC_KINDS[k].hint,
-                on: h.kind === k && !inCat, value: h.kind === k && !inCat ? fmtReading(k, B.sensorReading(h.spec)) : '' });
+                on: h.kind === k && !inCat, value: h.kind === k && !inCat ? withRpm(fmtReading(k, B.sensorReading(h.spec)), rpmFor(h)) : '' });
   return rows;
 }
 
@@ -544,7 +559,7 @@ function outputRows(h, fkey) {
   for (const n of B.headerList()) add(`header${n}`, `Header ${n}`, 'a fan header on the receiver');
   const pins = S.info && S.info.outPins;
   if (pins) for (const g of pins) add(`gpio:${g}`, `GPIO${g}`, 'a free receiver pin');
-  if (daemon && S.outs) for (const o of S.outs) if (o.writable || o.spec === h.output)
+  if (daemon && S.outs) for (const o of S.outs) if ((o.writable || o.spec === h.output) && !(h.kind === 'pwm' && o.spec === h.spec))
     add(o.spec, o.spec.replace(':', ' '), o.writable ? 'a fan header on the host' : 'a fan header on the host (read-only)',
         `${o.duty} %${o.rpm !== null ? ` · ${o.rpm} rpm` : ''}`);
   if (!rows.some(r => r.on))
@@ -602,7 +617,7 @@ function FanEditor({ fkey }) {
   // fan follows it already, so the row that says so stays)
   const own = ['gpio', ...(S.fans && S.fans.temp !== null || h.kind === 'esp32_temp' ? ['esp32_temp'] : [])];
   const kinds = !daemon ? (h.kind === 'host' ? ['host', 'fallback', ...own] : ['fallback', ...own])
-    : hostOut ? ['board', 'fallback', ...B.HOST_KINDS]
+    : hostOut ? ['fallback', ...B.HOST_KINDS]
     : ['fallback', ...own, ...B.HOST_KINDS];
   const setPt = (i, p) => setH(x => { const pts = x.pts.map(q => ({ ...q })); pts[i] = { ...pts[i], ...p }; return { ...x, pts }; });
   const addPt = () => setH(x => {
@@ -619,8 +634,9 @@ function FanEditor({ fkey }) {
   const unit = B.isTempX(h) ? '°C' : '%';
   const saving = S.saving !== null;
   const cur = B.SRC_KINDS[h.kind];
-  const curEntry = (h.kind === 'hwmon' || h.kind === 'pwm') && S.sens && S.sens.find(e => e.spec === h.spec);
-  const curLabel = curEntry ? (curEntry.pwm ? `${curEntry.chip} ${curEntry.label}` : curEntry.label)
+  const curEntry = h.kind === 'hwmon' ? S.sens && S.sens.find(e => e.spec === h.spec)
+                 : h.kind === 'pwm' ? hostOutOf(h.spec) && { label: h.spec.replace(':', ' ') } : null;
+  const curLabel = curEntry ? curEntry.label
                  : h.kind === 'hwmon' && h.spec === B.FILE_PREFIX ? FILE_ROW.label.replace('…', '') // a file row picked, no path yet
                  : (h.kind === 'hwmon' || h.kind === 'pwm') && h.spec ? h.spec : cur.label;
   const typed = (h.kind === 'hwmon' || h.kind === 'pwm') && (other || !curEntry); // a spec the catalogue doesn't list, or chosen to type
@@ -631,7 +647,8 @@ function FanEditor({ fkey }) {
     <div class="list">
       ${daemon && html`<div class="card"><input class="text" type="text" maxlength=${B.NAME_CHARS} autocomplete="off" aria-label="Name" placeholder="name" value=${h.name} onInput=${e => set({ name: e.target.value })} /></div>`}
       <div class="card">
-        <${Fold} title="Input" rows=${pickerRows(h, kinds)} pick=${curLabel} value=${fmtReading(h.kind, readingFor(h))}
+        <${Fold} title="Input" rows=${pickerRows(h, kinds, fkey)} pick=${curLabel}
+          value=${withRpm(fmtReading(h.kind, readingFor(h)), rpmFor(h))}
           onPick=${r => { setH(x => { const n = withKind(x, r.kind);
                           if (r.spec) n.spec = r.spec;                                                                       // a listed sensor
                           else if (r.file) n.spec = isFileSpec(x.spec) && !inCatalogue(x.spec) ? x.spec : B.FILE_PREFIX;     // keep a path being typed, start an empty one otherwise
@@ -646,7 +663,6 @@ function FanEditor({ fkey }) {
           <div class="note">${FILE_ROW.help}</div>`
         : typed && html`<label class="frow"><span>${h.kind === 'pwm' ? 'Header' : 'Sensor'}</span>
           <input class="text" type="text" autocomplete="off" placeholder=${cur.hint} value=${h.spec || ''} onInput=${e => set({ spec: e.target.value.trim() })} /></label>`}
-        ${h.kind === 'board' && html`<div class="note">The board runs this output with its own curve, as it would with no daemon at all. Pick an input to have the host run it instead.</div>`}
         ${h.kind === 'esp32_temp' && html`<div class="note">A sensor inside the receiver’s chip. It reads a few degrees above the air in the case, since the chip warms itself a little.</div>`}
       </div>
       <div class="card">
@@ -659,7 +675,7 @@ function FanEditor({ fkey }) {
           : 'A header on the receiver, or one of its pins.'}</div>
       </div>
       ${h.kind === 'host' && html`<div class="card"><div class="note">This fan follows a curve the host runs; with the host off it sits at its fallback speed. Pick Fixed speed, PWM input or Receiver temperature for something the receiver runs on its own.</div></div>`}
-      ${!B.isFixed(h) && h.kind !== 'host' && html`<div class="card">
+      ${!B.isFixed(h) && h.kind !== 'host' && !B.watchOnly(h) && html`<div class="card">
         <h2>Curve</h2>
         <${Curve} h=${h} editing=${true} onChange=${setPt} />
         <div class="pts">${h.pts.map((p, i) => html`<div key=${i} class="prow">
@@ -672,7 +688,7 @@ function FanEditor({ fkey }) {
         <label class="frow"><span>Ramp down</span><${NumField} min=${0} max=${255} step=${0.5} value=${h.ramp} onValue=${v => { if (v !== null) set({ ramp: clamp(v, 0, 255) }); }} /><small>%/s, 0 = at once</small></label>
         ${B.hasHyst(h) && html`<label class="frow"><span>Hysteresis</span><${NumField} min=${0} max=${50} step=${0.5} value=${h.hyst} onValue=${v => { if (v !== null) set({ hyst: clamp(v, 0, 50) }); }} /><small>°C before slowing down</small></label>`}
       </div>`}
-      ${h.kind !== 'board' && html`<div class="card">
+      ${!B.watchOnly(h) && html`<div class="card">
         <h2>Fallback speed</h2>
         <${Slider} value=${h.fallback} live=${v => set({ fallback: v })} done=${v => set({ fallback: v })} label=${v => `${v} %`} />
         <div class="note">${hostOut ? 'What this fan runs when its input can’t be read.'

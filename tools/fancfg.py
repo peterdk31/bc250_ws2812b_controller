@@ -86,7 +86,9 @@ TUNINGS = (
 )
 INPUT_HELP = ('expected fallback, gpio:N, esp32_temp, temp, cpu_load, gpu_load, a hwmon chip:label / '
               'chip:pwmN, pmbus:CPU VRM / pmbus:GPU VRM, smu:VRAM hotspot / smu:VRAM 0..7, '
-              'file:/path, or (for a host output) "" for the board\'s own curve')
+              'or file:/path')
+WATCH_HELP = ('to leave a host output to the board\'s own curve and watch it, give it to no fan and '
+              'make it a parked fan\'s input — "output": "", "input": "nct6686:pwm2"')
 OUTPUT_HELP = ('expected headerN (the receiver\'s header N), gpio:N (a receiver GPIO), '
                'chip:pwmN (a pwm output of this host, e.g. nct6686:pwm2), or "" for none')
 
@@ -173,37 +175,34 @@ def parse_output(o, where):
 
 
 def parse_input(src, out, where):
-    """Mirror of fans::Controller::parseInput: (kind, gpio, is_temperature,
-    board) or None after an error."""
+    """Mirror of fans::Controller::parseInput: (kind, gpio, is_temperature)
+    or None after an error."""
     if not isinstance(src, str):
         return err(where, INPUT_HELP)
     if not src:
-        if out[0] != 'host':
-            return err(where, "a blank input is the board's own curve, which only a host output "
-                              'has — a fixed speed is input "fallback"')
-        return KIND_HOST, None, False, True
+        return err(where, "removed: a blank input was the board's own curve — " + WATCH_HELP)
     if src == 'constant':
         return err(where, 'renamed: a fixed speed is input "fallback" — the fan runs its '
                           'fallback value and takes no curve (move the constant into fallback)')
     if out[0] == 'host' and src == out[2]:
-        return err(where, 'renamed: the board\'s own curve is a blank input now — write "input": ""')
+        return err(where, "a host output can't follow itself — " + WATCH_HELP)
     if src == 'fallback':
-        return KIND_FALLBACK, None, False, False
+        return KIND_FALLBACK, None, False
     if src == 'esp32_temp':
-        return KIND_RECEIVER_TEMP, None, False, False
+        return KIND_RECEIVER_TEMP, None, False
     if src == 'temp':
-        return KIND_HOST, None, True, False
+        return KIND_HOST, None, True
     if src in ('cpu_load', 'gpu_load'):
-        return KIND_HOST, None, False, False
+        return KIND_HOST, None, False
     chip, sep, label = src.partition(':')
     if not sep:
         return err(where, INPUT_HELP)
     if chip == 'gpio':
         if not re.fullmatch(r'0|[1-9]\d*', label) or int(label) > MAX_GPIO:
             return err(where, f'gpio:N names a receiver GPIO, 0..{MAX_GPIO}')
-        return KIND_GPIO, int(label), False, False
+        return KIND_GPIO, int(label), False
     # chip:label / chip:pwmN — the daemon's; a pwmN label is a percent, the rest °C
-    return KIND_HOST, None, not is_pwm_label(label), False
+    return KIND_HOST, None, not is_pwm_label(label)
 
 
 def parse_curve(text, kind, where):
@@ -251,7 +250,9 @@ for i, v in enumerate(block):
                                    '"output" is what the fan drives)')
         elif kk not in FAN_KEYS and kk not in [t[0] for t in TUNINGS]:
             err(f'{where}.{kk}', 'unknown key')
-    missing = [kk for kk in ('name', 'output', 'input', 'fallback') if kk not in v]
+    # a parked fan drives nothing: its curve and fallback are optional
+    parked = v.get('output') == ''
+    missing = [kk for kk in ('name', 'output', 'input', 'fallback') if kk not in v and not (parked and kk == 'fallback')]
     if missing:
         err(where, f'missing "{missing[0]}" (every fan has a name, an output, an input and a '
                    'fallback, and a curve unless the input is fallback)')
@@ -264,7 +265,7 @@ for i, v in enumerate(block):
     parsed = parse_input(v['input'], out, f'{where}.input')
     if not parsed:
         continue
-    kind, gpio, temp, board = parsed
+    kind, gpio, temp = parsed
     if kind == KIND_GPIO and out[0] == 'host':
         err(f'{where}.input', 'a gpio input is read by the receiver, which can\'t drive a host '
                               'output — put the fan on a receiver output (headerN / gpio:N), or '
@@ -278,14 +279,14 @@ for i, v in enumerate(block):
                               'doesn\'t offer (the receiver would only ever run the fallback)')
     if kind == KIND_GPIO and out[0] == 'gpio' and gpio == out[1]:
         err(f'{where}.input', f'GPIO{gpio} can\'t be the fan\'s input and its output at once')
-    curve_kind = kind != KIND_FALLBACK and not board
+    curve_kind = kind != KIND_FALLBACK
     pts = []
     if not curve_kind:
         if 'curve' in v:
-            err(f'{where}.curve', 'the board\'s own curve runs this output — delete this key' if board
-                else 'a fallback input takes no curve — the fan runs its fallback value; delete this key')
+            err(f'{where}.curve', 'a fallback input takes no curve — the fan runs its fallback value; delete this key')
     elif 'curve' not in v:
-        err(where, 'missing "curve" (input:percent points, e.g. "45:35 60:55 75:100")')
+        if out[0] != 'parked':
+            err(where, 'missing "curve" (input:percent points, e.g. "45:35 60:55 75:100")')
     else:
         pts = parse_curve(v['curve'], kind, f'{where}.curve') or []
     b = v.get('boost')
@@ -294,7 +295,7 @@ for i, v in enumerate(block):
     elif b is not None and out[0] == 'host':
         err(f'{where}.boost', 'a boost is the receiver\'s, run the moment the host powers on — '
                               'before the daemon exists to drive a host output; write null')
-    fb = v['fallback']
+    fb = v.get('fallback', 100)
     if not (number(fb) and 0 <= fb <= 100):
         err(f'{where}.fallback', 'expected a percent 0..100')
     f = dict(name=v['name'], out=out, kind=kind, gpio=gpio, temp=temp, curve_kind=curve_kind,
