@@ -179,6 +179,19 @@ static const uint32_t POLL_MS = 250; // policy task cadence
 // went out over RMT, whose interrupt-fed refills the radio could tear.)
 static const uint16_t ADV_ITVL = 0x01E0; // 480 × 0.625 ms = 300 ms
 
+// The connection interval asked of a phone once it connects. A connected pair
+// only exchanges packets once per interval, and every GATT op the page makes
+// (a subscribe, a read, one page of a long value) is a request plus an answer
+// with one outstanding at a time — so each costs an interval or two, and
+// opening the dashboard is ~30 of them. Phones pick 30–50 ms on their own;
+// 15 ms makes the load ~3× quicker. It is the shortest Apple's accessory
+// guidelines accept as a fixed interval (min = max = 15 ms), and Android takes
+// it too; a phone that declines keeps its own, and nothing else changes. The
+// cost is a radio event every 15 ms while a phone is connected — the strip is
+// DMA-fed (render.cpp) and can't feel it.
+static const uint16_t CONN_ITVL = 12;        // × 1.25 ms = 15 ms
+static const uint16_t CONN_TIMEOUT = 400;    // × 10 ms = 4 s supervision timeout
+
 // The advertisement also says what the host is doing, so the page's receiver
 // list can show which boards are on without connecting to each: manufacturer
 // data under 0xFFFF (the SIG's id for unregistered use) = ver(1) = 1,
@@ -776,6 +789,14 @@ static int gapEvent(ble_gap_event* ev, void*)
         {
             g_conn = ev->connect.conn_handle;
             BLOG("phone connected");
+            ble_gap_upd_params up = {};
+            up.itvl_min = CONN_ITVL;
+            up.itvl_max = CONN_ITVL;
+            up.latency = 0;
+            up.supervision_timeout = CONN_TIMEOUT;
+            int rc = ble_gap_update_params(g_conn, &up);
+            if (rc != 0)
+                BLOG("connection interval request failed rc=%d", rc);
         }
         // a failed connect leaves us idle; the policy task re-advertises
         break;
@@ -788,6 +809,16 @@ static int gapEvent(ble_gap_event* ev, void*)
             c.sub = false;
         BLOG("phone disconnected (reason=%d)", ev->disconnect.reason);
         break;
+
+    case BLE_GAP_EVENT_CONN_UPDATE:
+    {
+        // what the phone settled on (asked or not), for the debug log
+        ble_gap_conn_desc d;
+        if (ble_gap_conn_find(ev->conn_update.conn_handle, &d) == 0)
+            BLOG("connection interval %u.%02u ms (status %d)", (unsigned)(d.conn_itvl * 125 / 100),
+                 (unsigned)(d.conn_itvl * 125 % 100), ev->conn_update.status);
+        break;
+    }
 
     case BLE_GAP_EVENT_SUBSCRIBE:
         // the phone opened (or closed) the dashboard: notifications on the

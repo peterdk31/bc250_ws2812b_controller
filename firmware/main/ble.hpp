@@ -25,8 +25,10 @@
 //
 // Radio policy: advertising runs in both PSU states — a crashed machine must
 // be reachable, and it counts as "on" — every 300 ms either way, since
-// opening the page waits on it. The strip is fed by SPI with DMA
-// (render.cpp) precisely so radio interrupts can't tear its bits.
+// opening the page waits on it; a connected phone is asked for a 15 ms
+// connection interval, which sets how fast the dashboard loads. The strip
+// is fed by SPI with DMA (render.cpp) precisely so radio interrupts can't
+// tear its bits.
 //
 // Every command must carry a shared-secret token, chosen at flash time: the
 // config lives in the small `blecfg` flash partition (the daemon config's
