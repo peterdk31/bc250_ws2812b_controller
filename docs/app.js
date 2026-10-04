@@ -187,7 +187,6 @@ function PowerScreen() {
   return html`<div class="center">
     ${cog && html`<button class="pcog" aria-label="Power switch settings" onClick=${() => go({ editor: 'p' })}><${Icon} d=${I.cog} sw=${1.8} /></button>`}
     <button id="power" class=${cls} disabled=${disabled} onClick=${act}><span class="sym"></span><span>${label}</span></button>
-    ${on && S.psu === 2 && html`<div class="hint">tap for shutdown options</div>`}
     ${vrm && html`<${VrmCard} vrm=${vrm} />`}
   </div>`;
 }
