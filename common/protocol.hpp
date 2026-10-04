@@ -260,7 +260,8 @@ static const uint16_t DASH_PWR_CONFIG_MAX = 256;
 static const uint8_t CMD_FAN_CONFIG = 0x0A;
 
 // CMD_FAN_TELEM: what the curves are reading right now — the top-level
-// `sensors` temperature, CPU and GPU load, and per fan its input, the duty
+// `sensors` temperature, CPU and GPU load, the BC-250 VRM controller's rails
+// (volts, amps, °C) when one answers, and per fan its input, the duty
 // the curve produced and, for a host output, who is driving it. At most
 // DASH_FAN_TELEM_MAX bytes. Only sent while a phone is watching
 // (MSG_FAN_WATCH keeps that alive), on the fan tick when a value changed

@@ -346,15 +346,20 @@ int main(int argc, char** argv)
     if (fanStatus)
     {
         fanCtl.dumpStatus(stdout);
-        // if VRAM temperatures were asked for, say whether the SMU took the
-        // patch and why not — the reason the poller would log to the journal,
-        // shown here for the one-shot where its thread may not outlive us
-        if (cfg.getBool(smu::CONFIG_KEY))
+        // the VRM controller, when one answers, and which way it is read
+        if (pmbus::Reader::get().present())
+            printf("  vrm: read through %s\n", pmbus::Reader::get().source().c_str());
+        // if VRAM temperatures were asked for (or the driver is loaded), say
+        // how the chips are read or why not — the reason the poller would log
+        // to the journal, shown here for the one-shot where its thread may not
+        // outlive us
+        if (cfg.getBool(smu::CONFIG_KEY) || smu::driverLoaded())
         {
             smu::Reader::get().present(); // waits (bounded) for the first attempt
             std::string why = smu::Reader::get().status();
             printf("  vram_temps: %s\n",
-                   why.empty() ? "SMU patched, reading the GDDR6 chips" : why.c_str());
+                   why.empty() ? ("reading the GDDR6 chips through " + smu::Reader::get().source()).c_str()
+                               : why.c_str());
             // and what each source reads, so "patched but no reading" shows
             for (int i = 0; why.empty() && i < smu::SOURCE_COUNT; i++)
             {

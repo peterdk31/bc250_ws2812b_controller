@@ -17,6 +17,8 @@
 #include <string>
 #include <thread>
 
+#include "hwmon_tree.hpp"
+
 // The BC-250's eight GDDR6 chips report their own temperatures, but nothing
 // in the kernel reads them: the value lives behind the SMU (the GPU's system
 // management microcontroller), which has no stock command that returns it.
@@ -40,6 +42,17 @@
 // daemon takes the latest values. A chip's code is JEDEC 0..80 → -40..120 °C;
 // 80 is the sensor's ceiling and means "at least 120". The hotspot and the
 // average are computed from the chips that read.
+//
+// The bc250_memory kernel driver (github.com/Hexxeh/bc250-memory-dkms, in the
+// linux-cachyos-bc250 kernels, opt-in there) installs the very same payload
+// and drives the very same Q3 mailbox — but from the kernel, without the
+// window lock above, so it can't take turns with this reader. Two clients
+// interleaving one mailbox read each other's answers, or worse. So there is
+// only ever one: while that module is loaded at all, this reader never sends
+// the SMU a command (whatever the config says) and reads the driver's hwmon
+// files instead — which needs no opt-in, the driver's loading being one. A
+// module loaded while this reader is sweeping is noticed before the next
+// sweep; the window left is the one sweep already under way.
 namespace smu
 {
 // the top-level config keys the module owns: the opt-in (the SMU is patched
@@ -47,6 +60,12 @@ namespace smu
 // cadence in milliseconds (floored; default DEFAULT_INTERVAL_MS).
 inline const char* CONFIG_KEY = "vram_temps";
 inline const char* CONFIG_KEY_INTERVAL = "vram_temps_interval_ms";
+
+// the kernel driver: its hwmon chip name, and the directory that exists while
+// its module is loaded (registered chip or not — a probe that found the SMU
+// locked leaves the module loaded with none)
+inline const char* DRIVER = "bc250_memory";
+inline const char* DRIVER_MODULE = "/sys/module/bc250_memory";
 
 // the SMU is reached through the root complex's PCI config space: a register
 // address is written to one dword, the data read or written at the next
@@ -130,14 +149,15 @@ enum Kind { Hotspot, Average, Chip0 };
 struct Source
 {
     const char* label;
-    int kind; // Hotspot, Average, or Chip0 + n
+    int kind;                // Hotspot, Average, or Chip0 + n
+    const char* driverLabel; // the bc250_memory driver's label for the same reading
 };
 inline const Source SOURCES[] = {
-    {"VRAM hotspot", Hotspot}, {"VRAM average", Average},
-    {"VRAM 0", Chip0 + 0}, {"VRAM 1", Chip0 + 1},
-    {"VRAM 2", Chip0 + 2}, {"VRAM 3", Chip0 + 3},
-    {"VRAM 4", Chip0 + 4}, {"VRAM 5", Chip0 + 5},
-    {"VRAM 6", Chip0 + 6}, {"VRAM 7", Chip0 + 7},
+    {"VRAM hotspot", Hotspot, "VRAM Hotspot"}, {"VRAM average", Average, "VRAM Average"},
+    {"VRAM 0", Chip0 + 0, "VRAM Chip 0"}, {"VRAM 1", Chip0 + 1, "VRAM Chip 1"},
+    {"VRAM 2", Chip0 + 2, "VRAM Chip 2"}, {"VRAM 3", Chip0 + 3, "VRAM Chip 3"},
+    {"VRAM 4", Chip0 + 4, "VRAM Chip 4"}, {"VRAM 5", Chip0 + 5, "VRAM Chip 5"},
+    {"VRAM 6", Chip0 + 6, "VRAM Chip 6"}, {"VRAM 7", Chip0 + 7, "VRAM Chip 7"},
 };
 inline const int SOURCE_COUNT = (int)(sizeof(SOURCES) / sizeof(SOURCES[0]));
 
@@ -148,6 +168,24 @@ inline int sourceOf(const std::string& label)
         if (label == SOURCES[i].label)
             return i;
     return -1;
+}
+
+// the source the driver labels so (a bare chip name is its first input), or -1
+inline int sourceOfDriverLabel(const std::string& label)
+{
+    if (label.empty())
+        return 0;
+    for (int i = 0; i < SOURCE_COUNT; i++)
+        if (label == SOURCES[i].driverLabel)
+            return i;
+    return -1;
+}
+
+// the bc250_memory module is loaded, or its chip registered (the latter is
+// also what a test's LED_HWMON_ROOT stand-in can show)
+inline bool driverLoaded()
+{
+    return hwmon::statExists(DRIVER_MODULE) || !hwmon::chipDir(DRIVER).empty();
 }
 
 // the bus to the SMU: one open PCI config fd, register reads and writes
@@ -267,24 +305,35 @@ public:
         return value(SOURCES[source].kind, v);
     }
 
-    // the SMU is patched and reading. Waits (bounded) for the first attempt so
-    // a one-shot caller such as --fan-status sees a settled answer.
+    // the chips are being read — through the driver, or the SMU patched by
+    // this reader. Waits (bounded) for the first attempt so a one-shot caller
+    // such as --fan-status sees a settled answer.
     bool present()
     {
-        if (!enabled_.load())
+        if (!enabled_.load() && !driverLoaded())
             return false;
         want();
         std::unique_lock<std::mutex> lk(m_);
         cv_.wait_for(lk, std::chrono::seconds(2), [&] { return tried_; });
-        return patched_;
+        return reading();
     }
 
-    // once the first attempt has finished, why it did not patch (""
-    // while it did, or has not yet been tried)
+    // once the first attempt has finished, why the chips are not being read
+    // ("" while they are, or before the first attempt)
     std::string status()
     {
         std::lock_guard<std::mutex> g(m_);
-        return patched_ ? "" : status_;
+        return reading() ? "" : status_;
+    }
+
+    // how the chips are read: "the bc250_memory driver (...)", "the SMU,
+    // patched by this daemon", or "" while they are not
+    std::string source()
+    {
+        std::lock_guard<std::mutex> g(m_);
+        return patched_          ? "the SMU, patched by this daemon"
+             : reading()         ? std::string("the ") + DRIVER + " driver (" + driverDir_ + ")"
+                                 : "";
     }
 
 public:
@@ -318,11 +367,15 @@ private:
         return ts.tv_sec + ts.tv_nsec / 1e9;
     }
 
-    // record interest and, while enabled, start the poller on the first ask
+    // the chips are being read, one way or the other (under m_)
+    bool reading() const { return patched_ || (viaDriver_ && !driverDir_.empty()); }
+
+    // record interest and, while enabled or the driver is loaded, start the
+    // poller on the first ask
     void want()
     {
         wantedAt_.store(mono());
-        if (enabled_.load() && !started_.exchange(true))
+        if (!started_.load() && (enabled_.load() || driverLoaded()) && !started_.exchange(true))
             std::thread(&Reader::loop, this).detach();
     }
 
@@ -360,21 +413,30 @@ private:
             double now = mono();
             if (now - wantedAt_.load() < WANT_S)
             {
-                if (!patched_ && !lost_)
-                {
-                    // patch() reads the chips once itself, so no sweep follows
-                    if (now - lastTry >= RETRY_MS / 1000.0)
-                    {
-                        lastTry = now;
-                        patch();
-                    }
-                }
+                if (driverLoaded())
+                    readDriver();
                 else
-                    sweep();
+                {
+                    if (viaDriver_)
+                        leaveDriver();
+                    if (!enabled_.load())
+                        ; // the SMU is this reader's only with the config's opt-in
+                    else if (!patched_ && !lost_)
+                    {
+                        // patch() reads the chips once itself, so no sweep follows
+                        if (now - lastTry >= RETRY_MS / 1000.0)
+                        {
+                            lastTry = now;
+                            patch();
+                        }
+                    }
+                    else
+                        sweep();
+                }
             }
-            // while patched, wake at the configured cadence to re-read; while
+            // while reading, wake at the configured cadence to re-read; while
             // not, the 30 s retry gate above means these wakeups just re-check
-            int ms = patched_ ? intervalMs_.load() : DEFAULT_INTERVAL_MS;
+            int ms = patched_ || viaDriver_ ? intervalMs_.load() : DEFAULT_INTERVAL_MS;
             std::this_thread::sleep_for(std::chrono::milliseconds(ms));
         }
     }
@@ -445,11 +507,75 @@ private:
         }
     }
 
+    // one pass through the driver: the chips from its hwmon files (the first
+    // read has it run all eight commands, the rest come from its cache).
+    // Taking over from this reader's own patch first stops its commands for
+    // good; the patch itself stays in the SMU, the driver's to use.
+    void readDriver()
+    {
+        if (!viaDriver_)
+        {
+            const char* was = patched_ ? " — this daemon stops commanding the SMU" : "";
+            fprintf(stderr, "smu: the %s driver is loaded%s; reading VRAM temperatures through it\n",
+                    DRIVER, was);
+            lastLogged_ = "\x01";
+            bus_.close();
+            std::lock_guard<std::mutex> g(m_);
+            viaDriver_ = true;
+            patched_ = false;
+        }
+        std::string dir = hwmon::chipDir(DRIVER);
+        float c[CHIP_COUNT];
+        bool ok[CHIP_COUNT];
+        for (int i = 0; i < CHIP_COUNT; i++)
+        {
+            long v = 0;
+            ok[i] = !dir.empty() &&
+                    hwmon::readLong(hwmon::labelledInput(dir, "temp", SOURCES[Chip0 + i].driverLabel), v) &&
+                    v > 0;
+            c[i] = ok[i] ? v / 1000.0f : 0;
+        }
+        storeChips(c, ok);
+        std::string why = dir.empty() ? std::string("the ") + DRIVER +
+                                            " module is loaded but has no sensors (dmesg | grep " + DRIVER +
+                                            " says why) — this daemon leaves the SMU to it"
+                                      : "";
+        if (why != lastLogged_)
+        {
+            lastLogged_ = why;
+            if (!why.empty())
+                fprintf(stderr, "smu: VRAM temperatures unavailable — %s\n", why.c_str());
+        }
+        std::lock_guard<std::mutex> g(m_);
+        driverDir_ = dir;
+        status_ = why;
+        tried_ = true;
+        cv_.notify_all();
+    }
+
+    // the module was unloaded: this reader may patch and read the SMU itself
+    // again (the config's opt-in permitting), starting over
+    void leaveDriver()
+    {
+        fprintf(stderr, "smu: the %s driver was unloaded\n", DRIVER);
+        bus_.close();
+        lost_ = false;
+        lastLogged_ = "\x01";
+        std::lock_guard<std::mutex> g(m_);
+        viaDriver_ = false;
+        driverDir_.clear();
+        tried_ = false;
+        for (int i = 0; i < CHIP_COUNT; i++)
+            chipOk_[i] = false;
+    }
+
     // platform-gate, open the bus, install PAYLOAD if it is not already there.
     // Sets patched_ on success; records why in status_ otherwise.
     void patch()
     {
         std::string why = tryPatch();
+        if (!why.empty() && hwmon::statExists(DRIVER_MODULE))
+            return; // cut short by the driver loading; the next pass reads through it
         bool ok = why.empty();
         // read the chips once before announcing readiness, so the first
         // present() that unblocks already has values — no spurious "no
@@ -592,6 +718,10 @@ private:
                  uint32_t* ret, uint32_t* arg0)
     {
         if (lost_ || (int)args.size() > mb.argCount)
+            return false;
+        // the driver loaded since the loop last looked: not one more command
+        // (the loop hands over to it on its next pass)
+        if (hwmon::statExists(DRIVER_MODULE))
             return false;
         // every failure past this point leaves the mailbox in an unknown
         // state — possibly a command still executing — so it marks the SMU
@@ -767,6 +897,8 @@ private:
     std::condition_variable cv_;
     bool tried_ = false;
     bool patched_ = false;
+    bool viaDriver_ = false;  // read through the bc250_memory driver (never the SMU)
+    std::string driverDir_;   // its hwmon chip, while it has one
     std::string status_ = "not yet attempted";
     bool chipOk_[CHIP_COUNT] = {};
     float chipC_[CHIP_COUNT] = {};

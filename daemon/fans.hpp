@@ -819,7 +819,7 @@ private:
             }
             if (cchip == "smu" && smu::sourceOf(clabel) < 0)
                 return "smu names a GDDR6 reading: smu:VRAM hotspot, smu:VRAM average, "
-                       "or smu:VRAM 0..7 (and needs \"vram_temps\": true)";
+                       "or smu:VRAM 0..7 (and needs \"vram_temps\": true or the bc250_memory driver)";
             if (cchip == "file" && (clabel.empty() || clabel[0] != '/'))
                 return "file:/path names a file holding one temperature (millidegrees or degrees)";
         }
@@ -1462,13 +1462,18 @@ private:
 
     // what the curves see and do right now, for the dashboard's tiles and
     // cards: { "temp": 58.3, "cpu": 37, "gpu": 62,
+    //          "vrm": { "vin": 12.08, "cpu": { "v": 1.05, "a": 18.2, "t": 52 }, "gpu": { ... } },
     //          "fans": [ null, { "in": 58.3, "duty": 52 }, { "duty": 60, "st": "host" }, ... ] }
     // — indexed like the config's list. A reading is absent when there is
     // none; a fan the receiver runs (a fallback or gpio fan on a receiver
     // output: its own view carries those) is null, a parked fan has only its
     // "in". "st" is
     // a host output's state: host (this daemon drives it), board (its own
-    // curve), gone (not found), ro (read-only driver), busy (not driven here)
+    // curve), gone (not found), ro (read-only driver), busy (not driven here).
+    // "vrm" is the BC-250's VRM controller (pmbus.hpp), while one answers:
+    // its 12 V input and per rail the output volts, amps and °C, each absent
+    // without a reading — asking for it here is what has the reader fetch
+    // the volts and amps, so they are read only while a phone watches.
     std::string telemetryJson() const
     {
         char buf[64];
@@ -1480,6 +1485,9 @@ private:
             snprintf(buf, sizeof buf, "\"cpu\":%d", (int)(cpuLoad_ + 0.5f)), add(buf);
         if (gpuLoadOk_)
             snprintf(buf, sizeof buf, "\"gpu\":%d", (int)(gpuLoad_ + 0.5f)), add(buf);
+        std::string vrm = vrmJson();
+        if (!vrm.empty())
+            add("\"vrm\":" + vrm);
         std::string list = "\"fans\":[";
         for (size_t i = 0; i < fans_.size(); i++)
         {
@@ -1508,6 +1516,33 @@ private:
         }
         add(list + "]");
         return j + "}";
+    }
+
+    // telemetryJson's "vrm", "" when the controller has no reading at all
+    static std::string vrmJson()
+    {
+        static const char* RAIL_KEYS[pmbus::RAIL_COUNT] = {"cpu", "gpu"};
+        pmbus::Power p = pmbus::Reader::get().power();
+        char buf[32];
+        std::string j;
+        auto field = [&](std::string& o, const char* key, const char* fmt, float v) {
+            if (std::isnan(v))
+                return;
+            snprintf(buf, sizeof buf, fmt, (double)v);
+            o += std::string(o.size() > 1 ? "," : "") + "\"" + key + "\":" + buf;
+        };
+        j = "{";
+        field(j, "vin", "%.2f", p.vin);
+        for (int i = 0; i < pmbus::RAIL_COUNT; i++)
+        {
+            std::string r = "{";
+            field(r, "v", "%.3f", p.volts[i]);
+            field(r, "a", "%.1f", p.amps[i]);
+            field(r, "t", "%.0f", p.temp[i]);
+            if (r.size() > 1)
+                j += std::string(j.size() > 1 ? "," : "") + "\"" + RAIL_KEYS[i] + "\":" + r + "}";
+        }
+        return j.size() > 1 ? j + "}" : "";
     }
 
     // the catalogue: what a fan could follow and drive, with readings, for

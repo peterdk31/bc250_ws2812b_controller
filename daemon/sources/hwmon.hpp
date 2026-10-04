@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "hwmon_tree.hpp"
 #include "pmbus.hpp"
 #include "smu.hpp"
 
@@ -31,12 +32,20 @@ inline void listTempFiles(const char* dirPath, std::vector<Reading>& out);
 //                                  degrees; 1000 and up is read as
 //                                  millidegrees
 //   pmbus:CPU VRM                  a rail of the BC-250's VRM controller,
-//                                  read over I2C by pmbus.hpp
-//   smu:VRAM hotspot               a GDDR6 chip temperature, read from the
-//                                  SMU by smu.hpp (off unless the config
+//                                  read by pmbus.hpp (through the
+//                                  bc250_vrm driver, or over I2C)
+//   smu:VRAM hotspot               a GDDR6 chip temperature, read by
+//                                  smu.hpp (through the bc250_memory
+//                                  driver, or from the SMU when the config
 //                                  opts in; see smu::Reader)
 // The "chip" of a file spec is the word file and its label the path; a pmbus
 // spec's labels are pmbus::RAILS, an smu spec's smu::SOURCES.
+//
+// Those two kernel drivers' own chips are the same readings under other
+// names, so a spec naming one (bc250_vrm:CPU VRM Temp) resolves to the pmbus:
+// or smu: source it is (DRIVER_ALIASES): read off the render loop by the
+// reader's poller (a bc250_vrm sysfs read sleeps ~5 ms in the kernel), and
+// one reading, not two, in the phone's pickers.
 inline const char* FILE_PREFIX = "file:";
 inline const char* PMBUS_PREFIX = "pmbus:";
 inline const char* SMU_PREFIX = "smu:";
@@ -46,13 +55,35 @@ inline bool hasPrefix(const std::string& s, const char* prefix)
     return s.compare(0, strlen(prefix), prefix) == 0;
 }
 
-// the hwmon tree: /sys/class/hwmon, or LED_HWMON_ROOT's stand-in (tests on a
-// machine with no sensors — every lookup below, and the fans' host outputs,
-// then read and write the stand-in instead)
-inline std::string root()
+// a kernel driver whose hwmon chip a source above reads for itself: the
+// chip's name, the source's chip word, and the source label one of the
+// driver's labels is ("" = none)
+struct DriverAlias
 {
-    const char* env = getenv("LED_HWMON_ROOT");
-    return env && *env ? env : "/sys/class/hwmon";
+    const char* driver;
+    const char* chip;
+    std::string (*label)(const std::string& driverLabel);
+};
+inline const DriverAlias DRIVER_ALIASES[] = {
+    {pmbus::DRIVER, "pmbus",
+     [](const std::string& l) {
+         int r = pmbus::railOfDriverLabel(l);
+         return std::string(r < 0 ? "" : pmbus::RAILS[r].label);
+     }},
+    {smu::DRIVER, "smu",
+     [](const std::string& l) {
+         int i = smu::sourceOfDriverLabel(l);
+         return std::string(i < 0 ? "" : smu::SOURCES[i].label);
+     }},
+};
+
+// the alias for a chip name, or null
+inline const DriverAlias* driverAlias(const std::string& chip)
+{
+    for (auto& a : DRIVER_ALIASES)
+        if (chip == a.driver)
+            return &a;
+    return nullptr;
 }
 
 // Tctl first when k10temp is present; the BC-250's NCT6686D registers
@@ -64,14 +95,6 @@ inline const char* DEFAULT_SENSORS =
     "nct6686:CPU,nct6687:CPU,"
     "nct6686:AMD TSI Addr 98h,nct6683:AMD TSI Addr 98h,"
     "nct6686";
-
-inline std::string readFileLine(const std::string& path)
-{
-    std::ifstream f(path);
-    std::string line;
-    std::getline(f, line);
-    return line;
-}
 
 inline std::vector<std::string> split(const std::string& s, char sep)
 {
@@ -92,12 +115,6 @@ inline std::vector<std::string> split(const std::string& s, char sep)
     return parts;
 }
 
-inline bool statExists(const std::string& path)
-{
-    struct stat st;
-    return stat(path.c_str(), &st) == 0;
-}
-
 // a resolved sensor path is still there: the sysfs file, the file behind a
 // file: path, the controller behind a pmbus: one
 inline bool fileExists(const std::string& path)
@@ -109,43 +126,6 @@ inline bool fileExists(const std::string& path)
     if (hasPrefix(path, SMU_PREFIX))
         return smu::Reader::get().present();
     return statExists(path);
-}
-
-// the hwmon chips, as { dir, name }, in sorted directory order and one per
-// name: a second chip of the same name can't be named apart, so the first
-// is the one every lookup by name means (findSensor, findChipFile, and the
-// phone's pickers through enumerate — all must agree on which chip that is)
-struct Chip
-{
-    std::string dir;
-    std::string name;
-};
-inline std::vector<Chip> chips()
-{
-    std::vector<Chip> out;
-    const std::string top = root();
-    DIR* dir = opendir(top.c_str());
-    if (!dir)
-        return out;
-    std::vector<std::string> dirs;
-    while (dirent* e = readdir(dir))
-        if (e->d_name[0] != '.')
-            dirs.push_back(top + "/" + e->d_name);
-    closedir(dir);
-    std::sort(dirs.begin(), dirs.end());
-
-    for (auto& d : dirs)
-    {
-        std::string name = readFileLine(d + "/name");
-        if (name.empty())
-            continue;
-        bool seen = false;
-        for (auto& c : out)
-            seen |= c.name == name;
-        if (!seen)
-            out.push_back({d, name});
-    }
-    return out;
 }
 
 // locate a chip's temp input by label; an empty label means the chip's
@@ -164,6 +144,12 @@ inline std::string findSensor(const std::string& chip, const std::string& label)
         return smu::sourceOf(label) >= 0 && smu::Reader::get().present()
                    ? SMU_PREFIX + label
                    : "";
+
+    if (const DriverAlias* a = driverAlias(chip))
+    {
+        std::string l = a->label(label);
+        return l.empty() ? "" : findSensor(a->chip, l);
+    }
 
     for (const auto& c : chips())
     {
@@ -439,6 +425,8 @@ inline std::vector<Reading> enumerate()
     {
         const std::string& base = c.dir;
         const std::string& chip = c.name;
+        if (driverAlias(chip))
+            continue; // listed below as the pmbus: or smu: source it is
 
         for (int i = 1; i <= 32; i++) // nct6683 exposes up to 32 temperature channels
         {

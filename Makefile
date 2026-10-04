@@ -120,7 +120,7 @@ HEADERS = daemon/output/strip.hpp daemon/config_loader.hpp daemon/config_check.h
           daemon/pwmout.hpp daemon/sdnotify.hpp common/fancurve.hpp common/fanwire.hpp \
           daemon/config_edit.hpp daemon/strip_remote.hpp daemon/power_remote.hpp \
           daemon/effects/effect.hpp daemon/rules/condition.hpp daemon/color/color.hpp \
-          daemon/sources/hwmon.hpp daemon/sources/pmbus.hpp daemon/sources/smu.hpp daemon/sources/steam.hpp \
+          daemon/sources/hwmon.hpp daemon/sources/hwmon_tree.hpp daemon/sources/pmbus.hpp daemon/sources/smu.hpp daemon/sources/steam.hpp \
           daemon/sources/audio.hpp daemon/sources/audio_detect.hpp \
           daemon/rules/rules.hpp \
           daemon/output/sink.hpp daemon/output/serial_sink.hpp daemon/output/virtual_sink.hpp \

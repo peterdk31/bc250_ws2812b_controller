@@ -1121,6 +1121,10 @@ dropped and searched for again, the fan on its `fallback` meanwhile like
 any lost sensor. If nothing answers on any bus, `--fan-status` shows the
 input as `(not found)` and the daemon keeps looking every 30 s.
 
+While a phone watches, the same controller's rail voltages and currents and
+its 12 V input are read too, for the **Host power** card on the Power tab
+([The dashboard](#the-dashboard)); nothing reads them otherwise.
+
 The eight GDDR6 chips are a harder case. Nothing in the kernel reads them: the
 value lives behind the SMU (the GPU's management microcontroller), which has no
 stock command that returns it. The way around it — worked out by
@@ -1185,6 +1189,39 @@ memory service publishes the same readings as millidegree files that the
 `file:` input reads (`file:/run/bc250/memory_hotspot_temp`,
 `memory_avg_temp`), and the picker lists any `/run/bc250/*_temp` file. The same
 files exist for its VRM readings (`cpu_vrm_temp`, `gpu_vrm_temp`).
+
+#### With the kernel drivers (`bc250_vrm`, `bc250_memory`)
+
+The [linux-cachyos-bc250](https://github.com/mastag/linux-cachyos-bc250)
+kernels ship two drivers for the same hardware,
+[bc250_vrm](https://github.com/Hexxeh/bc250-vrm-dkms) (loaded on every
+BC-250) and [bc250_memory](https://github.com/Hexxeh/bc250-memory-dkms)
+(opt-in). Each talks to what the daemon would otherwise talk to itself, and
+neither can share: `bc250_vrm` claims address `0x60`, so `i2c-dev` refuses
+the daemon the bus, and `bc250_memory` drives the SMU's mailbox from the
+kernel without the lock above, so two readers would garble each other's
+commands. The daemon therefore steps aside for them, and no config changes:
+
+- **`bc250_vrm` registered** → `pmbus:CPU VRM` / `pmbus:GPU VRM` (and the
+  Host power card) are read from its hwmon files; the bus is never opened.
+  A driver loaded after the daemon started takes over within 5 s, the bus
+  released first. Without the wires the driver registers nothing and the
+  daemon's own scan finds nothing either — same as before.
+- **`bc250_memory` loaded** → `smu:` sources are read from its hwmon files,
+  and the daemon sends the SMU **no** command, whatever `vram_temps` says —
+  the module's loading is the opt-in, and only one SMU client is safe. A
+  module loaded while the daemon is reading the SMU itself is noticed
+  before its next command. If the module is loaded but its probe failed (SMU
+  locked), it has no sensors and the daemon still leaves the SMU alone,
+  saying so in the journal and `--fan-status`.
+
+The drivers' own names work as specs too and mean the same reading:
+`bc250_vrm:CPU VRM Temp` is `pmbus:CPU VRM`, `bc250_memory:VRAM Chip 3` is
+`smu:VRAM 3` — read on the source's own thread (a `bc250_vrm` sysfs read
+sleeps ~5 ms in the kernel, which the render loop shouldn't wait on). The
+phone's picker lists them once, under `pmbus` and `smu`. `--fan-status`
+says which way each is read (`vrm: read through the bc250_vrm driver (...)`).
+The hotspot and average are computed from the eight chips either way.
 
 ### Getting the block onto the receiver
 
@@ -1369,7 +1406,11 @@ temperature (the top-level `sensors` pick), CPU load and GPU load.
 
 - **Power** — the ring alone, centred where a thumb reaches. Its color is
   the PSU state and its label the one thing a tap does: connect, power on,
-  or (while on) open the sheet with **Shut down** and **Force off**. A cog
+  or (while on) open the sheet with **Shut down** and **Force off**. Under
+  it, while the machine is on and its VRM controller answers ([VRM and GDDR6
+  temperatures](#vrm-and-gddr6-temperatures)), the **Host power** card: per
+  rail (CPU, GPU) the volts, amps, watts and VRM °C, the 12 V input, and the
+  two rails' draw together in its title. A cog
   in the corner opens the **power switch's settings**: the sense wire's two
   thresholds as sliders under its live reading in millivolts (read it with
   the machine on and off, put the values well apart between the two), the
