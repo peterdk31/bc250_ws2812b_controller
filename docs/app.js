@@ -128,6 +128,9 @@ function Header({ back: backLabel, title }) {
   const { ids, labels } = B.labels();
   const cur = B.currentId();
   const live = S.fans && S.fans.telem && S.telem;
+  const vrm = live && on && S.psu === 2 && S.telem.vrm;
+  const [rails, setOpen] = useState(railsOpen);
+  const setRails = v => { railsOpen = v; setOpen(v); };
   const sel = ids.includes(cur) ? cur : '';
   // the receiver's name: a tap goes to the Receiver tab, where the boards are listed
   const toReceivers = () => { if (route.tab !== 'receiver') go({ tab: 'receiver', editor: null, sheet: false }); };
@@ -140,14 +143,37 @@ function Header({ back: backLabel, title }) {
       ${title && html`<span class="ttl">${title}</span>`}
       <div class="st"><i style=${`background: ${color}; box-shadow: 0 0 10px ${color}`}></i><span>${state}</span></div>
     </div>
-    ${live && html`<div class="readings">
+    ${live && html`<div class="readings ${vrm ? 'four' : ''}" onClick=${vrm ? () => setRails(!rails) : null}>
       <div><span class="k">Temp</span><span class="v">${S.telem.temp !== undefined ? fmt1(S.telem.temp) : '—'}<small>°C</small></span></div>
       <div><span class="k">CPU</span><span class="v">${S.telem.cpu ?? '—'}<small>%</small></span></div>
       <div><span class="k">GPU</span><span class="v">${S.telem.gpu ?? '—'}<small>%</small></span></div>
+      ${vrm && html`<div class="pw"><span class="k">Power</span><span class="v">${vrmW(vrm) ?? '—'}<small>W</small></span>
+        <${Icon} d=${rails ? I.up : I.down} size=${14} /></div>`}
     </div>`}
+    ${live && vrm && rails && html`<${Rails} vrm=${vrm} />`}
     <${Status} />
   </header>`;
 }
+
+// the host's VRM controller (the daemon's telemetry "vrm"): the header's
+// Power reading is the two rails' draw together; a tap on the readings opens
+// per rail the output volts, amps, watts and °C, the 12 V input under them.
+// Open or shut stays as it was across tabs and editors
+let railsOpen = false;
+const RAILS = [['CPU', 'cpu'], ['GPU', 'gpu']];
+const fixed = (v, d) => typeof v === 'number' ? v.toFixed(d) : '—';
+const railW = r => r && typeof r.v === 'number' && typeof r.a === 'number' ? r.v * r.a : undefined;
+function vrmW(vrm) {
+  const ws = RAILS.map(([, k]) => railW(vrm[k])).filter(w => w !== undefined);
+  return ws.length ? Math.round(ws.reduce((a, b) => a + b, 0)) : null;
+}
+const Rails = ({ vrm }) => html`<div class="rails">
+  <span></span><span class="k">V</span><span class="k">A</span><span class="k">W</span><span class="k">°C</span>
+  ${RAILS.map(([n, k]) => { const r = vrm[k] || {}, w = railW(r);
+    return html`<span key=${k} class="k">${n}</span><span key=${k + 'v'}>${fixed(r.v, 2)}</span>
+      <span key=${k + 'a'}>${fixed(r.a, 1)}</span><span key=${k + 'w'}>${fixed(w, 0)}</span><span key=${k + 't'}>${fixed(r.t, 0)}</span>`; })}
+  ${typeof vrm.vin === 'number' && html`<span class="k">Input</span><span>${fixed(vrm.vin, 2)}</span><span></span><span></span><span></span>`}
+</div>`;
 
 const Msg = () => S.msg.text ? html`<div class="msg ${S.msg.hint ? 'hint' : ''}" ...${S.msg.html ? { dangerouslySetInnerHTML: { __html: S.msg.text } } : {}}>${S.msg.html ? null : S.msg.text}</div>` : null;
 
@@ -183,32 +209,10 @@ function PowerScreen() {
   const cls = (['off', 'booting', 'on'][S.psu] || 'off') + (pending || S.busy ? ' wait' : '');
   // the cog: the switch's tunings, on a receiver whose firmware publishes them
   const cog = on && S.pwr && S.pwr.active;
-  const vrm = on && S.psu === 2 && S.fans && S.fans.telem && S.telem && S.telem.vrm;
   return html`<div class="center">
     ${cog && html`<button class="pcog" aria-label="Power switch settings" onClick=${() => go({ editor: 'p' })}><${Icon} d=${I.cog} sw=${1.8} /></button>`}
     <button id="power" class=${cls} disabled=${disabled} onClick=${act}><span class="sym"></span><span>${label}</span></button>
-    ${vrm && html`<${VrmCard} vrm=${vrm} />`}
   </div>`;
-}
-
-// the host's VRM controller (the daemon's telemetry "vrm"): per rail the
-// output volts, amps, watts and °C, the 12 V input under them, and the two
-// rails' draw together in the title
-const RAILS = [['CPU', 'cpu'], ['GPU', 'gpu']];
-const fixed = (v, d) => typeof v === 'number' ? v.toFixed(d) : '—';
-const railW = r => r && typeof r.v === 'number' && typeof r.a === 'number' ? r.v * r.a : undefined;
-function VrmCard({ vrm }) {
-  const ws = RAILS.map(([, k]) => railW(vrm[k])).filter(w => w !== undefined);
-  const total = ws.length ? `${Math.round(ws.reduce((a, b) => a + b, 0))} W` : '';
-  return html`<${Card} cls="vrm" title="Host power" right=${total}>
-    <div class="rails">
-      <span></span><span class="k">V</span><span class="k">A</span><span class="k">W</span><span class="k">°C</span>
-      ${RAILS.map(([n, k]) => { const r = vrm[k] || {}, w = railW(r);
-        return html`<span key=${k} class="k">${n}</span><span key=${k + 'v'}>${fixed(r.v, 2)}</span>
-          <span key=${k + 'a'}>${fixed(r.a, 1)}</span><span key=${k + 'w'}>${fixed(w, 0)}</span><span key=${k + 't'}>${fixed(r.t, 0)}</span>`; })}
-      ${typeof vrm.vin === 'number' && html`<span class="k">Input</span><span>${fixed(vrm.vin, 2)}</span><span></span><span></span><span></span>`}
-    </div>
-  <//>`;
 }
 
 // ---- the power switch editor ----
@@ -464,7 +468,7 @@ function Curve({ h, now = null, editing = false, onChange }) {
     onChange(i, { x: Math.round(x / B.xStep(h)) * B.xStep(h), y: Math.round(clamp(uy(py), 0, 100)) });
   };
   const end = () => { drag.current = null; };
-  const nowPt = now !== null && !editing ? [clamp(now, d[0], d[1]), evalCurve({ pts: shown }, now)] : null;
+  const nowPt = now !== null ? [clamp(now, d[0], d[1]), evalCurve({ pts: shown }, now)] : null;
   return html`<svg ref=${svg} class="curve ${editing ? 'editing' : ''}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"
       onPointerDown=${down} onPointerMove=${move} onPointerUp=${end} onPointerCancel=${end}>
     ${[0, 25, 50, 75, 100].map(y => html`<line key=${y} class="grid" x1=${PAD.l} x2=${W - PAD.r} y1=${sy(y)} y2=${sy(y)} />`)}
@@ -653,6 +657,9 @@ function FanEditor({ fkey }) {
   });
   const rmPt = i => setH(x => ({ ...x, pts: x.pts.filter((_, j) => j !== i) }));
   const unit = B.isTempX(h) ? '°C' : '%';
+  // the input's reading now, marked on the curve being edited with the speed it would give
+  const drawn = h.pts.filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+  const nowIn = drawn.length ? readingFor(h) : null;
   const saving = S.saving !== null;
   const cur = B.SRC_KINDS[h.kind];
   const curEntry = h.kind === 'hwmon' ? S.sens && S.sens.find(e => e.spec === h.spec)
@@ -697,8 +704,8 @@ function FanEditor({ fkey }) {
       </div>
       ${h.kind === 'host' && html`<div class="card"><div class="note">This fan follows a curve the host runs; with the host off it sits at its fallback speed. Pick Fixed speed, PWM input or Receiver temperature for something the receiver runs on its own.</div></div>`}
       ${!B.isFixed(h) && h.kind !== 'host' && !B.watchOnly(h) && html`<div class="card">
-        <h2>Curve</h2>
-        <${Curve} h=${h} editing=${true} onChange=${setPt} />
+        <h2>Curve${nowIn !== null && html`<span class="r">${fmtReading(h.kind, nowIn)} → ${Math.round(evalCurve({ pts: drawn }, nowIn))} %</span>`}</h2>
+        <${Curve} h=${h} now=${nowIn} editing=${true} onChange=${setPt} />
         <div class="pts">${h.pts.map((p, i) => html`<div key=${i} class="prow">
           <label>${i + 1}</label>
           <${NumField} aria=${`point ${i + 1} ${B.isTempX(h) ? 'temperature' : 'input'}`} step=${B.xStep(h)} min=${0} max=${B.xMax(h)} value=${p.x} onValue=${v => setPt(i, { x: v === null ? v : clamp(v, 0, B.xMax(h)) })} /><span class="unit">${unit}</span>

@@ -80,6 +80,13 @@
   .readings .k { font-size: .66rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
   .readings .v { font-size: .95rem; font-weight: 600; font-variant-numeric: tabular-nums; }
   .readings .v small { font-size: .68rem; font-weight: 400; color: var(--muted); margin-left: 1px; }
+  /* with the host's power: four across, tighter, and a tap opens the rails */
+  .readings.four { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .35rem; cursor: pointer; }
+  .readings.four > div { flex-direction: column; gap: 0; padding: .25rem .5rem; }
+  .readings .pw { position: relative; }
+  .readings .pw .ic { position: absolute; top: .3rem; right: .3rem; color: var(--muted); }
+  .rails { display: grid; grid-template-columns: auto repeat(4, minmax(0, 1fr)); gap: .25rem .75rem; font-size: .88rem;
+           font-variant-numeric: tabular-nums; text-align: right; padding: 0 1.6rem .7rem; }
 
   /* one line under the header: errors, or capability hints */
   .msg { font-size: .85rem; color: var(--danger); padding: .5rem 1rem 0; }
@@ -177,10 +184,6 @@
   #power .sym::after { content: ""; position: absolute; left: 50%; top: -0.9rem; transform: translateX(-50%);
                        width: 3px; height: 1.4rem; background: currentColor; border-radius: 2px; }
   .hint { font-size: .82rem; color: var(--muted); }
-  /* the host's VRM rails under the button */
-  .card.vrm { width: 100%; max-width: 22rem; }
-  .rails { display: grid; grid-template-columns: auto repeat(4, minmax(0, 1fr)); gap: .25rem .75rem; font-size: .88rem;
-           font-variant-numeric: tabular-nums; text-align: right; }
   .rails .k { color: var(--muted); }
   .rails > :nth-child(5n + 1) { text-align: left; }
 
