@@ -58,14 +58,16 @@ function decodeRecord(b) {
 
 // ---- the simulated host: a daemon and the machine's sensors ----
 class Host {
-  constructor({ fans, strip, power, chips, outs }) {
+  constructor({ fans, strip, power, chips, outs, vrm = false }) {
     this.fans = fans; this.strip = strip; this.power = power;
+    this.hasVrm = vrm;  // a BC-250 VRM controller answers (fans.hpp vrmJson)
     this.chips = chips; // { chip: { label: base reading } }, drifting
     this.outs = outs;   // [spec, base duty, rpm at that duty (-1 none), writable]
     this.rev = 1;
     this.t0 = Date.now();
   }
-  drift(base, period, amp) { return r1(base + amp * Math.sin((Date.now() - this.t0) / period)); }
+  wave(base, period, amp) { return base + amp * Math.sin((Date.now() - this.t0) / period); }
+  drift(base, period, amp) { return r1(this.wave(base, period, amp)); }
   get temp() { return this.drift(58.3, 23000, 2.5); }
   get cpu() { return Math.round(this.drift(37, 9000, 12)); }
   get gpu() { return Math.round(this.drift(62, 14000, 15)); }
@@ -92,8 +94,17 @@ class Host {
     if (out.kind === 'parked') return x === undefined ? {} : { in: x };
     return x === undefined ? null : { in: x, duty: curveAt(pts, x) };
   }
+  // the VRM rails, their current following the loads
+  get vrm() {
+    const rail = (v, idle, perLoad, load, t) => ({ v, a: r1(idle + perLoad * load / 100), t: Math.round(t) });
+    const r3 = v => Math.round(v * 1000) / 1000;
+    return { vin: Math.round(this.wave(12.08, 31000, 0.03) * 100) / 100,
+             cpu: rail(r3(this.wave(1.05, 7000, 0.04)), 6, 22, this.cpu, this.drift(52, 19000, 3)),
+             gpu: rail(r3(this.wave(0.95, 8000, 0.03)), 12, 70, this.gpu, this.drift(61, 21000, 4)) };
+  }
   telemJson() {
-    return JSON.stringify({ temp: this.temp, cpu: this.cpu, gpu: this.gpu, fans: this.fans.map(f => this.telemOf(f)) });
+    return JSON.stringify({ temp: this.temp, cpu: this.cpu, gpu: this.gpu, ...(this.hasVrm ? { vrm: this.vrm } : {}),
+                            fans: this.fans.map(f => this.telemOf(f)) });
   }
   // the catalogue, with each host output at the duty its fan runs (fans.hpp sensorsJson)
   sensorsJson() {
@@ -432,6 +443,7 @@ const bc250 = new Board({
     chips: { amdgpu: { edge: 61.0, junction: 64.5, mem: 58.0 }, k10temp: { Tctl: 58.3 },
              nct6686: { CPU: 52.0, System: 38.5, 'VRM MOS': 41.0 } },
     outs: [['nct6686:pwm1', 48, 1100, 1], ['nct6686:pwm2', 57, 1420, 1], ['amdgpu:pwm1', 30, 900, 0]],
+    vrm: true,
   }),
 });
 const desk = new Board({

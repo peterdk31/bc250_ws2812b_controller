@@ -177,6 +177,12 @@
   #power .sym::after { content: ""; position: absolute; left: 50%; top: -0.9rem; transform: translateX(-50%);
                        width: 3px; height: 1.4rem; background: currentColor; border-radius: 2px; }
   .hint { font-size: .82rem; color: var(--muted); }
+  /* the host's VRM rails under the button */
+  .card.vrm { width: 100%; max-width: 22rem; }
+  .rails { display: grid; grid-template-columns: auto repeat(4, minmax(0, 1fr)); gap: .25rem .75rem; font-size: .88rem;
+           font-variant-numeric: tabular-nums; text-align: right; }
+  .rails .k { color: var(--muted); }
+  .rails > :nth-child(5n + 1) { text-align: left; }
 
   /* the shutdown sheet */
   .scrim { position: fixed; inset: 0; z-index: 5; background: rgba(11, 14, 20, .6); display: flex; flex-direction: column; justify-content: flex-end; }

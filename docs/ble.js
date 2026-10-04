@@ -816,12 +816,14 @@ export const hasRamp = h => !isFixed(h) && !watchOnly(h);                // an i
 export const hasBoost = h => h.out.kind !== 'host' && !watchOnly(h);     // the receiver runs a boost, before the host is up
 export const hasBoostSecs = h => hasBoost(h) && h.boost !== NONE; // a fan with a boost
 
-// the daemon's telemetry JSON -> { temp, cpu, gpu, fans[index]: { in, duty, st } | null }
+// the daemon's telemetry JSON -> { temp, cpu, gpu, vrm, fans[index]: { in, duty, st } | null };
+// vrm (the host's VRM controller) is { vin, cpu: { v, a, t }, gpu: { v, a, t } } or null
 export function parseTelem(text) {
   let j;
   try { j = JSON.parse(text); } catch { return null; }
   if (!j || typeof j !== 'object') return null;
-  return { temp: j.temp, cpu: j.cpu, gpu: j.gpu, fans: Array.isArray(j.fans) ? j.fans : [] };
+  const vrm = j.vrm && typeof j.vrm === 'object' ? j.vrm : null;
+  return { temp: j.temp, cpu: j.cpu, gpu: j.gpu, vrm, fans: Array.isArray(j.fans) ? j.fans : [] };
 }
 
 // ver 1: version, heap. ver 2 adds the GPIOs a gpio:N input may read as a

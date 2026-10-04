@@ -183,11 +183,33 @@ function PowerScreen() {
   const cls = (['off', 'booting', 'on'][S.psu] || 'off') + (pending || S.busy ? ' wait' : '');
   // the cog: the switch's tunings, on a receiver whose firmware publishes them
   const cog = on && S.pwr && S.pwr.active;
+  const vrm = on && S.psu === 2 && S.fans && S.fans.telem && S.telem && S.telem.vrm;
   return html`<div class="center">
     ${cog && html`<button class="pcog" aria-label="Power switch settings" onClick=${() => go({ editor: 'p' })}><${Icon} d=${I.cog} sw=${1.8} /></button>`}
     <button id="power" class=${cls} disabled=${disabled} onClick=${act}><span class="sym"></span><span>${label}</span></button>
     ${on && S.psu === 2 && html`<div class="hint">tap for shutdown options</div>`}
+    ${vrm && html`<${VrmCard} vrm=${vrm} />`}
   </div>`;
+}
+
+// the host's VRM controller (the daemon's telemetry "vrm"): per rail the
+// output volts, amps, watts and °C, the 12 V input under them, and the two
+// rails' draw together in the title
+const RAILS = [['CPU', 'cpu'], ['GPU', 'gpu']];
+const fixed = (v, d) => typeof v === 'number' ? v.toFixed(d) : '—';
+const railW = r => r && typeof r.v === 'number' && typeof r.a === 'number' ? r.v * r.a : undefined;
+function VrmCard({ vrm }) {
+  const ws = RAILS.map(([, k]) => railW(vrm[k])).filter(w => w !== undefined);
+  const total = ws.length ? `${Math.round(ws.reduce((a, b) => a + b, 0))} W` : '';
+  return html`<${Card} cls="vrm" title="Host power" right=${total}>
+    <div class="rails">
+      <span></span><span class="k">V</span><span class="k">A</span><span class="k">W</span><span class="k">°C</span>
+      ${RAILS.map(([n, k]) => { const r = vrm[k] || {}, w = railW(r);
+        return html`<span key=${k} class="k">${n}</span><span key=${k + 'v'}>${fixed(r.v, 2)}</span>
+          <span key=${k + 'a'}>${fixed(r.a, 1)}</span><span key=${k + 'w'}>${fixed(w, 0)}</span><span key=${k + 't'}>${fixed(r.t, 0)}</span>`; })}
+      ${typeof vrm.vin === 'number' && html`<span class="k">Input</span><span>${fixed(vrm.vin, 2)}</span><span></span><span></span><span></span>`}
+    </div>
+  <//>`;
 }
 
 // ---- the power switch editor ----
