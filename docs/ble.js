@@ -1115,25 +1115,32 @@ async function dashOpen(svc) {
   if (se) se.addEventListener('characteristicvaluechanged', onSensEvent);
   if (pw) pw.addEventListener('characteristicvaluechanged', onPwrEvent);
   if (pc) pc.addEventListener('characteristicvaluechanged', onPcfgEvent);
+  // Every GATT op is one round trip, one at a time, so the order is what the
+  // screen fills in by: the header's readings and the fan list first, then
+  // the Power tab's, the rest of the fans' facts, the strip, and last the
+  // sensor catalogue — the biggest value, paged, and only the input picker's.
+  // Each value is subscribed just before its read, so no change is missed.
   await gattSubscribe(f);
-  await gattSubscribe(c);
-  await gattSubscribe(t); // this one tells the daemon to start reporting
-  if (s) await gattSubscribe(s);
-  if (se) await gattSubscribe(se);
-  if (pw) await gattSubscribe(pw);
-  if (pc) await gattSubscribe(pc);
   const fv = parseFans(await gattRead(f));
   if (fv) S.fans = fv;
-  if (i) { try { S.info = parseInfo(await gattRead(i)); } catch (e) { S.info = skip(e); } }
-  onCfg(await readJson(c, SLOT.fancfg));
+  await gattSubscribe(t); // this one tells the daemon to start reporting
   const tv = await readJson(t, SLOT.telem);
   S.telem = tv.byteLength ? parseTelem(utf8.decode(tv)) : null;
-  if (s) { try { onSa(await gattRead(s)); } catch (e) { skip(e); } }
-  if (se) { try { const v = await readJson(se, SLOT.sensors); S.sens = v.byteLength ? parseSensors(utf8.decode(v)) : null; } catch (e) { S.sens = skip(e); } }
-  if (pw) { try { S.pwr = parsePwr(await gattRead(pw)); } catch (e) { S.pwr = skip(e); } }
-  if (pc) { try { onPcfg(await readJson(pc, SLOT.pwrcfg)); } catch (e) { S.pcfg = skip(e); } }
+  await gattSubscribe(c);
+  onCfg(await readJson(c, SLOT.fancfg)); // emits
+  if (pw) {
+    try { await gattSubscribe(pw); S.pwr = parsePwr(await gattRead(pw)); } catch (e) { S.pwr = skip(e); }
+    if (pc) { try { await gattSubscribe(pc); onPcfg(await readJson(pc, SLOT.pwrcfg)); } catch (e) { S.pcfg = skip(e); } } // emits
+  }
+  if (i) { try { S.info = parseInfo(await gattRead(i)); } catch (e) { S.info = skip(e); } }
+  if (s) { try { await gattSubscribe(s); onSa(await gattRead(s)); } catch (e) { skip(e); } } // emits
   emit();
   if (sc && S.device === d) await stripOpen(sc);
+  if (se && S.device === d) {
+    try { await gattSubscribe(se); const v = await readJson(se, SLOT.sensors); S.sens = v.byteLength ? parseSensors(utf8.decode(v)) : null; }
+    catch (e) { S.sens = skip(e); }
+    emit();
+  }
 }
 
 // ---- fan edits ----
