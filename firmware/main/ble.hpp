@@ -24,10 +24,9 @@
 // the daemon stays the only place a curve is evaluated or stored.
 //
 // Radio policy: advertising runs in both PSU states — a crashed machine must
-// be reachable, and it counts as "on" — but slow while the host is up
-// (~1.3 s interval vs 300 ms while off), so the radio stays a rounding error
-// next to the LED service's latch cadence. The strip itself is fed by SPI
-// with DMA (render.cpp) precisely so radio interrupts can't tear its bits.
+// be reachable, and it counts as "on" — every 300 ms either way, since
+// opening the page waits on it. The strip is fed by SPI with DMA
+// (render.cpp) precisely so radio interrupts can't tear its bits.
 //
 // Every command must carry a shared-secret token, chosen at flash time: the
 // config lives in the small `blecfg` flash partition (the daemon config's

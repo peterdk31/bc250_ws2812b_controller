@@ -1509,11 +1509,11 @@ page with `?demo`; `&tab=fans`, `&tab=leds`, `&nodaemon` for the machine-off
 view) to see the dashboard on sample data with no receiver at all.
 
 Radio policy: the receiver advertises in both PSU states — a crashed machine
-must be reachable, and it counts as "on" — but at two paces: 300 ms intervals
-while off (quick to find, still gentle on 5VSB), ~1.3 s while the host is up,
-where the radio should stay a rounding error next to the strip's latch
-cadence. The strip's bitstream leaves the chip by SPI with DMA (`render.cpp`)
-for exactly this coexistence: the earlier RMT path refilled its buffer from an
+must be reachable, and it counts as "on" — every 300 ms in either state:
+opening the page waits for two advertisements (seeing the receiver, then
+connecting to it), so the interval is most of the time to connect, and
+300 ms is still gentle on 5VSB. The strip's bitstream leaves the chip by SPI
+with DMA (`render.cpp`) for exactly this coexistence: the earlier RMT path refilled its buffer from an
 interrupt, and the BLE controller's interrupts delayed that refill enough to
 tear bits — random LEDs flickering while a phone was connected. The RMT path
 is still there should a board ever need it: `make flash-source STRIP_USE_RMT=1`.

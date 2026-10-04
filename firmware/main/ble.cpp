@@ -170,13 +170,14 @@ namespace ble
 static const uint32_t POLL_MS = 250; // policy task cadence
 
 // Advertising runs in both PSU states — a phone must be able to reach a
-// machine that crashed, which is precisely when the host is "up" — but at
-// two paces: quick to find while the machine is off (the everyday power-on
-// case, and 300 ms is still gentle on the 5VSB budget), slow while it is on,
-// where reaching us is the rare rescue case and the radio should stay a
-// rounding error next to the strip's latch cadence.
-static const uint16_t ADV_ITVL_OFF = 0x01E0; // 480 × 0.625 ms = 300 ms
-static const uint16_t ADV_ITVL_ON = 0x0800;  // 2048 × 0.625 ms = 1.28 s
+// machine that crashed, which is precisely when the host is "up" — at one
+// quick pace: opening the page waits for an advertisement twice (the page's
+// watch, then the connect), so the interval is most of the time to connect.
+// 300 ms is gentle on the 5VSB budget, and the strip can't feel the radio:
+// its bitstream leaves by DMA (render.cpp), and advertising pauses while a
+// phone is connected anyway. (It was 1.28 s while on, back when the strip
+// went out over RMT, whose interrupt-fed refills the radio could tear.)
+static const uint16_t ADV_ITVL = 0x01E0; // 480 × 0.625 ms = 300 ms
 
 // The advertisement also says what the host is doing, so the page's receiver
 // list can show which boards are on without connecting to each: manufacturer
@@ -348,9 +349,6 @@ static void defineChr(ChrId id, const ble_uuid128_t* uuid, ble_gatt_access_fn* a
 
 // policy task locals
 static int g_lastState = -2;   // last hostState() seen (-2 = never)
-static uint16_t g_advItvl = 0; // interval the running advertisement was
-                               // started with (0 = none), to restart it when
-                               // the PSU state calls for the other pace
 static int g_advState = -2;    // hostState() the running advertisement carries
 static uint32_t g_lastPoll = 0;    // last 1 Hz notify of the fans and pwr values
 static uint32_t g_lastWatch = 0;   // last MSG_FAN_WATCH 1 sent
@@ -805,7 +803,7 @@ static int gapEvent(ble_gap_event* ev, void*)
     return 0;
 }
 
-static void startAdv(uint16_t itvl, int st)
+static void startAdv(int st)
 {
     // service UUID and host state in the advertisement (Web Bluetooth
     // filters on the UUID), name in the scan response — together they'd
@@ -827,8 +825,8 @@ static void startAdv(uint16_t itvl, int st)
     ble_gap_adv_params p = {};
     p.conn_mode = BLE_GAP_CONN_MODE_UND;
     p.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    p.itvl_min = itvl;
-    p.itvl_max = itvl;
+    p.itvl_min = ADV_ITVL;
+    p.itvl_max = ADV_ITVL;
 
     int rc = ble_gap_adv_set_fields(&f);
     if (rc == 0)
@@ -837,10 +835,7 @@ static void startAdv(uint16_t itvl, int st)
         rc = ble_gap_adv_start(g_ownAddrType, nullptr, BLE_HS_FOREVER, &p,
                                gapEvent, nullptr);
     if (rc == 0)
-    {
-        g_advItvl = itvl;
         g_advState = st;
-    }
     else
         BLOG("adv start failed rc=%d", rc);
 }
@@ -922,9 +917,9 @@ static void dashboard(uint32_t now)
     notifyOnChange(g_chr[C_PWR], pwr::settingsSeq());
 }
 
-// owns the advertising pace: quick while the PSU is off, slow while it is on
-// (see ADV_ITVL_*), paused while a phone is connected (one connection is the
-// whole clientele), and notifies the status characteristic on state changes.
+// owns the advertising: the host state in it kept current, paused while a
+// phone is connected (one connection is the whole clientele), and notifies
+// the status characteristic on state changes.
 static void loop()
 {
     int st = hostState();
@@ -940,16 +935,14 @@ static void loop()
     dashboard(millis());
 
     bool connected = g_conn != BLE_HS_CONN_HANDLE_NONE;
-    uint16_t itvl = st == 0 ? ADV_ITVL_OFF : ADV_ITVL_ON;
 
-    // a pace or state change restarts the advertisement (stop is synchronous,
-    // so the branch below starts it again with the new interval and state
-    // within this poll)
-    if (ble_gap_adv_active() && (g_advItvl != itvl || g_advState != st))
+    // a state change restarts the advertisement (stop is synchronous, so the
+    // branch below starts it again carrying the new state within this poll)
+    if (ble_gap_adv_active() && g_advState != st)
         ble_gap_adv_stop();
 
     if (g_synced && !connected && !ble_gap_adv_active())
-        startAdv(itvl, st);
+        startAdv(st);
     else if (connected && ble_gap_adv_active())
         ble_gap_adv_stop();
 }
