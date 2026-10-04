@@ -59,6 +59,8 @@ inline bool retiredKeys(const Config& cfg)
         {"sinks", "\"sinks\": { \"serial\": { ... } } is now just \"serial\": "
                   "{ ... }; power_button/power_button_command became "
                   "\"power_switch\": { \"short_press\": \"systemctl poweroff\" }"},
+        {"vram_temps", "VRAM temperatures are always on now (read through the bc250_memory "
+                       "driver, or from an unlocked SMU) — delete the key"},
     };
 
     bool ok = true;
@@ -103,8 +105,7 @@ static const Field TOP[] = {
     {"crossfade_ms", Kind::Int, "the dissolve between effects, 0..65535 ms"},
     {"frame_ms", Kind::Int, "the default frame period every effect reads"},
     {"sensors", Kind::Any, "hwmon candidates: \"chip:label,...\" or an array of them"},
-    {smu::CONFIG_KEY, Kind::Bool, "true to patch the SMU for GDDR6 (VRAM) temperatures — BC-250, unlocked BIOS"},
-    {smu::CONFIG_KEY_INTERVAL, Kind::Int, "how often to re-read the VRAM chips, ms (default 3000, floored)"},
+    {smu::CONFIG_KEY_INTERVAL, Kind::Int, "how often to re-read the VRAM chips, ms (default 2000, floored at 250)"},
     {"rules", Kind::Arr, "the rules, first match wins"},
 };
 

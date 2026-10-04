@@ -28,14 +28,16 @@
 // it; that program asks the memory controller for each chip's temperature.
 // PAYLOAD, its addresses and the command protocol below are theirs.
 //
-// This is a real patch of a live microcontroller, so it is off unless the
-// config turns it on (README "VRAM temperatures"): without enable() nothing
-// here ever opens the SMU. Two more things guard it. First, the patch needs
-// the SMU's secure-access gate already open, which the daemon does NOT do
-// itself — it is the risky half, an exploit, and the reader refuses to run
-// unless something else (a patched BIOS such as RescueMei's DXEv3 build) has
-// opened it. Second, the platform is checked: only a BC-250 on stock P3.0
+// This is a real patch of a live microcontroller, made only where it can
+// work, with no switch of its own: nothing opens the SMU until something asks
+// for a smu: reading (a fan's input, a rule, the phone's picker), and then
+// two things guard it. First, the patch needs the SMU's secure-access gate
+// already open, which the daemon does NOT do itself — it is the risky half,
+// an exploit, and the reader refuses to run unless something else (a patched
+// BIOS such as RescueMei's DXEv3 build) has opened it. Second, the platform
+// is checked before the SMU is touched at all: only a BC-250 on stock P3.0
 // firmware, whose SMU byte-for-byte matches what PAYLOAD was built against.
+// Anywhere else the reader says why once and reads nothing.
 //
 // Once patched, one poller thread reads the eight chips every few seconds
 // while anything asks (the same want()/WANT_S idle-out as pmbus.hpp), and the
@@ -49,16 +51,13 @@
 // window lock above, so it can't take turns with this reader. Two clients
 // interleaving one mailbox read each other's answers, or worse. So there is
 // only ever one: while that module is loaded at all, this reader never sends
-// the SMU a command (whatever the config says) and reads the driver's hwmon
-// files instead — which needs no opt-in, the driver's loading being one. A
-// module loaded while this reader is sweeping is noticed before the next
+// the SMU a command and reads the driver's hwmon files instead. A module
+// loaded while this reader is sweeping is noticed before the next
 // sweep; the window left is the one sweep already under way.
 namespace smu
 {
-// the top-level config keys the module owns: the opt-in (the SMU is patched
-// only when this is true — README "VRAM temperatures") and an optional read
-// cadence in milliseconds (floored; default DEFAULT_INTERVAL_MS).
-inline const char* CONFIG_KEY = "vram_temps";
+// the top-level config key the module owns: an optional read cadence in
+// milliseconds (floored; default Reader::DEFAULT_INTERVAL_MS)
 inline const char* CONFIG_KEY_INTERVAL = "vram_temps_interval_ms";
 
 // the kernel driver: its hwmon chip name, and the directory that exists while
@@ -282,20 +281,14 @@ public:
         return *r;
     }
 
-    // the config opts in. Idempotent. The poller itself starts lazily on the
-    // first ask (want()), so its first pass runs with a fresh wantedAt_ rather
-    // than idling until the next tick.
-    void enable() { enabled_.store(true); }
-    bool enabled() const { return enabled_.load(); }
-
     // how often the eight chips are re-read, milliseconds. Floored so a typo
     // can't hammer the SMU (and the GPU governor sharing its window). Live: a
     // config reload can change it.
     void setIntervalMs(int ms) { intervalMs_.store(ms < MIN_INTERVAL_MS ? MIN_INTERVAL_MS : ms); }
 
     // the latest temperature of a source (SOURCES index), false when it has
-    // none — the feature is off, the patch never took, or that chip's code
-    // was out of range. Asking keeps the poller going.
+    // none — no driver and no patch (or none possible here), or that chip's
+    // code was out of range. Asking keeps the poller going.
     bool temp(int source, float& v)
     {
         want();
@@ -310,8 +303,6 @@ public:
     // such as --fan-status sees a settled answer.
     bool present()
     {
-        if (!enabled_.load() && !driverLoaded())
-            return false;
         want();
         std::unique_lock<std::mutex> lk(m_);
         cv_.wait_for(lk, std::chrono::seconds(2), [&] { return tried_; });
@@ -337,7 +328,12 @@ public:
     }
 
 public:
-    static constexpr int DEFAULT_INTERVAL_MS = 3000; // between chip sweeps
+    // between chip sweeps: well inside how fast a GDDR6 package can heat (its
+    // thermal time constant is tens of seconds, and a fan curve's ramp slower
+    // still), while eight mailbox commands every 2 s stay nothing next to the
+    // GPU governor sharing the window — and the kernel driver caches for 1 s,
+    // so faster would only re-read its cache
+    static constexpr int DEFAULT_INTERVAL_MS = 2000;
     static constexpr int MIN_INTERVAL_MS = 250;      // the floor setIntervalMs clamps to
 
 private:
@@ -370,12 +366,11 @@ private:
     // the chips are being read, one way or the other (under m_)
     bool reading() const { return patched_ || (viaDriver_ && !driverDir_.empty()); }
 
-    // record interest and, while enabled or the driver is loaded, start the
-    // poller on the first ask
+    // record interest and start the poller on the first ask
     void want()
     {
         wantedAt_.store(mono());
-        if (!started_.load() && (enabled_.load() || driverLoaded()) && !started_.exchange(true))
+        if (!started_.exchange(true))
             std::thread(&Reader::loop, this).detach();
     }
 
@@ -419,9 +414,7 @@ private:
                 {
                     if (viaDriver_)
                         leaveDriver();
-                    if (!enabled_.load())
-                        ; // the SMU is this reader's only with the config's opt-in
-                    else if (!patched_ && !lost_)
+                    if (!patched_ && !lost_)
                     {
                         // patch() reads the chips once itself, so no sweep follows
                         if (now - lastTry >= RETRY_MS / 1000.0)
@@ -554,7 +547,7 @@ private:
     }
 
     // the module was unloaded: this reader may patch and read the SMU itself
-    // again (the config's opt-in permitting), starting over
+    // again, starting over
     void leaveDriver()
     {
         fprintf(stderr, "smu: the %s driver was unloaded\n", DRIVER);
@@ -884,7 +877,6 @@ private:
         return s.substr(i);
     }
 
-    std::atomic<bool> enabled_{false};
     std::atomic<bool> started_{false};
     std::atomic<double> wantedAt_{0};
     std::atomic<int> intervalMs_{DEFAULT_INTERVAL_MS};

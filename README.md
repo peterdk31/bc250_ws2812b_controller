@@ -906,7 +906,7 @@ so does *where the curve runs* — on whichever side can read the input:
 | `temp` | the top-level `sensors` pick | °C | daemon |
 | `chip:label` | any hwmon temperature, same syntax as `sensors` (`amdgpu:edge`, `nct6686:CPU`; a comma list of candidates works too). The phone's picker lists every labelled one the machine has, with its reading; so does `--fan-status` | °C | daemon |
 | `pmbus:CPU VRM` / `pmbus:GPU VRM` | the BC-250's two VRM rails, read from the board's PMBus controller over I2C by the daemon itself — see [VRM and GDDR6 temperatures](#vrm-and-gddr6-temperatures) for the two-wire mod that exposes the bus. Listed in the picker once the controller answers | °C | daemon |
-| `smu:VRAM hotspot` / `smu:VRAM average` / `smu:VRAM 0`..`7` | the eight GDDR6 chips, read from the SMU by the daemon — the hottest, the mean, or a named chip. Off unless `"vram_temps": true` and the SMU has been unlocked by a patched BIOS; see [VRM and GDDR6 temperatures](#vrm-and-gddr6-temperatures). Code 80 saturates the sensor at 120 °C. Listed in the picker once patched | °C | daemon |
+| `smu:VRAM hotspot` / `smu:VRAM average` / `smu:VRAM 0`..`7` | the eight GDDR6 chips — the hottest, the mean, or a named chip — through the `bc250_memory` kernel driver, or read from the SMU by the daemon when a patched BIOS has unlocked it; see [VRM and GDDR6 temperatures](#vrm-and-gddr6-temperatures). Code 80 saturates the sensor at 120 °C. Listed in the picker once patched | °C | daemon |
 | `file:/path` | one temperature in a plain file, in millidegrees (the sysfs convention: 1000 and up) or degrees. For telemetry some other program publishes as files. Files under `/run/bc250` named `*_temp` are listed in the picker; any other path goes in through its *Temperature file…* row | °C | daemon |
 | `chip:pwmN` | a hwmon pwm *output* — the board's own fan header, i.e. what its BIOS fan curve is asking for, read over the host instead of a wire. The phone's picker lists each one with its rpm. Not one the daemon drives (it would read its own duty back), so not the fan's own output either | % (0..255 read as 0..100) | daemon |
 | `cpu_load` / `gpu_load` | the rule conditions' readings | % | daemon |
@@ -1132,13 +1132,8 @@ stock command that returns it. The way around it — worked out by
 and packaged by [BC250-Telemetry](https://github.com/onlinermm/BC250-Telemetry),
 both MIT — is to upload a small program into the SMU and point an unused command
 slot at it; that program then asks the memory controller for each chip. The
-daemon can do this itself, exposing the chips as `smu:` sources, but only under
-two conditions, because patching a live microcontroller is not something to do
-by accident:
-
-```jsonc
-"vram_temps": true      // top level: opt in. Absent or false, the SMU is never touched.
-```
+daemon does this itself, exposing the chips as `smu:` sources — no setting to
+turn on; it works wherever it can and touches nothing where it can't:
 
 ```jsonc
 "input": "smu:VRAM hotspot"     // the hottest chip
@@ -1147,21 +1142,30 @@ by accident:
 ```
 
 ```jsonc
-"vram_temps_interval_ms": 1000  // optional: how often to re-read (default 3000, floored at 250)
+"vram_temps_interval_ms": 1000  // optional, top level: how often to re-read (default 2000, floored at 250)
 ```
 
-1. **`"vram_temps": true`** must be set. Without it the daemon does not open the
-   SMU at all, and the sources are not listed.
-2. **The SMU's secure-access gate must already be open**, done by a patched BIOS
-   such as [RescueMei's DXEv3 build](https://github.com/RescueMei/BC250-DXEv3-BIOSMOD).
-   The daemon does **not** run the unlock itself — that is an exploit, the risky
-   half, and it belongs in firmware that runs once at boot. If the gate is
-   closed the daemon says so and offers no readings.
+- **Nothing is opened until something asks** for an `smu:` reading — a fan's
+  input, a rule, or the phone's sensor picker.
+- **The `bc250_memory` kernel driver, when loaded, does the reading** (see
+  below); the daemon then never commands the SMU.
+- **Otherwise the SMU's secure-access gate must already be open**, done by a
+  patched BIOS such as [RescueMei's DXEv3 build](https://github.com/RescueMei/BC250-DXEv3-BIOSMOD).
+  The daemon does **not** run the unlock itself — that is an exploit, the risky
+  half, and it belongs in firmware that runs once at boot. If the gate is
+  closed the daemon says so once and offers no readings.
+
+The default 2 s is well inside how fast a GDDR6 package heats (its thermal
+time constant is tens of seconds), eight SMU commands every 2 s are nothing
+next to a GPU governor sharing the window, and the kernel driver caches its
+readings for 1 s, so reading faster gains nothing there.
 
 The daemon also checks the board is a BC-250 on stock **P3.0** firmware (the
 build the uploaded program was compiled against) and reads its own upload back
 before trusting it. The patch lives in the SMU's RAM only and is gone on the
-next reboot; the daemon re-applies it when asked. Code 80 is the sensor's
+next reboot; the daemon re-applies it when asked. On anything that is not a
+BC-250 the check fails before the SMU is opened, and the sources simply never
+read. Code 80 is the sensor's
 ceiling and reads as 120 °C, meaning "at least that" — set a VRAM curve's top
 below 120. `--fan-status` prints whether the patch took and, if not, why (a
 locked SMU, the wrong board or BIOS); the daemon logs the same to the journal.
@@ -1208,8 +1212,7 @@ commands. The daemon therefore steps aside for them, and no config changes:
   released first. Without the wires the driver registers nothing and the
   daemon's own scan finds nothing either — same as before.
 - **`bc250_memory` loaded** → `smu:` sources are read from its hwmon files,
-  and the daemon sends the SMU **no** command, whatever `vram_temps` says —
-  the module's loading is the opt-in, and only one SMU client is safe. A
+  and the daemon sends the SMU **no** command — only one SMU client is safe. A
   module loaded while the daemon is reading the SMU itself is noticed
   before its next command. If the module is loaded but its probe failed (SMU
   locked), it has no sensors and the daemon still leaves the SMU alone,
@@ -1512,7 +1515,12 @@ Radio policy: the receiver advertises in both PSU states — a crashed machine
 must be reachable, and it counts as "on" — every 300 ms in either state:
 opening the page waits for two advertisements (seeing the receiver, then
 connecting to it), so the interval is most of the time to connect, and
-300 ms is still gentle on 5VSB. The strip's bitstream leaves the chip by SPI
+300 ms is still gentle on 5VSB. Once a phone connects, the receiver asks it
+for a 15 ms connection interval (phones pick 30–50 ms on their own): every
+step of loading the dashboard is a request and an answer, one at a time, each
+waiting for the next exchange, so a shorter interval loads it about three
+times faster. A phone may decline; `debug_log` shows the interval it settled
+on. The strip's bitstream leaves the chip by SPI
 with DMA (`render.cpp`) for exactly this coexistence: the earlier RMT path refilled its buffer from an
 interrupt, and the BLE controller's interrupts delayed that refill enough to
 tear bits — random LEDs flickering while a phone was connected. The RMT path

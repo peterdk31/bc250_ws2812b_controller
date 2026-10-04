@@ -819,7 +819,7 @@ private:
             }
             if (cchip == "smu" && smu::sourceOf(clabel) < 0)
                 return "smu names a GDDR6 reading: smu:VRAM hotspot, smu:VRAM average, "
-                       "or smu:VRAM 0..7 (and needs \"vram_temps\": true or the bc250_memory driver)";
+                       "or smu:VRAM 0..7";
             if (cchip == "file" && (clabel.empty() || clabel[0] != '/'))
                 return "file:/path names a file holding one temperature (millidegrees or degrees)";
         }

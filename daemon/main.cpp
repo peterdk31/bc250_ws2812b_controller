@@ -310,15 +310,10 @@ int main(int argc, char** argv)
     if (!cfgcheck::retiredKeys(cfg))
         return 1;
 
-    // opt-in GDDR6 temperatures (daemon/sources/smu.hpp): the SMU is patched
-    // only when the config asks, and never otherwise — so this is the one
-    // switch, checked here and on every reload below
-    if (cfg.getBool(smu::CONFIG_KEY))
-    {
-        smu::Reader::get().setIntervalMs(
-            (int)cfg.getInt(smu::CONFIG_KEY_INTERVAL, smu::Reader::DEFAULT_INTERVAL_MS));
-        smu::Reader::get().enable();
-    }
+    // how often the GDDR6 temperatures are re-read (daemon/sources/smu.hpp),
+    // here and on every reload below
+    smu::Reader::get().setIntervalMs(
+        (int)cfg.getInt(smu::CONFIG_KEY_INTERVAL, smu::Reader::DEFAULT_INTERVAL_MS));
 
     // the dashboards' way back into the config file (daemon/config_edit.hpp):
     // a phone edit of a fan curve or the strip's colors is written into the
@@ -349,15 +344,13 @@ int main(int argc, char** argv)
         // the VRM controller, when one answers, and which way it is read
         if (pmbus::Reader::get().present())
             printf("  vrm: read through %s\n", pmbus::Reader::get().source().c_str());
-        // if VRAM temperatures were asked for (or the driver is loaded), say
-        // how the chips are read or why not — the reason the poller would log
-        // to the journal, shown here for the one-shot where its thread may not
-        // outlive us
-        if (cfg.getBool(smu::CONFIG_KEY) || smu::driverLoaded())
+        // how the VRAM chips are read, or why not — the reason the poller
+        // would log to the journal, shown here for the one-shot where its
+        // thread may not outlive us
         {
             smu::Reader::get().present(); // waits (bounded) for the first attempt
             std::string why = smu::Reader::get().status();
-            printf("  vram_temps: %s\n",
+            printf("  vram: %s\n",
                    why.empty() ? ("reading the GDDR6 chips through " + smu::Reader::get().source()).c_str()
                                : why.c_str());
             // and what each source reads, so "patched but no reading" shows
@@ -680,15 +673,9 @@ int main(int argc, char** argv)
         rules = std::move(freshRules);
         fanCtl = std::move(freshFans);
 
-        // a reload can only turn VRAM temperatures on (enable() is one-way; the
-        // in-memory SMU patch lives until reboot regardless), but the read
-        // cadence can change live
-        if (cfg.getBool(smu::CONFIG_KEY))
-        {
-            smu::Reader::get().setIntervalMs(
-                (int)cfg.getInt(smu::CONFIG_KEY_INTERVAL, smu::Reader::DEFAULT_INTERVAL_MS));
-            smu::Reader::get().enable();
-        }
+        // the VRAM read cadence changes live
+        smu::Reader::get().setIntervalMs(
+            (int)cfg.getInt(smu::CONFIG_KEY_INTERVAL, smu::Reader::DEFAULT_INTERVAL_MS));
 
         fanCtl.pushStandalone(sinks);
         fanCtl.pushConfig(sinks);

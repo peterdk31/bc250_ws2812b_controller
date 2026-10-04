@@ -36,8 +36,8 @@ inline void listTempFiles(const char* dirPath, std::vector<Reading>& out);
 //                                  bc250_vrm driver, or over I2C)
 //   smu:VRAM hotspot               a GDDR6 chip temperature, read by
 //                                  smu.hpp (through the bc250_memory
-//                                  driver, or from the SMU when the config
-//                                  opts in; see smu::Reader)
+//                                  driver, or from an unlocked SMU; see
+//                                  smu::Reader)
 // The "chip" of a file spec is the word file and its label the path; a pmbus
 // spec's labels are pmbus::RAILS, an smu spec's smu::SOURCES.
 //
@@ -466,8 +466,8 @@ inline std::vector<Reading> enumerate()
             out.push_back({"pmbus", pmbus::RAILS[i].label, false, v, ""});
     }
 
-    // the GDDR6 chips, once the SMU is patched (only when the config opted in,
-    // so the enumerate is empty and the poller stays dark otherwise)
+    // the GDDR6 chips, once they read (asking starts the reader: through the
+    // bc250_memory driver, or by patching an unlocked SMU — nothing elsewhere)
     for (int i = 0; i < smu::SOURCE_COUNT; i++)
     {
         float v;
