@@ -8,6 +8,7 @@
 #include <vector>
 #include <initializer_list>
 #include <memory>
+#include <functional>
 #include "config_check.hpp"
 #include "config_edit.hpp"
 #include "effect.hpp"
@@ -432,6 +433,19 @@ int main(int argc, char** argv)
     stripRemote.pushConfig(sinks); // ...and its strip card (daemon/strip_remote.hpp)
     pwrRemote.pushConfig(sinks);   // ...and its power settings (daemon/power_remote.hpp)
 
+    // a phone's edit goes to the module that owns the view it edits
+    // (protocol.hpp MSG_EDIT); a view nobody here owns is dropped
+    struct Editor
+    {
+        uint8_t view;
+        std::function<void(const std::string&)> edit;
+    };
+    const Editor editors[] = {
+        {fans::Controller::VIEW, [&](const std::string& e) { fanCtl.onEdit(e, sinks); }},
+        {stripcfg::Remote::VIEW, [&](const std::string& e) { stripRemote.onEdit(e, sinks); }},
+        {pwrcfg::Remote::VIEW, [&](const std::string& e) { pwrRemote.onEdit(e, sinks); }},
+    };
+
     // the fan curves run on their own 0.5 s cadence in both loops below; a
     // no-op with no headers. The dashboard's messages back from the
     // receiver (a phone watching, a curve edit) are taken every frame — an
@@ -472,12 +486,12 @@ int main(int argc, char** argv)
         for (auto& s : sinks)
             while (s->takeMessage(kind, payload))
             {
-                if (kind == proto::MSG_STRIP_CONFIG)
-                    stripRemote.onMessage(kind, payload, sinks);
-                else if (kind == proto::MSG_PWR_CONFIG)
-                    pwrRemote.onMessage(kind, payload, sinks);
-                else
-                    fanCtl.onMessage(kind, payload, now, sinks);
+                if (kind == proto::MSG_WATCH)
+                    fanCtl.onWatch(!payload.empty() && payload[0] != 0, now);
+                else if (kind == proto::MSG_EDIT && !payload.empty())
+                    for (auto& e : editors)
+                        if (e.view == payload[0])
+                            e.edit(std::string(payload.begin() + 1, payload.end()));
             }
         if (cfgWriter.takeWrote())
             cfgMtime = cfgSeen = fileMtime(cfgPath);

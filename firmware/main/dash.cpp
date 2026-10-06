@@ -1,76 +1,93 @@
 #include "dash.hpp"
 
+#include <cstdlib>
 #include <cstring>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "protocol.hpp"
+#include "dbglog.hpp"
 #include "util.hpp"
 
 namespace dash
 {
 struct Entry
 {
-    uint8_t* buf;
-    uint16_t cap;
+    uint8_t* buf = nullptr;
+    uint16_t cap = 0;
     uint16_t len = 0;
     uint32_t seq = 0;
     uint32_t ms = 0; // millis() of the last arrival, 0 = never
 };
 
-static uint8_t g_fanCfg[proto::DASH_FAN_CONFIG_MAX];
-static uint8_t g_fanTel[proto::DASH_FAN_TELEM_MAX];
-static uint8_t g_stripCfg[proto::DASH_STRIP_CONFIG_MAX];
-static uint8_t g_fanSens[proto::DASH_FAN_SENSORS_MAX];
-static uint8_t g_pwrCfg[proto::DASH_PWR_CONFIG_MAX];
+static Entry g_views[VIEWS];
 
-static_assert(proto::DASH_FAN_CONFIG_MAX <= MAX_LEN && proto::DASH_FAN_SENSORS_MAX <= MAX_LEN,
-              "MAX_LEN is the largest slot");
+// buffers grow in steps of this, so a view whose length wanders by a few
+// bytes from one arrival to the next (the telemetry) settles on one size
+static const uint16_t GROW = 256;
 
-static Entry g_slots[SLOTS] = {
-    {g_fanCfg, sizeof g_fanCfg},
-    {g_fanTel, sizeof g_fanTel},
-    {g_stripCfg, sizeof g_stripCfg},
-    {g_fanSens, sizeof g_fanSens},
-    {g_pwrCfg, sizeof g_pwrCfg},
-};
-
-// one lock for all of them: the writers are a single task, the readers a
+// one lock for all of them: the writer is a single task, the readers a
 // 250 ms poll and the phone's page reads, and a copy is at most 2 KB
 static portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 
-void set(Slot slot, const uint8_t* payload, uint16_t len)
+void set(uint8_t view, const uint8_t* payload, uint16_t len)
 {
-    if (slot >= SLOTS)
+    if (view >= VIEWS || len > MAX_LEN)
         return;
-    Entry& e = g_slots[slot];
-    // an empty payload clears the slot: the daemon has nothing there (a
-    // config with no fans block), which the phone shows as it shows "no daemon"
+    Entry& e = g_views[view];
+
+    // a bigger buffer is filled before anyone can see it (no allocating in a
+    // critical section), then swapped in whole with the length; only this
+    // task ever grows one, so cap can't move meanwhile
+    uint8_t* grown = nullptr;
+    uint16_t cap = e.cap;
     if (len > e.cap)
-        return;
+    {
+        cap = (uint16_t)((len + GROW - 1) / GROW * GROW);
+        if (cap > MAX_LEN)
+            cap = MAX_LEN;
+        grown = (uint8_t*)malloc(cap);
+        if (!grown)
+        {
+            dbglog::line("dash: no heap for view %u (%u bytes) — kept the last one", (unsigned)view,
+                         (unsigned)len);
+            return;
+        }
+        memcpy(grown, payload, len);
+    }
 
     uint32_t now = millis();
+    uint8_t* old = nullptr;
     taskENTER_CRITICAL(&g_mux);
-    if (len)
+    if (grown)
+    {
+        old = e.buf;
+        e.buf = grown;
+        e.cap = cap;
+    }
+    else if (len)
         memcpy(e.buf, payload, len);
     e.len = len;
     e.seq++;
     e.ms = now ? now : 1;
     taskEXIT_CRITICAL(&g_mux);
+    free(old);
 }
 
-uint16_t get(Slot slot, uint8_t* out, uint16_t max, uint32_t* seq, uint32_t* ageMs)
+uint16_t get(uint8_t view, uint8_t* out, uint16_t max, uint16_t* len, uint32_t* seq,
+             uint32_t* ageMs)
 {
-    if (slot >= SLOTS)
+    if (view >= VIEWS)
         return 0;
-    Entry& e = g_slots[slot];
+    Entry& e = g_views[view];
 
     uint32_t now = millis();
     taskENTER_CRITICAL(&g_mux);
-    uint16_t n = e.len <= max ? e.len : 0;
-    if (n && out)
+    uint16_t n = out ? (e.len < max ? e.len : max) : 0;
+    if (n)
         memcpy(out, e.buf, n);
+    if (len)
+        *len = e.len;
     if (seq)
         *seq = e.seq;
     if (ageMs)

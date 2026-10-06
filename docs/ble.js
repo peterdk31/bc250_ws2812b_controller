@@ -17,27 +17,27 @@
 //                          args pin(1), 0xFF = none — the receiver's own
 //   status  a5f20003-... : read/notify  1 byte  0=off 1=booting 2=on
 //   fans    a5f20004-... : read/notify  the receiver's own fan view (parseFans)
-//   fancfg  a5f20005-... : read/notify  the daemon's fan list, JSON text;
-//                          write  token(16) + one edit (fans.hpp's shapes)
 //   info    a5f20006-... : read  firmware version + heap + the free input
 //                          pins (a gpio:N fan input, the wake input), the
 //                          board's header map, the free output pins
-//   telem   a5f20007-... : read/notify  the daemon's readings, JSON text
-//   stripcfg a5f20008-...: read/notify  the daemon's strip view, JSON text;
-//                          write  token(16) + a partial edit, same shape
 //   fansa   a5f20009-... : read/notify  the receiver's standalone fan settings
-//   sensors a5f2000a-... : read/notify  the daemon's sensor catalogue, JSON text
-//                          {"chip":{"label":61.0},"_outs":[...]} (fans.hpp sensorsJson)
 //   pwr     a5f2000b-... : read/notify  the receiver's own power switch view
 //                          (parsePwr): wiring, tunings in force, the sense
 //                          wire's live reading — notified 1 Hz while subscribed
-//   pwrcfg  a5f2000c-... : read/notify  the daemon's power switch view, JSON text
-//                          (power_remote.hpp); write token(16) + a partial edit
-//   page    a5f2000d-... : write [slot][page], read the page — the daemon's
-//                          JSON values above past a GATT value's 512 bytes
-//                          (readPaged); a receiver without it is older firmware
-// A receiver on older firmware has only the first two; the dashboard then
-// stays hidden and the power remote works as before.
+//   page    a5f2000d-... : write [view][page], read the page — a daemon view,
+//                          whole (readPaged)
+//   views   a5f2000e-... : notify  view(1) len(2, LE, the whole view's) + as
+//                          much of the view as fits; write token(16) + view(1)
+//                          + an edit. The daemon's views, JSON text, by id
+//                          (VIEW, protocol.hpp VIEW_*): the fan list
+//                          (fans.hpp; edits are its shapes), its readings, the
+//                          strip (strip_remote.hpp; a partial edit), the
+//                          sensor catalogue {"chip":{"label":61.0},"_outs":[...]}
+//                          (fans.hpp sensorsJson) and the power switch
+//                          (power_remote.hpp; a partial edit). Subscribing is
+//                          what starts the daemon's readings.
+// A receiver with only the first two has no dashboard, and the power remote
+// works as before; one without views runs firmware from before them.
 //
 // Reconnects on its own: the chooser grants a persistent permission, so
 // navigator.bluetooth.getDevices() can hand the devices back on the next
@@ -63,15 +63,13 @@ export const SVC    = 'a5f20001-8f11-4e0e-9b3a-0bc250e0c001';
 const CTRL   = 'a5f20002-8f11-4e0e-9b3a-0bc250e0c001';
 const STAT   = 'a5f20003-8f11-4e0e-9b3a-0bc250e0c001';
 const FANS   = 'a5f20004-8f11-4e0e-9b3a-0bc250e0c001';
-const FANCFG = 'a5f20005-8f11-4e0e-9b3a-0bc250e0c001';
 const INFO   = 'a5f20006-8f11-4e0e-9b3a-0bc250e0c001';
-const TELEM  = 'a5f20007-8f11-4e0e-9b3a-0bc250e0c001';
-const STRIPCFG = 'a5f20008-8f11-4e0e-9b3a-0bc250e0c001';
 const FANSA  = 'a5f20009-8f11-4e0e-9b3a-0bc250e0c001';
-const SENSORS = 'a5f2000a-8f11-4e0e-9b3a-0bc250e0c001';
 const PWR    = 'a5f2000b-8f11-4e0e-9b3a-0bc250e0c001';
-const PWRCFG = 'a5f2000c-8f11-4e0e-9b3a-0bc250e0c001';
 const PAGE   = 'a5f2000d-8f11-4e0e-9b3a-0bc250e0c001';
+const VIEWS  = 'a5f2000e-8f11-4e0e-9b3a-0bc250e0c001';
+// the daemon's views by id (protocol.hpp VIEW_*)
+export const VIEW = { fancfg: 0, telem: 1, strip: 2, sensors: 3, power: 4 };
 export const OP_ON = 0x01, OP_SHUTDOWN = 0x02, OP_HARD_OFF = 0x03;
 export const OP_FAN_HEADER = 0x10;   // + slot(1) + the slot's record (SA_HEADER_LEN, encodeRecord)
 export const OP_PWR_TUNING = 0x20;   // + hold_ms(2) boot_ms(2) low_mv(2) high_mv(2)
@@ -106,8 +104,7 @@ export function useProvider(p) {
 // ---- the store ----
 export const S = {
   device: null, ctrl: null, stat: null,   // the selected receiver + its live GATT
-  fansChr: null, cfgChr: null, telemChr: null, stripChr: null, saChr: null, sensChr: null,
-  pwrChr: null, pcfgChr: null, infoChr: null, pageChr: null,
+  fansChr: null, saChr: null, pwrChr: null, infoChr: null, pageChr: null, viewsChr: null,
   psu: -1,         // last status byte seen, -1 = unknown
   busy: false,     // a user-initiated connect or write in flight
   attempt: null,   // the device an auto-reconnect (watch or connect) is live for
@@ -921,7 +918,7 @@ export function wakePinOptions(current) {
 }
 
 function dashReset() {
-  S.fansChr = S.cfgChr = S.telemChr = S.stripChr = S.saChr = S.sensChr = S.pwrChr = S.pcfgChr = S.infoChr = S.pageChr = null;
+  S.fansChr = S.saChr = S.pwrChr = S.infoChr = S.pageChr = S.viewsChr = null;
   S.fans = S.sa = S.cfg = S.telem = S.info = S.sens = S.outs = S.pwr = S.pcfg = null; S.sensMore = 0;
   S.saving = null; S.note = null;
   clearTimeout(saveTimer);
@@ -938,36 +935,32 @@ export function note(text, cls) {
 }
 export function dismiss() { if (S.note && S.note.cls === 'err') { S.note = null; emit(); } }
 
-// a notification is truncated to the ATT MTU; a read isn't — but a read is
-// itself at most a GATT value, 512 bytes, and the daemon's JSON can be longer
-// (protocol.hpp DASH_*_MAX): those come through the page characteristic
-// (readPaged). The fans value fits any MTU; the JSON values and the
-// standalone value may not. A value that arrived whole is used as it is; one
-// cut short is re-read — one read at a time, notifications landing meanwhile
-// mark it stale so it runs once more.
-const whole = text => { try { JSON.parse(text); return true; } catch { return false; } };
-// the receiver's dash::Slot of each JSON value, for the page characteristic
-const SLOT = { fancfg: 0, telem: 1, stripcfg: 2, sensors: 3, pwrcfg: 4 };
-const PAGE_HDR = 6; // ver slot page pages len(2)
-// one whole payload, page by page: page 0 makes the receiver take a snapshot,
+// A view's notification carries as much of it as the ATT MTU leaves room
+// for, with the whole view's length up front: one that arrived whole is used
+// as it is, one cut short is read whole through the page characteristic —
+// one read at a time per view, notifications landing meanwhile mark it stale
+// so it runs once more. The receiver's binary values (fans, standalone, pwr)
+// are read again by plain reads when a notification comes up short.
+const PAGE_HDR = 6; // ver view page pages len(2)
+// one whole view, page by page: page 0 makes the receiver take a snapshot,
 // every later page is served from the same one, so the pages always belong
 // together (ble.cpp pageAccess) — as long as no other paged read's page 0
 // lands in between, which would re-snapshot under this one. Each GATT op is
 // queued on its own, so the whole read is held behind its own chain: paged
 // reads run one at a time.
 let pagedChain = Promise.resolve();
-export function readPaged(slot, d = S.device) {
-  const p = pagedChain.then(() => { if (S.device !== d) throw SUPERSEDED; return readPagedNow(slot); });
+export function readPaged(view, d = S.device) {
+  const p = pagedChain.then(() => { if (S.device !== d) throw SUPERSEDED; return readPagedNow(view); });
   pagedChain = p.then(() => {}, () => {});
   return p;
 }
-async function readPagedNow(slot) {
+async function readPagedNow(view) {
   const chr = S.pageChr, parts = [];
   let pages = 1, total = 0, have = 0;
   for (let p = 0; p < pages; p++) {
-    await gattWrite(chr, Uint8Array.of(slot, p));
+    await gattWrite(chr, Uint8Array.of(view, p));
     const v = await gattRead(chr);
-    if (v.byteLength < PAGE_HDR || v.getUint8(0) !== 1 || v.getUint8(1) !== slot || v.getUint8(2) !== p)
+    if (v.byteLength < PAGE_HDR || v.getUint8(0) !== 1 || v.getUint8(1) !== view || v.getUint8(2) !== p)
       throw new Error('the receiver answered a different page');
     if (p === 0) { pages = Math.max(1, v.getUint8(3)); total = v.getUint16(4, true); }
     const part = new Uint8Array(v.buffer, v.byteOffset + PAGE_HDR, v.byteLength - PAGE_HDR);
@@ -979,9 +972,8 @@ async function readPagedNow(slot) {
   for (const part of parts) { out.set(part, at); at += part.length; }
   return new DataView(out.buffer);
 }
-// a JSON value, whole: paged where the receiver pages, a plain read otherwise
-const readJson = (chr, slot) => S.pageChr && slot !== undefined ? readPaged(slot, deviceOf(chr)) : gattRead(chr);
-function notifier(current, ok, apply, slot) {
+// a receiver value whose notification came up short is read again
+function notifier(current, ok, apply) {
   let reading = false, stale = false;
   return async e => {
     const chr = e.target;
@@ -993,33 +985,19 @@ function notifier(current, ok, apply, slot) {
     try {
       do {
         stale = false;
-        const v = await readJson(chr, slot);
+        const v = await gattRead(chr);
         if (chr !== current()) return;
         apply(v);
       } while (stale);
     } catch {} finally { reading = false; }
   };
 }
-// an empty notification is either "nothing from the daemon" or a value too
-// long for the notification's own read (ble.cpp serve) — a receiver that pages
-// tells the two apart through the page characteristic, so re-read it there
-const jsonNotifier = (current, apply, slot) =>
-  notifier(current, dv => dv.byteLength ? whole(utf8.decode(dv)) : !S.pageChr, apply, slot);
 const onFansEvent = e => {
   if (e.target !== S.fansChr) return;
   const f = parseFans(e.target.value);
   if (f) { S.fans = f; emit(); }
 };
-const onCfgEvent = jsonNotifier(() => S.cfgChr, onCfg, SLOT.fancfg);
-const onTelemEvent = jsonNotifier(() => S.telemChr, dv => {
-  S.telem = dv.byteLength ? parseTelem(utf8.decode(dv)) : null;
-  emit();
-}, SLOT.telem);
 const onSaEvent = notifier(() => S.saChr, dv => dv.byteLength >= SA_LEN, onSa);
-const onSensEvent = jsonNotifier(() => S.sensChr, dv => {
-  S.sens = dv.byteLength ? parseSensors(utf8.decode(dv)) : null;
-  emit();
-}, SLOT.sensors);
 const onPwrEvent = notifier(() => S.pwrChr, dv => dv.byteLength >= PWR_LEN, dv => {
   const v = parsePwr(dv);
   if (!v) return;
@@ -1027,6 +1005,41 @@ const onPwrEvent = notifier(() => S.pwrChr, dv => dv.byteLength >= PWR_LEN, dv =
   S.pwr = v; emit();
   if (moved) refreshInfo();
 });
+
+// what each daemon view's arrival does (an empty one: the daemon has nothing
+// there, or there is no daemon); a view this page doesn't know is passed over
+const json = dv => dv.byteLength ? utf8.decode(dv) : null;
+const VIEW_APPLY = {
+  [VIEW.fancfg]: onCfg,
+  [VIEW.telem]: dv => { const t = json(dv); S.telem = t === null ? null : parseTelem(t); emit(); },
+  [VIEW.strip]: dv => onStripCfg(dv),
+  [VIEW.sensors]: dv => { const t = json(dv); S.sens = t === null ? null : parseSensors(t); emit(); },
+  [VIEW.power]: dv => onPcfg(dv),
+};
+// one view, whole, through the page characteristic
+async function readView(view) {
+  const d = S.device;
+  const v = await readPaged(view, d);
+  if (S.device === d) VIEW_APPLY[view](v);
+}
+const viewReads = new Map(); // view -> { stale } while a paged re-read runs
+async function onViewsEvent(e) {
+  if (e.target !== S.viewsChr) return;
+  const dv = e.target.value;
+  if (dv.byteLength < 3) return;
+  const view = dv.getUint8(0), total = dv.getUint16(1, true);
+  if (!VIEW_APPLY[view]) return;
+  if (dv.byteLength - 3 === total) { VIEW_APPLY[view](new DataView(dv.buffer, dv.byteOffset + 3, total)); return; }
+  const r = viewReads.get(view);
+  if (r) { r.stale = true; return; }
+  const run = { stale: false };
+  viewReads.set(view, run);
+  const d = S.device;
+  try {
+    do { run.stale = false; await readView(view); } while (run.stale && S.device === d);
+  } catch {} finally { viewReads.delete(view); } // unread: the next notification tries again
+}
+
 // re-read the receiver's build facts — its free input and output pins,
 // after the wake pin or a fan's output moved (the info value is read-only and
 // never notifies)
@@ -1035,8 +1048,6 @@ async function refreshInfo() {
   if (!chr) return;
   try { const v = parseInfo(await gattRead(chr)); if (chr === S.infoChr && v) { S.info = v; emit(); } } catch {}
 }
-const onPcfgEvent = jsonNotifier(() => S.pcfgChr, onPcfg, SLOT.pwrcfg);
-
 // an answer landed for the save in flight: that edit is done
 function settled(key) {
   S.saving = null;
@@ -1081,10 +1092,10 @@ export function onPcfg(dv) {
 let onSaved = null;
 export const whenSaved = fn => { onSaved = fn; };
 
-// does this receiver speak the fan list (the page characteristic, info ver
-// 3, the 25-byte record)? A receiver on older firmware — and the daemon that
-// matches it — still powers the host, but its fans are the old shape
-export const fansCurrent = () => !!S.pageChr;
+// does this receiver speak the daemon's views? A receiver on older firmware —
+// and the daemon that matches it — still powers the host, but the dashboard
+// needs both updated
+export const fansCurrent = () => !!S.viewsChr;
 
 // the dashboard of the board open() just connected; a switch while it
 // loads stops it (SUPERSEDED, out of the first GATT op after), and an
@@ -1093,54 +1104,40 @@ export const fansCurrent = () => !!S.pageChr;
 const skip = e => { if (e === SUPERSEDED) throw e; return null; };
 async function dashOpen(svc) {
   const d = S.device;
-  let f, c, t, i;
+  let f;
+  try { f = await svc.getCharacteristic(FANS); } catch { return; } // no dashboard, and nothing to say
+  S.fansChr = f;
+  let i, s, pw, pg, v;
   try {
-    f = await svc.getCharacteristic(FANS);
-    c = await svc.getCharacteristic(FANCFG);
-    t = await svc.getCharacteristic(TELEM);
-  } catch { return; } // older firmware: no dashboard, and nothing to say
-  try { i = await svc.getCharacteristic(INFO); } catch { i = null; }
-  let sc = null, s = null, se = null, pw = null, pc = null, pg = null;
-  try { sc = await svc.getCharacteristic(STRIPCFG); } catch { sc = null; } // firmware before the strip card
-  try { s = await svc.getCharacteristic(FANSA); } catch { s = null; }      // firmware before gpio inputs
-  try { se = await svc.getCharacteristic(SENSORS); } catch { se = null; }  // firmware before the catalogue
-  try { pw = await svc.getCharacteristic(PWR); pc = await svc.getCharacteristic(PWRCFG); } catch { pw = pc = null; } // firmware before the power settings
-  try { pg = await svc.getCharacteristic(PAGE); } catch { pg = null; }     // firmware before the fan list
+    i = await svc.getCharacteristic(INFO);
+    s = await svc.getCharacteristic(FANSA);
+    pw = await svc.getCharacteristic(PWR);
+    pg = await svc.getCharacteristic(PAGE);
+    v = await svc.getCharacteristic(VIEWS);
+  } catch { emit(); return; } // firmware from before the views: the screens say to update
   if (S.device !== d || !d.gatt.connected) return;
-  S.fansChr = f; S.cfgChr = c; S.telemChr = t; S.saChr = s; S.sensChr = se; S.pwrChr = pw; S.pcfgChr = pc; S.infoChr = i; S.pageChr = pg;
+  S.saChr = s; S.pwrChr = pw; S.infoChr = i; S.pageChr = pg; S.viewsChr = v;
   f.addEventListener('characteristicvaluechanged', onFansEvent);
-  c.addEventListener('characteristicvaluechanged', onCfgEvent);
-  t.addEventListener('characteristicvaluechanged', onTelemEvent);
-  if (s) s.addEventListener('characteristicvaluechanged', onSaEvent);
-  if (se) se.addEventListener('characteristicvaluechanged', onSensEvent);
-  if (pw) pw.addEventListener('characteristicvaluechanged', onPwrEvent);
-  if (pc) pc.addEventListener('characteristicvaluechanged', onPcfgEvent);
+  s.addEventListener('characteristicvaluechanged', onSaEvent);
+  pw.addEventListener('characteristicvaluechanged', onPwrEvent);
+  v.addEventListener('characteristicvaluechanged', onViewsEvent);
   // Every GATT op is one round trip, one at a time, so the order is what the
   // screen fills in by: the header's readings and the fan list first, then
   // the Power tab's, the rest of the fans' facts, the strip, and last the
-  // sensor catalogue — the biggest value, paged, and only the input picker's.
-  // Each value is subscribed just before its read, so no change is missed.
+  // sensor catalogue — the biggest view, and only the input picker's. The
+  // views are subscribed before any is read, so no change is missed — and
+  // the subscription is what tells the daemon to start reporting.
   await gattSubscribe(f);
   const fv = parseFans(await gattRead(f));
   if (fv) S.fans = fv;
-  await gattSubscribe(t); // this one tells the daemon to start reporting
-  const tv = await readJson(t, SLOT.telem);
-  S.telem = tv.byteLength ? parseTelem(utf8.decode(tv)) : null;
-  await gattSubscribe(c);
-  onCfg(await readJson(c, SLOT.fancfg)); // emits
-  if (pw) {
-    try { await gattSubscribe(pw); S.pwr = parsePwr(await gattRead(pw)); } catch (e) { S.pwr = skip(e); }
-    if (pc) { try { await gattSubscribe(pc); onPcfg(await readJson(pc, SLOT.pwrcfg)); } catch (e) { S.pcfg = skip(e); } } // emits
-  }
-  if (i) { try { S.info = parseInfo(await gattRead(i)); } catch (e) { S.info = skip(e); } }
-  if (s) { try { await gattSubscribe(s); onSa(await gattRead(s)); } catch (e) { skip(e); } } // emits
+  await gattSubscribe(v);
+  for (const id of [VIEW.telem, VIEW.fancfg]) await readView(id);
+  try { await gattSubscribe(pw); S.pwr = parsePwr(await gattRead(pw)); } catch (e) { S.pwr = skip(e); }
+  try { await readView(VIEW.power); } catch (e) { skip(e); }
+  try { S.info = parseInfo(await gattRead(i)); } catch (e) { S.info = skip(e); }
+  try { await gattSubscribe(s); onSa(await gattRead(s)); } catch (e) { skip(e); } // emits
   emit();
-  if (sc && S.device === d) await stripOpen(sc);
-  if (se && S.device === d) {
-    try { await gattSubscribe(se); const v = await readJson(se, SLOT.sensors); S.sens = v.byteLength ? parseSensors(utf8.decode(v)) : null; }
-    catch (e) { S.sens = skip(e); }
-    emit();
-  }
+  for (const id of [VIEW.strip, VIEW.sensors]) { try { await readView(id); } catch (e) { skip(e); } }
 }
 
 // ---- fan edits ----
@@ -1201,21 +1198,28 @@ export function checkEdit(h, key) {
   return '';
 }
 
-// write one fan edit (the daemon's shapes, fans.hpp), then wait for the
-// daemon's config to come back (onCfg) — that is what "saved" or "refused"
-// means here. Resolves true once the write itself went through. `chr` is the
-// daemon view's characteristic: the fan config by default, the power
-// switch's for a 'p' save (answered by onPcfg).
-export async function writeCfg(key, edit, chr = S.cfgChr) {
-  if (!chr || S.saving !== null) return false;
+// an edit of a daemon view, as the views characteristic takes it:
+// token(16) + view(1) + the edit's JSON. null when it can't go in one write
+function viewEdit(view, edit) {
   const text = new TextEncoder().encode(JSON.stringify(edit));
-  const buf = new Uint8Array(TOKEN_LEN + text.length);
-  buf.set(tokenBytes()); buf.set(text, TOKEN_LEN);
-  if (buf.length > 512) { note('that edit is too long to send — shorten the name or the input', 'err'); return false; }
+  const buf = new Uint8Array(TOKEN_LEN + 1 + text.length);
+  buf.set(tokenBytes()); buf[TOKEN_LEN] = view; buf.set(text, TOKEN_LEN + 1);
+  return buf.length > 512 ? null : buf;
+}
+
+// write one fan edit (the daemon's shapes, fans.hpp), then wait for the
+// daemon's view to come back (onCfg) — that is what "saved" or "refused"
+// means here. Resolves true once the write itself went through. `view` is
+// the daemon view edited: the fan list by default, the power switch for a
+// 'p' save (answered by onPcfg).
+export async function writeCfg(key, edit, view = VIEW.fancfg) {
+  if (!S.viewsChr || S.saving !== null) return false;
+  const buf = viewEdit(view, edit);
+  if (!buf) { note('that edit is too long to send — shorten the name or the input', 'err'); return false; }
   S.saving = key;
   note('saving…');
   try {
-    await gattWrite(chr, buf);
+    await gattWrite(S.viewsChr, buf);
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       if (S.saving !== key) return;
@@ -1313,7 +1317,7 @@ export async function savePower(t) {
     const e = { hold_seconds: t.hold, boot_timeout_seconds: t.boot, sense_low_mv: t.low, sense_high_mv: t.high };
     if (t.wake !== undefined && !wakeHere) { e.wake = t.wake; setTimeout(checkWakeLanded, WAKE_LANDED_MS); }
     if (t.shortPress !== undefined) e.short_press = t.shortPress;
-    writeCfg('p', e, S.pcfgChr);
+    writeCfg('p', e, VIEW.power);
     return;
   }
   writeTuning(t);
@@ -1393,8 +1397,6 @@ function stripReset() {
   clearTimeout(sTimer);
 }
 
-const onStripEvent = jsonNotifier(() => S.stripChr, onStripCfg, SLOT.stripcfg);
-
 // does the daemon's view carry the edit? The view is also pushed unsolicited
 // (a scene's file appearing or disappearing), so an answer is recognised by
 // its content, not its arrival; a refused edit sends nothing and times out.
@@ -1429,15 +1431,6 @@ export function onStripCfg(dv) {
   emit();
 }
 
-async function stripOpen(sc) {
-  S.stripChr = sc;
-  sc.addEventListener('characteristicvaluechanged', onStripEvent);
-  await gattSubscribe(sc);
-  const v = await readJson(sc, SLOT.stripcfg);
-  if (S.stripChr !== sc) return;
-  onStripCfg(v);
-}
-
 // merge a partial edit into another (scenes by path)
 function mergeStrip(into, edit) {
   for (const k in edit) {
@@ -1454,15 +1447,14 @@ function mergeStrip(into, edit) {
 export const pendingStrip = () => mergeStrip(mergeStrip({}, sInflight || {}), sPending || {});
 
 export async function writeStrip(edit) {
-  if (!S.stripChr || !S.scfg || !S.scfg.editable) return;
+  if (!S.viewsChr || !S.scfg || !S.scfg.editable) return;
   if (sSaving) { sPending = mergeStrip(sPending || {}, edit); return; }
-  const text = new TextEncoder().encode(JSON.stringify(edit));
-  const buf = new Uint8Array(TOKEN_LEN + text.length);
-  buf.set(tokenBytes()); buf.set(text, TOKEN_LEN);
+  const buf = viewEdit(VIEW.strip, edit);
+  if (!buf) { note('that edit is too long to send', 'err'); return; }
   sSaving = true; sInflight = edit;
   note('saving…');
   try {
-    await gattWrite(S.stripChr, buf);
+    await gattWrite(S.viewsChr, buf);
     clearTimeout(sTimer);
     sTimer = setTimeout(() => {
       if (!sSaving) return;

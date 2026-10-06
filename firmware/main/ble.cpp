@@ -35,7 +35,7 @@
 
 #define BLOG(fmt, ...) dbglog::line("ble: " fmt, ##__VA_ARGS__)
 
-// The GATT surface — one custom service, thirteen characteristics:
+// The GATT surface — one custom service, eight characteristics:
 //
 //   control (write):        token(16) op(1) [args]. Token is the flash-time
 //                           shared secret, byte-for-byte (short tokens
@@ -96,20 +96,6 @@
 //                           applies and where it came from, the PSU state,
 //                           how old the daemon's telemetry is. Notified once
 //                           a second while subscribed.
-//   telem (read + notify):  the daemon's telemetry — the last CMD_FAN_TELEM
-//                           verbatim (JSON text; empty until one arrives).
-//                           Notified when a new one lands. A subscription is
-//                           what tells the daemon to start sending them
-//                           (MSG_FAN_WATCH); unsubscribing stops them.
-//   fancfg (read + write + notify):
-//                           the fan config as the daemon runs it — the last
-//                           CMD_FAN_CONFIG verbatim (JSON text; empty until
-//                           one arrives, and when longer than a GATT value's
-//                           512 bytes: the page characteristic reads it). A
-//                           write is token(16) followed by an edit (JSON
-//                           text, the daemon's shape), forwarded to the
-//                           daemon as MSG_FAN_CONFIG; the daemon's answering
-//                           CMD_FAN_CONFIG notifies the new value.
 //   fansa (read + notify):  this board's standalone fan settings as stored —
 //                           CMD_FAN_STANDALONE's layout (protocol.hpp): one
 //                           record per slot with its output, fallback, boost
@@ -117,54 +103,49 @@
 //                           slot's pin and curve. What the page shows and
 //                           edits with no daemon around (op 0x10 writes one
 //                           slot's record); notified when it changes.
-//   stripcfg (read + write + notify):
-//                           the same for the strip: the last CMD_STRIP_CONFIG
-//                           (brightness, gamma, white balance, the file: rule
-//                           "scenes"); a write is token(16) + a partial edit
-//                           relayed as MSG_STRIP_CONFIG, answered by the
-//                           daemon's next CMD_STRIP_CONFIG.
 //   info (read):            build facts: firmware version string, free heap,
 //                           the GPIOs a gpio:N fan input or the wake input
 //                           may read on, the board's header map, and the
 //                           GPIOs a gpio:N fan output may drive.
-//   sensors (read + notify):the daemon's sensor catalogue — the last
-//                           CMD_FAN_SENSORS verbatim (JSON text; empty until
-//                           one arrives): every hwmon temperature and pwm
-//                           output a header could follow, with readings, for
-//                           the page's source picker. The daemon sends it
-//                           while a phone watches telem; notified when a new
-//                           one lands.
 //   pwr (read + notify):    this board's power switch, PWR_LEN bytes (layout
 //                           at buildPwr): the wiring, the tunings in force,
 //                           the PSU state and what the sense wire reads right
 //                           now — the calibration view. Notified once a
 //                           second while subscribed, like fans.
-//   pwrcfg (read + write + notify):
-//                           the power switch as the daemon runs it — the last
-//                           CMD_PWR_CONFIG (the tunings in config units and
-//                           the short_press command); a write is token(16) +
-//                           a partial edit relayed as MSG_PWR_CONFIG, answered
-//                           by the daemon's next CMD_PWR_CONFIG.
-//   page (read + write):    any of the daemon's payloads above, in pages —
-//                           a GATT value holds 512 bytes, the fan config and
-//                           the sensor catalogue can hold more (protocol.hpp
-//                           DASH_*_MAX). A write of [slot][page] (dash::Slot;
-//                           no token — these payloads are readable anyway)
-//                           picks the page; page 0, or another slot, takes a
-//                           snapshot of the payload, and every later page
-//                           serves the same snapshot, so the pages of one
-//                           read always belong together. A read is ver(1) = 1
-//                           slot(1) page(1) pages(1) len(2, the whole
-//                           payload's, LE) then that page's PAGE_DATA bytes
-//                           (fewer on the last).
+//   views (write + notify): the daemon's views (protocol.hpp CMD_VIEW: the
+//                           fan list, its telemetry, the sensor catalogue,
+//                           the strip, the power switch — JSON text this
+//                           board relays unread, dash.hpp). A notification
+//                           is view(1) len(2, the whole view's, LE) then as
+//                           much of the view as the MTU leaves room for,
+//                           sent when a new one lands; one cut short (or any
+//                           view on connecting) is read whole through the
+//                           page characteristic. A write is token(16) view(1)
+//                           then an edit (JSON text, the view owner's shape),
+//                           relayed to the daemon as MSG_EDIT; the daemon's
+//                           answering view is notified. A subscription is
+//                           what tells the daemon a phone watches
+//                           (MSG_WATCH), which starts its telemetry and
+//                           catalogue; unsubscribing stops them.
+//   page (read + write):    a daemon view, whole, in pages — a GATT value
+//                           holds 512 bytes, a view up to protocol.hpp
+//                           VIEW_MAX. A write of [view][page] (no token —
+//                           the views are readable anyway) picks the page;
+//                           page 0, or another view, takes a snapshot of the
+//                           view, and every later page serves the same
+//                           snapshot, so the pages of one read always belong
+//                           together. A read is ver(1) = 1 view(1) page(1)
+//                           pages(1) len(2, the whole view's, LE) then that
+//                           page's PAGE_DATA bytes (fewer on the last).
 //
 // The 128-bit UUIDs are this project's own (random base, "bc250" spelled
 // into the tail); the web page must list the service UUID to find us.
 // NimBLE wants them little-endian:
 //   service a5f20001-8f11-4e0e-9b3a-0bc250e0c001, control ...0002,
-//   status ...0003, fans ...0004, fancfg ...0005, info ...0006, telem ...0007,
-//   stripcfg ...0008, fansa ...0009, sensors ...000A, pwr ...000B,
-//   pwrcfg ...000C, page ...000D
+//   status ...0003, fans ...0004, info ...0006, fansa ...0009, pwr ...000B,
+//   page ...000D, views ...000E. 0005, 0007, 0008, 000A and 000C were one
+//   characteristic per daemon view (fancfg, telem, stripcfg, sensors,
+//   pwrcfg), replaced by views; retired, never reused.
 namespace ble
 {
 static const uint32_t POLL_MS = 250; // policy task cadence
@@ -227,15 +208,11 @@ static const ble_uuid128_t SVC_UUID = BC250_UUID(0x01);
 static const ble_uuid128_t CTRL_UUID = BC250_UUID(0x02);
 static const ble_uuid128_t STAT_UUID = BC250_UUID(0x03);
 static const ble_uuid128_t FANS_UUID = BC250_UUID(0x04);
-static const ble_uuid128_t FANCFG_UUID = BC250_UUID(0x05);
 static const ble_uuid128_t INFO_UUID = BC250_UUID(0x06);
-static const ble_uuid128_t TELEM_UUID = BC250_UUID(0x07);
-static const ble_uuid128_t STRIPCFG_UUID = BC250_UUID(0x08);
 static const ble_uuid128_t FANSA_UUID = BC250_UUID(0x09);
-static const ble_uuid128_t SENSORS_UUID = BC250_UUID(0x0a);
 static const ble_uuid128_t PWR_UUID = BC250_UUID(0x0b);
-static const ble_uuid128_t PWRCFG_UUID = BC250_UUID(0x0c);
 static const ble_uuid128_t PAGE_UUID = BC250_UUID(0x0d);
+static const ble_uuid128_t VIEWS_UUID = BC250_UUID(0x0e);
 
 static const uint8_t OP_POWER_ON = 0x01;
 static const uint8_t OP_SHUTDOWN = 0x02;
@@ -328,7 +305,6 @@ struct Chr
     const ble_uuid128_t* uuid = nullptr;
     ble_gatt_access_fn* access = nullptr;
     ble_gatt_chr_flags flags = 0;
-    int dashSlot = -1;         // dash::Slot whose arrivals notify this, or -1
     uint16_t handle = 0;
     volatile bool sub = false;
     uint32_t lastSeq = 0;
@@ -338,34 +314,30 @@ enum ChrId
     C_CTRL,
     C_STAT,
     C_FANS,
-    C_FANCFG,
     C_INFO,
-    C_TELEM,
-    C_STRIPCFG,
     C_FANSA,
-    C_SENSORS,
     C_PWR,
-    C_PWRCFG,
     C_PAGE,
+    C_VIEWS,
     C_COUNT
 };
 static Chr g_chr[C_COUNT];
 
 static void defineChr(ChrId id, const ble_uuid128_t* uuid, ble_gatt_access_fn* access,
-                      ble_gatt_chr_flags flags, int dashSlot = -1)
+                      ble_gatt_chr_flags flags)
 {
     g_chr[id].uuid = uuid;
     g_chr[id].access = access;
     g_chr[id].flags = flags;
-    g_chr[id].dashSlot = dashSlot;
 }
 
 // policy task locals
 static int g_lastState = -2;   // last hostState() seen (-2 = never)
 static int g_advState = -2;    // hostState() the running advertisement carries
 static uint32_t g_lastPoll = 0;    // last 1 Hz notify of the fans and pwr values
-static uint32_t g_lastWatch = 0;   // last MSG_FAN_WATCH 1 sent
+static uint32_t g_lastWatch = 0;   // last MSG_WATCH 1 sent
 static bool g_watching = false;    // the daemon has been told a phone watches
+static uint32_t g_viewSeq[dash::VIEWS]; // each view's arrival count last notified
 
 // the host's coarse state as the status value reports it: 0 off, 1
 // booting, 2 on. The power switch's PSU state where there is one; without
@@ -413,7 +385,7 @@ static uint16_t buildFans(uint8_t* p)
     fan::snapshot(s);
 
     uint32_t age = 0;
-    dash::get(dash::FAN_TELEM, nullptr, 0, nullptr, &age);
+    dash::get(proto::VIEW_FAN_TELEM, nullptr, 0, nullptr, nullptr, &age);
     bool haveT = age != 0xFFFFFFFFu;
     bool fresh = haveT && age < TELEM_FRESH_MS;
 
@@ -622,24 +594,12 @@ static int viewAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
 // the stored standalone fan settings, in the view shape above
 static uint16_t buildFansa(uint8_t* p) { return fan::standalone(p, proto::FAN_STANDALONE_LEN); }
 
-// the daemon's payloads, served verbatim (dash.hpp); none yet reads as an
-// empty value, which the page shows as "nothing from the daemon" rather than
-// as broken. One longer than a GATT value can hold reads as empty here too —
-// the page characteristic serves it (a page that knows it asks there first)
-static const uint16_t RAW_MAX = 512;
-static int serve(ble_gatt_access_ctxt* ctxt, dash::Slot slot)
-{
-    uint8_t b[RAW_MAX];
-    uint16_t n = dash::get(slot, b, sizeof b);
-    return n == 0 || os_mbuf_append(ctxt->om, b, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
-}
-
 // ---- the page characteristic (see the header comment) ----
 
 static const uint16_t PAGE_DATA = 500; // a page's payload bytes: header + this <= 512
 static uint8_t g_snap[dash::MAX_LEN];  // the snapshot the pages serve (host task only:
 static uint16_t g_snapLen = 0;         // access callbacks and GAP events run there)
-static int g_snapSlot = -1;            // -1 = none taken
+static int g_snapSlot = -1;            // the snapshot's view, -1 = none taken
 static uint8_t g_page = 0;
 
 static int pageAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
@@ -650,16 +610,16 @@ static int pageAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
         uint16_t len = 0;
         if (ble_hs_mbuf_to_flat(ctxt->om, a, sizeof a, &len) != 0 || len != 2)
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-        if (a[0] >= dash::SLOTS)
+        if (a[0] >= dash::VIEWS)
             return VALUE_ERR;
-        // page 0 takes the snapshot; a later page of a slot other than the
+        // page 0 takes the snapshot; a later page of a view other than the
         // snapshot's is refused rather than served from a fresh one, which
-        // would stitch two versions of the value together
+        // would stitch two versions of the view together
         if (a[1] != 0 && a[0] != g_snapSlot)
             return VALUE_ERR;
         if (a[1] == 0)
         {
-            g_snapLen = dash::get((dash::Slot)a[0], g_snap, sizeof g_snap);
+            g_snapLen = dash::get(a[0], g_snap, sizeof g_snap);
             g_snapSlot = a[0];
         }
         g_page = a[1];
@@ -668,7 +628,7 @@ static int pageAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR)
         return BLE_ATT_ERR_UNLIKELY;
 
-    // a read before any write: an empty value (no slot picked)
+    // a read before any write: an empty value (no view picked)
     if (g_snapSlot < 0)
         return 0;
     uint16_t pages = g_snapLen ? (uint16_t)((g_snapLen + PAGE_DATA - 1) / PAGE_DATA) : 1;
@@ -682,53 +642,37 @@ static int pageAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
     return 0;
 }
 
-template <dash::Slot SLOT>
-static int dashAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
+// a phone's edit of a daemon view: token(16) view(1) + the edit (JSON text),
+// relayed to the daemon unopened as MSG_EDIT — which view it is and whether
+// the edit is any good are the daemon's business. Bounded by what one msg
+// frame carries (hostreq::MSG_MAX); the page keeps its edits to one fan, the
+// globals, or a few strip values, far under it.
+static int viewsAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
 {
-    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR)
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
         return BLE_ATT_ERR_UNLIKELY;
-    return serve(ctxt, SLOT);
-}
 
-// a phone's edit: token(16) + a partial edit (JSON text), relayed to the
-// daemon unopened as msg `kind` — validation is its job. Bounded by what one
-// msg frame carries (hostreq::MSG_MAX); the page keeps its edits to one
-// header, the globals, or a few strip values, far under it.
-static int relayEdit(ble_gatt_access_ctxt* ctxt, uint8_t kind, const char* what)
-{
     // static, not stack: half a kilobyte, and only the NimBLE host task runs this
     static uint8_t buf[TOKEN_LEN + hostreq::MSG_MAX];
     uint16_t len = 0;
     if (ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof buf, &len) != 0 || len <= TOKEN_LEN + 2)
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
 
+    uint8_t view = buf[TOKEN_LEN];
     if (!tokenOk(buf))
     {
-        BLOG("%s edit with a wrong token rejected", what);
+        BLOG("view %u edit with a wrong token rejected", (unsigned)view);
         return TOKEN_ERR;
     }
 
-    if (!hostreq::post(kind, buf + TOKEN_LEN, len - TOKEN_LEN))
+    if (!hostreq::post(proto::MSG_EDIT, buf + TOKEN_LEN, len - TOKEN_LEN))
     {
-        BLOG("%s edit dropped — message queue full", what);
+        BLOG("view %u edit dropped — message queue full", (unsigned)view);
         return BLE_ATT_ERR_INSUFFICIENT_RES;
     }
 
-    BLOG("%s edit (%u bytes) relayed to the daemon", what, (unsigned)(len - TOKEN_LEN));
+    BLOG("view %u edit (%u bytes) relayed to the daemon", (unsigned)view, (unsigned)(len - TOKEN_LEN - 1));
     return 0;
-}
-
-// the daemon's editable views: a read serves the last payload, a write is
-// relayed as the msg kind. `arg` (the row's registration argument) names it
-// for the log.
-template <dash::Slot SLOT, uint8_t KIND>
-static int editAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void* arg)
-{
-    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)
-        return serve(ctxt, SLOT);
-    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
-        return BLE_ATT_ERR_UNLIKELY;
-    return relayEdit(ctxt, KIND, (const char*)arg);
 }
 
 // ver(1) = 3, version(32, NUL-padded; the app image's PROJECT_VER — the git
@@ -767,10 +711,6 @@ static int infoAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*)
         b[49 + proto::FAN_CHANNELS + k] = (uint8_t)(outs >> (8 * k));
     return os_mbuf_append(ctxt->om, b, sizeof b) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
-
-// the log name an editable view's relay uses (editAccess's arg)
-static const char* const EDIT_NAMES[C_COUNT] = {
-    nullptr, nullptr, nullptr, "fan", nullptr, nullptr, "strip", nullptr, nullptr, nullptr, "power", nullptr};
 
 // NimBLE's own tables, filled from g_chr in start() with plain field
 // assignment: NimBLE's struct layouts have grown fields across IDF versions,
@@ -822,7 +762,7 @@ static int gapEvent(ble_gap_event* ev, void*)
 
     case BLE_GAP_EVENT_SUBSCRIBE:
         // the phone opened (or closed) the dashboard: notifications on the
-        // telem value are what start the daemon's telemetry flowing
+        // views are what start the daemon's telemetry flowing
         for (Chr& c : g_chr)
             if (c.handle && ev->subscribe.attr_handle == c.handle)
                 c.sub = ev->subscribe.cur_notify != 0;
@@ -898,21 +838,59 @@ static void notifyOnChange(Chr& c, uint32_t seq)
         ble_gatts_chr_updated(c.handle);
 }
 
-// the dashboard's half of the policy. While a phone has the telem value
+// notify each daemon view that changed since the last pass (the views
+// characteristic's layout, in the header comment). A view that can't go out
+// now — no buffer for it in NimBLE's pool — keeps its count and goes on a
+// later pass; with nobody subscribed the counts just catch up.
+static void notifyViews()
+{
+    // policy task only: one notification's worth, the ATT maximum
+    static uint8_t b[512];
+    uint16_t conn = g_conn;
+    bool on = g_chr[C_VIEWS].sub && conn != BLE_HS_CONN_HANDLE_NONE;
+    uint16_t mtu = on ? ble_att_mtu(conn) : 0;
+    uint16_t room = mtu > 3 ? mtu - 3 : 0; // a notification's payload: the MTU less its own header
+    if (room > sizeof b)
+        room = sizeof b;
+
+    for (uint8_t v = 0; v < dash::VIEWS; v++)
+    {
+        uint32_t seq = 0;
+        uint16_t len = 0;
+        if (!on || room <= 3)
+        {
+            dash::get(v, nullptr, 0, nullptr, &seq);
+            g_viewSeq[v] = seq;
+            continue;
+        }
+        uint16_t n = dash::get(v, b + 3, room - 3, &len, &seq);
+        if (seq == g_viewSeq[v])
+            continue;
+        b[0] = v;
+        b[1] = (uint8_t)len;
+        b[2] = (uint8_t)(len >> 8);
+        os_mbuf* om = ble_hs_mbuf_from_flat(b, 3 + n);
+        if (!om || ble_gatts_notify_custom(conn, g_chr[C_VIEWS].handle, om) != 0)
+            return; // out of buffers (notify_custom frees om either way): next pass
+        g_viewSeq[v] = seq;
+    }
+}
+
+// the dashboard's half of the policy. While a phone has the views
 // subscribed, keep the daemon's telemetry alive with a watch keepalive and
-// notify each new one; while it has the fans or pwr value subscribed, notify
+// notify each new view; while it has the fans or pwr value subscribed, notify
 // it once a second (NimBLE rebuilds the value through its access callback);
-// notify a daemon payload or a stored setting when it changes. With nobody
-// subscribed none of this runs — the daemon then reads and sends nothing for
-// the dashboard either.
+// notify a stored setting when it changes. With nobody subscribed none of
+// this runs — the daemon then reads and sends nothing for the dashboard
+// either.
 static void dashboard(uint32_t now)
 {
-    if (g_chr[C_TELEM].sub)
+    if (g_chr[C_VIEWS].sub)
     {
         if (!g_watching || now - g_lastWatch >= WATCH_MS)
         {
             uint8_t on = 1;
-            if (hostreq::post(proto::MSG_FAN_WATCH, &on, 1))
+            if (hostreq::post(proto::MSG_WATCH, &on, 1))
             {
                 g_watching = true;
                 g_lastWatch = now;
@@ -924,7 +902,7 @@ static void dashboard(uint32_t now)
         // the last phone left (unsubscribed or dropped): stop the telemetry
         g_watching = false;
         uint8_t off = 0;
-        hostreq::post(proto::MSG_FAN_WATCH, &off, 1);
+        hostreq::post(proto::MSG_WATCH, &off, 1);
     }
 
     if (now - g_lastPoll >= FANS_POLL_MS)
@@ -935,14 +913,9 @@ static void dashboard(uint32_t now)
                 ble_gatts_chr_updated(g_chr[id].handle);
     }
 
-    uint32_t seq = 0;
-    for (Chr& c : g_chr)
-        if (c.dashSlot >= 0)
-        {
-            dash::get((dash::Slot)c.dashSlot, nullptr, 0, &seq);
-            notifyOnChange(c, seq);
-        }
+    notifyViews();
 
+    uint32_t seq = 0;
     fan::standalone(nullptr, 0, &seq);
     notifyOnChange(g_chr[C_FANSA], seq);
     notifyOnChange(g_chr[C_PWR], pwr::settingsSeq());
@@ -1009,41 +982,33 @@ void start()
     ble_hs_cfg.sync_cb = onSync;
     ble_hs_cfg.reset_cb = onReset;
 
-    // the MTU we answer a phone's exchange with: the daemon's config and
-    // telemetry are JSON of up to a few hundred bytes, and a notification is
-    // truncated to the MTU (a read is not — the page re-reads on a short
-    // notification); ask for the ATT maximum so a client that exchanges
-    // gets whole values in one packet
+    // the MTU we answer a phone's exchange with: the daemon's views are JSON
+    // of up to a few hundred bytes, and a notification carries what the MTU
+    // leaves room for (the page reads the rest through the page
+    // characteristic); ask for the ATT maximum so a client that exchanges
+    // gets most views whole in one packet
     ble_att_set_preferred_mtu(512);
 
     ble_svc_gap_init();
     ble_svc_gatt_init();
     ble_svc_gap_device_name_set(g_cfg.name);
 
-    const ble_gatt_chr_flags R = BLE_GATT_CHR_F_READ, RN = R | BLE_GATT_CHR_F_NOTIFY,
-                             RWN = RN | BLE_GATT_CHR_F_WRITE;
-    defineChr(C_CTRL, &CTRL_UUID, ctrlAccess, BLE_GATT_CHR_F_WRITE);
-    defineChr(C_STAT, &STAT_UUID, statAccess, RN);
-    defineChr(C_FANS, &FANS_UUID, viewAccess<buildFans, FANS_LEN>, RN);
-    defineChr(C_FANCFG, &FANCFG_UUID, editAccess<dash::FAN_CONFIG, proto::MSG_FAN_CONFIG>, RWN,
-              dash::FAN_CONFIG);
+    const ble_gatt_chr_flags R = BLE_GATT_CHR_F_READ, W = BLE_GATT_CHR_F_WRITE,
+                             N = BLE_GATT_CHR_F_NOTIFY;
+    defineChr(C_CTRL, &CTRL_UUID, ctrlAccess, W);
+    defineChr(C_STAT, &STAT_UUID, statAccess, R | N);
+    defineChr(C_FANS, &FANS_UUID, viewAccess<buildFans, FANS_LEN>, R | N);
     defineChr(C_INFO, &INFO_UUID, infoAccess, R);
-    defineChr(C_TELEM, &TELEM_UUID, dashAccess<dash::FAN_TELEM>, RN, dash::FAN_TELEM);
-    defineChr(C_STRIPCFG, &STRIPCFG_UUID,
-              editAccess<dash::STRIP_CONFIG, proto::MSG_STRIP_CONFIG>, RWN, dash::STRIP_CONFIG);
-    defineChr(C_FANSA, &FANSA_UUID, viewAccess<buildFansa, proto::FAN_STANDALONE_LEN>, RN);
-    defineChr(C_SENSORS, &SENSORS_UUID, dashAccess<dash::FAN_SENSORS>, RN, dash::FAN_SENSORS);
-    defineChr(C_PWR, &PWR_UUID, viewAccess<buildPwr, PWR_LEN>, RN);
-    defineChr(C_PWRCFG, &PWRCFG_UUID, editAccess<dash::PWR_CONFIG, proto::MSG_PWR_CONFIG>, RWN,
-              dash::PWR_CONFIG);
-    defineChr(C_PAGE, &PAGE_UUID, pageAccess, R | BLE_GATT_CHR_F_WRITE);
+    defineChr(C_FANSA, &FANSA_UUID, viewAccess<buildFansa, proto::FAN_STANDALONE_LEN>, R | N);
+    defineChr(C_PWR, &PWR_UUID, viewAccess<buildPwr, PWR_LEN>, R | N);
+    defineChr(C_PAGE, &PAGE_UUID, pageAccess, R | W);
+    defineChr(C_VIEWS, &VIEWS_UUID, viewsAccess, W | N);
 
     for (int i = 0; i < C_COUNT; i++)
     {
         g_chrs[i] = {};
         g_chrs[i].uuid = &g_chr[i].uuid->u;
         g_chrs[i].access_cb = g_chr[i].access;
-        g_chrs[i].arg = (void*)EDIT_NAMES[i];
         g_chrs[i].flags = g_chr[i].flags;
         g_chrs[i].val_handle = &g_chr[i].handle;
     }

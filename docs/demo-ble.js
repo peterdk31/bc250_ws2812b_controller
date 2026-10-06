@@ -13,15 +13,14 @@
 // Three boards: a BC-250 with its host up, a desk board with its host off
 // (the receiver alone runs its fans until the power button brings the host
 // up), and one out of range. Readings drift slowly, as real ones do.
-import { SVC, TOKEN_LEN, OP_ON, OP_SHUTDOWN, OP_HARD_OFF, OP_FAN_HEADER, OP_PWR_TUNING, OP_PWR_WAKE,
+import { SVC, VIEW, TOKEN_LEN, OP_ON, OP_SHUTDOWN, OP_HARD_OFF, OP_FAN_HEADER, OP_PWR_TUNING, OP_PWR_WAKE,
          NONE, CHANNELS, MAX_POINTS, FANS_LEN, SA_HEADER_LEN, SA_LEN, PWR_LEN,
          encodeRecord, outInfo, srcInfo, parseCurve, ownCurve } from './ble.js';
 
 const uuid = n => `a5f200${n}-8f11-4e0e-9b3a-0bc250e0c001`;
-const U = { ctrl: uuid('02'), stat: uuid('03'), fans: uuid('04'), fancfg: uuid('05'), info: uuid('06'), telem: uuid('07'),
-            stripcfg: uuid('08'), fansa: uuid('09'), sensors: uuid('0a'), pwr: uuid('0b'), pwrcfg: uuid('0c'), page: uuid('0d') };
-const JSON_SLOT = { [U.fancfg]: 0, [U.telem]: 1, [U.stripcfg]: 2, [U.sensors]: 3, [U.pwrcfg]: 4 }; // dash::Slot
-const SLOT_UUID = Object.fromEntries(Object.entries(JSON_SLOT).map(([u, s]) => [s, u]));
+const U = { ctrl: uuid('02'), stat: uuid('03'), fans: uuid('04'), info: uuid('06'), fansa: uuid('09'), pwr: uuid('0b'),
+            page: uuid('0d'), views: uuid('0e') };
+const MTU = 512; // what a phone exchanges; a view notification carries MTU - 3 - 3 bytes of it (ble.cpp notifyViews)
 const KIND_BYTE = { fallback: 0, gpio: 1, host: 2, esp32_temp: 3 };                           // protocol.hpp FAN_KIND_*
 const SRC = { fallback: 1, live: 2, boost: 3, curve: 4 };                                      // fan::SRC_*
 const OUT_HEADER = 1, OUT_GPIO = 2;
@@ -175,6 +174,7 @@ class Board {
     this.chrs = null;   // uuid -> characteristic, while connected
     this.pageReq = null;
     this.snapshot = new Uint8Array(0);
+    this.views = new Map(); // view -> the daemon's last word on it, as the receiver keeps it (dash.cpp)
     setInterval(() => this.tick(), 2000);
     setInterval(() => this.notify(U.pwr), 1000); // the sense wire, 1 Hz while subscribed
   }
@@ -246,11 +246,13 @@ class Board {
     b.set([this.pins.ps_on, this.pins.button, this.pins.button_gnd, this.pins.sense, this.pins.led, this.pins.wake], 13);
     return b;
   }
-  // a daemon value: empty while there's no daemon to say anything
-  jsonValue(slot) {
+  // a daemon view by id: empty while there's no daemon to say anything
+  viewValue(view) {
     if (!this.hostUp) return new Uint8Array(0);
     const h = this.host;
-    return enc.encode([() => h.cfgJson(), () => h.telemJson(), () => h.stripJson(), () => h.sensorsJson(), () => h.pcfgJson()][slot]());
+    const make = { [VIEW.fancfg]: () => h.cfgJson(), [VIEW.telem]: () => h.telemJson(), [VIEW.strip]: () => h.stripJson(),
+                   [VIEW.sensors]: () => h.sensorsJson(), [VIEW.power]: () => h.pcfgJson() }[view];
+    return make ? enc.encode(make()) : new Uint8Array(0);
   }
   read(u) {
     if (u === U.stat) return Uint8Array.of(this.psu);
@@ -258,7 +260,6 @@ class Board {
     if (u === U.fansa) return this.saValue();
     if (u === U.info) return this.infoValue();
     if (u === U.pwr) return this.pwrValue();
-    if (u in JSON_SLOT) return this.jsonValue(JSON_SLOT[u]).subarray(0, 512);
     if (u === U.page) {
       const { slot, page } = this.pageReq || { slot: 0, page: 0 };
       const pages = Math.max(1, Math.ceil(this.snapshot.length / PAGE_CHUNK));
@@ -278,29 +279,30 @@ class Board {
     return b.subarray(TOKEN_LEN);
   }
   later(ms, ...uuids) { setTimeout(() => uuids.forEach(u => this.notify(u)), ms); }
+  laterView(ms, view) { setTimeout(() => this.notifyView(view), ms); }
   async write(u, b) {
     if (u === U.page) {
       this.pageReq = { slot: b[0], page: b[1] };
-      if (b[1] === 0) this.snapshot = this.jsonValue(b[0]);
+      if (b[1] === 0) this.snapshot = this.views.get(b[0]) ?? this.viewValue(b[0]);
       return;
     }
     const a = this.checkToken(b);
     if (u === U.ctrl) return this.control(a);
-    if (!this.hostUp) return; // relayed to a daemon that isn't there: no answer comes
-    const edit = JSON.parse(dec.decode(a)), h = this.host;
-    if (u === U.fancfg) {
+    if (u !== U.views || !this.hostUp) return; // relayed to a daemon that isn't there: no answer comes
+    const view = a[0], edit = JSON.parse(dec.decode(a.subarray(1))), h = this.host;
+    if (view === VIEW.fancfg) {
       const err = h.applyFanEdit(edit);
-      if (!err) { this.push(h.fans); this.later(300, U.fansa, U.fans, U.telem); }
-      setTimeout(() => this.notifyWith(U.fancfg, enc.encode(h.cfgJson(err))), 600);
-    } else if (u === U.stripcfg) {
+      if (!err) { this.push(h.fans); this.later(300, U.fansa, U.fans); this.laterView(300, VIEW.telem); }
+      setTimeout(() => this.notifyView(VIEW.fancfg, enc.encode(h.cfgJson(err))), 600);
+    } else if (view === VIEW.strip) {
       h.applyStripEdit(edit);
-      this.later(400, U.stripcfg);
-    } else if (u === U.pwrcfg) {
+      this.laterView(400, VIEW.strip);
+    } else if (view === VIEW.power) {
       for (const [k, x] of Object.entries(edit)) h.power[k] = x;
       Object.assign(this.tune, { hold: Math.round(h.power.hold_seconds * 1000), boot: Math.round(h.power.boot_timeout_seconds * 1000),
                                  low: h.power.sense_low_mv, high: h.power.sense_high_mv });
       if ('wake' in edit && (edit.wake === null || this.inPins.includes(edit.wake))) this.pins.wake = edit.wake ?? NONE;
-      this.later(600, U.pwrcfg, U.pwr);
+      this.later(600, U.pwr); this.laterView(600, VIEW.power);
     }
   }
   control(a) {
@@ -347,19 +349,28 @@ class Board {
       Object.assign(this.tune, { hold: Math.round(p.hold_seconds * 1000), boot: Math.round(p.boot_timeout_seconds * 1000), low: p.sense_low_mv, high: p.sense_high_mv });
       if (p.wake !== undefined) this.pins.wake = p.wake ?? NONE;
     }
-    for (const u of [U.fans, U.fansa, U.pwr, U.fancfg, U.telem, U.stripcfg, U.sensors, U.pwrcfg]) this.notify(u);
+    for (const u of [U.fans, U.fansa, U.pwr]) this.notify(u);
+    for (const v of Object.values(VIEW)) this.notifyView(v);
   }
   tick() {
     this.notify(U.fans);
-    if (this.hostUp) { this.notify(U.telem); this.notify(U.sensors); }
+    if (this.hostUp) { this.notifyView(VIEW.telem); this.notifyView(VIEW.sensors); }
   }
 
   // ---- the link ----
-  notify(u) { this.notifyWith(u, null); }
-  notifyWith(u, bytes) {
+  notify(u) { this.dispatch(u, this.read(u)); }
+  // the daemon sends a view: the receiver keeps it and notifies it as the
+  // views characteristic does — view(1) len(2) then what the MTU leaves room for
+  notifyView(view, bytes = this.viewValue(view)) {
+    this.views.set(view, bytes);
+    const n = Math.min(bytes.length, MTU - 3 - 3), b = new Uint8Array(3 + n);
+    b.set([view, bytes.length & 0xFF, bytes.length >> 8]); b.set(bytes.subarray(0, n), 3);
+    this.dispatch(U.views, b);
+  }
+  dispatch(u, bytes) {
     const c = this.chrs && this.chrs[u];
     if (!c || !c.notifying) return;
-    c.value = dv(bytes ?? (u in JSON_SLOT ? this.jsonValue(JSON_SLOT[u]) : this.read(u)));
+    c.value = dv(bytes);
     c.dispatchEvent(new Event('characteristicvaluechanged'));
   }
 }

@@ -293,26 +293,12 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
         // the daemon's fan curves' current duties, same hand-off
         fan::setLive(payload, len);
     }
-    else if (cmd == proto::CMD_FAN_CONFIG)
+    else if (cmd == proto::CMD_VIEW)
     {
-        // the daemon's fan config as it runs it, held for the BLE dashboard
-        // (dash.hpp); this side never interprets it
-        dash::set(dash::FAN_CONFIG, payload, len);
-    }
-    else if (cmd == proto::CMD_FAN_TELEM)
-    {
-        // and what its curves are reading right now, same
-        dash::set(dash::FAN_TELEM, payload, len);
-    }
-    else if (cmd == proto::CMD_STRIP_CONFIG)
-    {
-        // and its strip settings and scenes, same
-        dash::set(dash::STRIP_CONFIG, payload, len);
-    }
-    else if (cmd == proto::CMD_FAN_SENSORS)
-    {
-        // and the sensors a header could follow, for the phone's picker, same
-        dash::set(dash::FAN_SENSORS, payload, len);
+        // one of the daemon's views, held for the BLE dashboard (dash.hpp);
+        // this side never interprets it
+        if (len >= 1)
+            dash::set(payload[0], payload + 1, len - 1);
     }
     else if (cmd == proto::CMD_PWR_TUNING)
     {
@@ -330,12 +316,6 @@ static void handleCommand(uint8_t cmd, const uint8_t* payload, uint16_t len)
         const char* why = nullptr;
         if (len >= 1 && !pwr::setWakePin(payload[0], &why) && why)
             dbglog::line("led: host's wake pin gpio%u rejected — %s", payload[0], why);
-    }
-    else if (cmd == proto::CMD_PWR_CONFIG)
-    {
-        // and the daemon's view of that block for the BLE dashboard, same as
-        // the fans' (dash.hpp)
-        dash::set(dash::PWR_CONFIG, payload, len);
     }
 }
 

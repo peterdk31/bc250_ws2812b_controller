@@ -26,7 +26,7 @@
 //
 // msg frame:     SYNC0 MSG_SYNC kind(1) len_lo len_hi <payload[len]> checksum
 //   The third receiver→host frame: a message *with a payload*, sent once, no
-//   ack of its own (see MSG_FAN_CONFIG / MSG_FAN_WATCH for what answers it).
+//   ack of its own (see MSG_EDIT / MSG_WATCH for what answers it).
 //   Carries what the phone on the BLE dashboard asks of the daemon — at most
 //   MSG_MAX bytes, a GATT write's own ceiling, so whatever the phone can
 //   write fits one frame. Checksum is the XOR of kind, the two length bytes
@@ -71,9 +71,8 @@ static const uint8_t MSG_SYNC = 0x5A; // ...or this for a receiver→host messag
 static const uint16_t MSG_MAX = 512;
 
 // the longest command payload either end handles. A pixel frame's own ceiling
-// is the receiver's LED count, but the dashboard's JSON payloads (CMD_FAN_*,
-// CMD_STRIP_CONFIG) are sized by what the config holds, not by the strip —
-// so the receiver's parser takes at least this much whatever its strip
+// is the receiver's LED count, but the dashboard's views (CMD_VIEW) are
+// sized by what the config holds, not by the strip — so the receiver's parser takes at least this much whatever its strip
 // (common/receiver.hpp). The daemon never sends a longer one and says so.
 static const uint16_t CMD_MAX = 2048;
 
@@ -232,62 +231,68 @@ static const uint8_t CMD_FAN_LIVE = 0x09;
 // either way.
 
 // The BLE dashboard (firmware/main/ble.cpp, docs/index.html, README "BLE
-// remote"): the phone sees what the fans are doing and edits the curves live.
-// The receiver is a relay — it holds the daemon's last word on both and serves
-// it over GATT; the daemon stays the only place curves are evaluated or stored.
-// The payloads below are JSON text (UTF-8, no NUL), in the shapes
-// daemon/fans.hpp, daemon/strip_remote.hpp and daemon/power_remote.hpp
-// document; the receiver never parses them. Each has a ceiling, the
-// receiver's buffer for it (DASH_*_MAX, all within CMD_MAX): a GATT value is
-// 512 bytes at most, so the phone reads a longer one in pages (ble.cpp, the
-// page characteristic). The daemon never sends one over its ceiling and says
-// so in the journal.
-static const uint16_t DASH_FAN_CONFIG_MAX = 2048;
-static const uint16_t DASH_FAN_TELEM_MAX = 1024;
-static const uint16_t DASH_STRIP_CONFIG_MAX = 1024;
-static const uint16_t DASH_FAN_SENSORS_MAX = 2048;
-static const uint16_t DASH_PWR_CONFIG_MAX = 256;
+// remote"): the phone sees what the daemon runs and edits it live. The
+// receiver is a relay for it — it holds the daemon's last word on each VIEW
+// and serves it over GATT, and passes the phone's edits back; the daemon
+// stays the only place any of it is evaluated or stored. A view is JSON text
+// (UTF-8, no NUL) in the shape the daemon module that owns it documents; the
+// receiver never parses one and keys them by id alone, so a new daemon view
+// needs no new firmware. At most VIEW_MAX bytes each: a GATT value is 512
+// bytes at most, so the phone reads a longer one in pages (ble.cpp, the page
+// characteristic). The daemon never sends one over the ceiling and says so in
+// the journal.
+static const uint16_t VIEW_MAX = CMD_MAX - 1; // a CMD_VIEW's payload is the id + the view
 
-// CMD_FAN_CONFIG: the fan config as the daemon runs it — the list of fans,
-// each with its name, output, input, curve, boost and fallback and its
-// tunings (hysteresis, ramp, boost length), plus whether edits are accepted
-// (the config file is writable), the list's revision (what an edit must name)
-// and, once, why the last edit was refused. At most DASH_FAN_CONFIG_MAX
-// bytes. Sent once at startup after CMD_FAN_STANDALONE and again whenever it
-// changes (a phone edit was applied or refused), which is also how a
-// MSG_FAN_CONFIG gets its answer: the receiver notifies the phone with the
-// new truth. Unknown to older firmware, which ignores it.
-static const uint8_t CMD_FAN_CONFIG = 0x0A;
+// The views, by id (the receiver serves up to VIEWS of them; an id at or past
+// that is dropped). The id is the page's handle on a view too, and is never
+// reused for something else once shipped.
+//   VIEW_FAN_CONFIG  the fan list as the daemon runs it (daemon/fans.hpp
+//                    toJson): every fan's name, output, input, curve, boost,
+//                    fallback and tunings, whether edits are accepted (the
+//                    config file is writable), the list's revision (what an
+//                    edit must name) and, once, why the last edit was
+//                    refused. Sent at startup after CMD_FAN_STANDALONE and
+//                    again whenever it changes — which is how an edit gets
+//                    its answer, applied or refused.
+//   VIEW_FAN_TELEM   what the curves read right now (fans.hpp telemetryJson):
+//                    the top-level `sensors` temperature, CPU and GPU load,
+//                    the BC-250 VRM controller's rails when one answers, and
+//                    per fan its input, the duty the curve produced and, for
+//                    a host output, who drives it. Only while a phone watches
+//                    (MSG_WATCH), on the fan tick when a value changed plus a
+//                    slow refresh.
+//   VIEW_STRIP       the config's `strip` block as run (daemon/
+//                    strip_remote.hpp): LED count, pin, reverse, brightness,
+//                    gamma, white balance, plus the "scenes" — every rule
+//                    whose condition is a bare `file:` path, whether its file
+//                    exists right now and its color. Sent at startup, when a
+//                    scene's file appears or disappears, and after an edit.
+//   VIEW_SENSORS     the catalogue a fan could follow (fans.hpp sensorsJson):
+//                    every labelled hwmon temperature by chip with its
+//                    reading, and "_outs", every host pwm output with its
+//                    duty and rpm. Only while a phone watches, every 5 s.
+//   VIEW_POWER       the config's power_switch block as run (daemon/
+//                    power_remote.hpp): the four tunings in the config's
+//                    units, the wake pin, the short_press command and whether
+//                    edits are accepted. Sent at startup, on a reload, after
+//                    an edit.
+static const uint8_t VIEW_FAN_CONFIG = 0;
+static const uint8_t VIEW_FAN_TELEM = 1;
+static const uint8_t VIEW_STRIP = 2;
+static const uint8_t VIEW_SENSORS = 3;
+static const uint8_t VIEW_POWER = 4;
+static const uint8_t VIEWS = 8;
 
-// CMD_FAN_TELEM: what the curves are reading right now — the top-level
-// `sensors` temperature, CPU and GPU load, the BC-250 VRM controller's rails
-// (volts, amps, °C) when one answers, and per fan its input, the duty
-// the curve produced and, for a host output, who is driving it. At most
-// DASH_FAN_TELEM_MAX bytes. Only sent while a phone is watching
-// (MSG_FAN_WATCH keeps that alive), on the fan tick when a value changed
-// plus a slow refresh — nothing is read or sent for a dashboard nobody has
-// open.
-static const uint8_t CMD_FAN_TELEM = 0x0B;
+// CMD_VIEW: view(1) then the view's JSON text — the receiver keeps it as that
+// view's value, replacing the last one (an empty text clears it: the daemon
+// has nothing there, e.g. a config with no fans block, which the phone shows
+// as it shows "no daemon"). Unknown to older firmware, which ignores it.
+static const uint8_t CMD_VIEW = 0x12;
 
-// CMD_STRIP_CONFIG: the strip's dashboard view — the config's `strip` block
-// as the daemon runs it (LED count, pin, reverse, brightness, gamma, white
-// balance) plus the "scenes": every rule whose condition is a bare `file:`
-// path, with whether its file exists right now and, when its settings carry
-// one, its color. JSON text in the shape daemon/strip_remote.hpp documents, at
-// most DASH_STRIP_CONFIG_MAX bytes. Sent once at startup, whenever a scene's
-// file appears or disappears, and after every applied edit (the answer to a
-// MSG_STRIP_CONFIG). Unknown to older firmware, which ignores it.
-static const uint8_t CMD_STRIP_CONFIG = 0x0C;
-
-// CMD_FAN_SENSORS: the catalogue a fan could follow — every hwmon
-// temperature with a label, grouped by chip, with its reading right now:
-// {"amdgpu":{"edge":61.0},"nct6686":{"CPU":52.0}} — and "_outs", every host
-// pwm output with its duty and rpm, one a fan could drive or follow
-// (daemon/fans.hpp sensorsJson). JSON text, at most DASH_FAN_SENSORS_MAX
-// bytes. Only while a phone is watching, every 5 s (a stale reading is fine
-// for choosing an input; the per-fan readings the rows need travel in
-// CMD_FAN_TELEM). Unknown to older firmware, which ignores it.
-static const uint8_t CMD_FAN_SENSORS = 0x0D;
+// 0x0A..0x0D and 0x0F were one command per view (CMD_FAN_CONFIG,
+// CMD_FAN_TELEM, CMD_STRIP_CONFIG, CMD_FAN_SENSORS, CMD_PWR_CONFIG), each
+// with its own buffer, GATT characteristic and msg kind on the receiver;
+// CMD_VIEW replaced them all. Retired, never reused.
 
 // The power switch (firmware/main/power_switch.cpp, README "Power switch")
 // is wired at flash time (the `pwrcfg` partition: pins and the enable), but
@@ -320,48 +325,23 @@ static const uint16_t PWR_TUNING_LEN = 8;
 // ignores it. The same byte is the BLE control op 0x21's argument.
 static const uint8_t CMD_PWR_WAKE = 0x10;
 
-// CMD_PWR_CONFIG: the power switch's dashboard view — the config's
-// power_switch block as the daemon runs it: the four tunings in the config's
-// units, the wake pin (or null), the short_press command (or null) and
-// whether edits are accepted.
-// JSON text in the shape daemon/power_remote.hpp documents, at most
-// DASH_PWR_CONFIG_MAX bytes. Sent once at startup, on a reload, and after
-// every applied edit (the answer to a MSG_PWR_CONFIG). The receiver relays it
-// unread.
-static const uint8_t CMD_PWR_CONFIG = 0x0F;
+// MSG_EDIT (msg frame): a phone's edit of a view — view(1) then the edit,
+// JSON text in the shape the view's owner documents (a fan list operation
+// naming the list's revision, a partial strip or power_switch object). The
+// owner validates it exactly as it validates the config, applies it, writes
+// it into its config block, and answers with the new view (CMD_VIEW). A
+// refused fan edit is answered too — the list as it was, carrying why; a
+// refused strip or power edit is not, and the phone's save times out.
+static const uint8_t MSG_EDIT = 0x05;
 
-// MSG_FAN_CONFIG (msg frame): a phone's edit — one operation on the fan
-// list, naming the list's revision as the phone last saw it: change some
-// fields of one fan, add a fan, or delete one (the shapes are
-// daemon/fans.hpp's). The daemon validates it exactly as it validates the
-// config, applies it live, writes it into its config file's fans block
-// (README "Fans"), and answers with CMD_FAN_CONFIG. A refused edit (invalid,
-// read-only, or made against a list that has changed since) is answered too:
-// the CMD_FAN_CONFIG then carries the reason, once.
-static const uint8_t MSG_FAN_CONFIG = 0x01;
+// MSG_WATCH (msg frame): payload one byte, 1 = a phone is subscribed to the
+// dashboard (repeated every ~10 s while it is), 0 = it left. The daemon sends
+// its watched views (VIEW_FAN_TELEM, VIEW_SENSORS) only within ~30 s of a 1.
+static const uint8_t MSG_WATCH = 0x02;
 
-// MSG_FAN_WATCH (msg frame): payload one byte, 1 = a phone is subscribed to
-// the dashboard (repeated every ~10 s while it is), 0 = it left. The daemon
-// sends CMD_FAN_TELEM only within ~30 s of a 1.
-static const uint8_t MSG_FAN_WATCH = 0x02;
-
-// MSG_STRIP_CONFIG (msg frame): a phone's edit of the strip view — a partial
-// object: any of brightness / gamma / white_balance / reverse (applied to the
-// live strip at once and written into the config's strip block), and/or
-// "scenes": [{ "p": path, "on": bool }] to create or remove a scene's file
-// (nothing written to the config — the rule reacts on its next tick) or
-// [{ "p": path, "color": "rrggbb" }] to change a scene rule's color setting
-// (written into that rule). Answered with CMD_STRIP_CONFIG, refused like a
-// fan edit.
-static const uint8_t MSG_STRIP_CONFIG = 0x03;
-
-// MSG_PWR_CONFIG (msg frame): a phone's edit of the power switch view — a
-// partial object of CMD_PWR_CONFIG's shape (any of the four tunings, the
-// wake pin as a GPIO number or null, and/or short_press as a command string
-// or null). Validated like the config, written into the config's
-// power_switch block, pushed to the receiver as CMD_PWR_TUNING / CMD_PWR_WAKE,
-// answered with CMD_PWR_CONFIG; refused like a fan edit.
-static const uint8_t MSG_PWR_CONFIG = 0x04;
+// 0x01, 0x03 and 0x04 were one msg kind per editable view (MSG_FAN_CONFIG,
+// MSG_STRIP_CONFIG, MSG_PWR_CONFIG); MSG_EDIT replaced them. Retired, never
+// reused.
 
 // REQ_HOST_SHUTDOWN: "power yourself down, gracefully." The receiver's power
 // switch sends this on a short button press while the machine is up — the

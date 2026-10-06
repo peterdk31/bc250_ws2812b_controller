@@ -16,6 +16,7 @@
 #include "protocol.hpp"
 #include "sink.hpp"
 #include "strip.hpp"
+#include "views.hpp"
 
 // The strip's half of the BLE dashboard (README "BLE remote"): what the phone
 // sees and edits of the config's `strip` block, and the "scenes" — the rules
@@ -26,9 +27,9 @@
 // the strip, switch it off — README "Tuning the colors".
 //
 // Like the fan controller (fans.hpp) this is JSON text the receiver relays
-// unread. The view goes out as CMD_STRIP_CONFIG (toJson) at startup, when a
-// scene's file appears or disappears, and after every applied edit — which
-// is also how a MSG_STRIP_CONFIG edit gets its answer. An edit is validated
+// unread: its view (protocol.hpp VIEW_STRIP, toJson) goes out at startup,
+// when a scene's file appears or disappears, and after every applied edit —
+// which is also how an edit (MSG_EDIT for VIEW) gets its answer. An edit is validated
 // here, applied to the running strip at once (main.cpp calls applyTo on the
 // live canvas), and written into the config through config_edit.hpp — into
 // the `strip` block, or into the scene's rule for a color. Toggling a scene
@@ -57,6 +58,8 @@ public:
     // the top-level config block this module owns (it does feed the strip:
     // a change to it re-renders the recordings, see main.cpp)
     static constexpr const char* BLOCK = "strip";
+    // ...and the view it owns on the dashboard (protocol.hpp)
+    static const uint8_t VIEW = proto::VIEW_STRIP;
 
     // read the strip block and collect the scenes from the rules. cfg is
     // held onto (its values are edited in place so the running tree matches
@@ -129,13 +132,9 @@ public:
         strip.setReversed(reverse_);
     }
 
-    // the view, for the receiver to serve over GATT
-    void pushConfig(std::vector<std::unique_ptr<Sink>>& sinks)
-    {
-        std::string j = toJson();
-        for (auto& s : sinks)
-            s->sendCommand(proto::CMD_STRIP_CONFIG, (const uint8_t*)j.data(), (uint16_t)j.size());
-    }
+    // the view, for the receiver to serve over GATT (toJson keeps it within
+    // the receiver's ceiling)
+    void pushConfig(std::vector<std::unique_ptr<Sink>>& sinks) { views::send(sinks, VIEW, toJson()); }
 
     // the scenes' files, re-checked on the rules' tick: a shell's touch (or
     // the rule engine noticing ours) changes the view the phone shows
@@ -148,14 +147,10 @@ public:
             pushConfig(sinks);
     }
 
-    // a msg frame from the receiver (protocol.hpp MSG_STRIP_CONFIG): the
-    // phone's edit. Main thread.
-    void onMessage(uint8_t kind, const std::vector<uint8_t>& payload,
-                   std::vector<std::unique_ptr<Sink>>& sinks)
+    // the phone's edit of the view (protocol.hpp MSG_EDIT). Main thread.
+    void onEdit(const std::string& edit, std::vector<std::unique_ptr<Sink>>& sinks)
     {
-        if (kind != proto::MSG_STRIP_CONFIG)
-            return;
-        if (applyEdit(std::string(payload.begin(), payload.end())))
+        if (applyEdit(edit))
         {
             rescan();
             pushConfig(sinks); // the answer the phone waits for
@@ -221,7 +216,7 @@ public:
     }
 
 private:
-    static const int WIRE_MAX = proto::DASH_STRIP_CONFIG_MAX; // the receiver's buffer (the phone pages past 512)
+    static const int WIRE_MAX = proto::VIEW_MAX; // the receiver's ceiling (the phone pages past 512)
 
     struct Scene
     {

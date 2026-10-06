@@ -29,6 +29,7 @@
 #include "protocol.hpp"
 #include "pwmout.hpp"
 #include "sink.hpp"
+#include "views.hpp"
 
 // The daemon's half of the fan controller (README "Fans"). The config's
 // "fans" block is a list of fans, each an input read through a curve onto an
@@ -124,10 +125,11 @@
 //
 // The BLE dashboard (README "BLE remote") sees and edits this list through
 // the receiver, all of it as JSON text the receiver relays without reading:
-// the controller sends the config as it runs it (CMD_FAN_CONFIG, toJson) and,
-// while a phone is watching, what the curves read and produce (CMD_FAN_TELEM,
-// telemetryJson) and what the machine offers (CMD_FAN_SENSORS, sensorsJson);
-// a phone edit comes back as MSG_FAN_CONFIG, is validated exactly like the
+// the controller owns three views (protocol.hpp): the config as it runs it
+// (VIEW_FAN_CONFIG, toJson) and, while a phone is watching (MSG_WATCH), what
+// the curves read and produce (VIEW_FAN_TELEM, telemetryJson) and what the
+// machine offers (VIEW_SENSORS, sensorsJson); a phone edit of the first
+// comes back as MSG_EDIT, is validated exactly like the
 // config (every edit is folded into the fan's config object and re-read by
 // loadFan) and, once live, is written back into the config file itself: only
 // the bytes of the `fans` block are replaced (writeConfig, through
@@ -158,7 +160,7 @@
 //     { "rev": "3fa2c019", "del": 2 }                                      // drop fans[2]
 //
 // Keys are short because the phone reads the JSON over GATT, in pages of a
-// few hundred bytes (the receiver holds up to DASH_FAN_CONFIG_MAX).
+// few hundred bytes (the receiver holds up to VIEW_MAX).
 namespace fans
 {
 static const int CHANNELS = proto::FAN_CHANNELS;
@@ -319,6 +321,9 @@ public:
     // strip, so a reload confined to it leaves the running effect alone
     // (main.cpp asks each module for its block rather than knowing the names).
     static constexpr const char* BLOCK = "fans";
+    // ...and the editable view it owns on the dashboard (protocol.hpp); its
+    // telemetry and the sensor catalogue are views of its own too, watched
+    static const uint8_t VIEW = proto::VIEW_FAN_CONFIG;
 
     // read and validate the "fans" block. Returns false (having said what is
     // wrong, "fans[2].curve: ...") on a bad block, so the daemon can refuse to
@@ -460,8 +465,7 @@ public:
             // no fans block: an empty value, so a list an earlier run left on
             // the receiver isn't shown (and edited, into a daemon that has
             // none) — the phone falls back to the receiver's own slots
-            for (auto& s : sinks)
-                s->sendCommand(proto::CMD_FAN_CONFIG, nullptr, 0);
+            views::send(sinks, VIEW, "");
             err_.clear();
             return;
         }
@@ -469,7 +473,7 @@ public:
         std::string j = toJson();
         // a long refusal on a list near the ceiling: the reason is cut, never
         // the answer (the phone waits for it)
-        while (j.size() > proto::DASH_FAN_CONFIG_MAX && !err_.empty())
+        while (j.size() > proto::VIEW_MAX && !err_.empty())
         {
             size_t cut = err_.size() > 16 ? err_.size() - 16 : 0;
             while (cut > 0 && ((unsigned char)err_[cut] & 0xC0) == 0x80)
@@ -478,43 +482,37 @@ public:
             j = toJson();
         }
         err_.clear(); // said once
-        if (j.size() > proto::DASH_FAN_CONFIG_MAX)
+        if (!views::send(sinks, VIEW, j))
         {
-            // the receiver holds DASH_FAN_CONFIG_MAX and would drop this; say
-            // so once rather than leave the phone showing nothing
+            // the receiver would drop this; say so once rather than leave the
+            // phone showing nothing
             if (!warnedSize_)
                 fprintf(stderr, "fans: the config is %zu bytes as JSON, over the dashboard's "
-                                "%u — shorten fan names or inputs\n", j.size(), proto::DASH_FAN_CONFIG_MAX);
+                                "%u — shorten fan names or inputs\n", j.size(), proto::VIEW_MAX);
             warnedSize_ = true;
-            return;
         }
-
-        for (auto& s : sinks)
-            s->sendCommand(proto::CMD_FAN_CONFIG, (const uint8_t*)j.data(), (uint16_t)j.size());
     }
 
-    // a msg frame from the receiver (protocol.hpp MSG_*): the phone watching,
-    // or a phone edit. Main thread — the sinks' reader threads only queue.
-    void onMessage(uint8_t kind, const std::vector<uint8_t>& payload, double now,
-                   std::vector<std::unique_ptr<Sink>>& sinks)
+    // a phone watching the dashboard or not (protocol.hpp MSG_WATCH): the
+    // watched views flow only while one does. Main thread — the sinks'
+    // reader threads only queue.
+    void onWatch(bool on, double now)
     {
-        if (kind == proto::MSG_FAN_WATCH)
+        bool was = watching(now);
+        watchUntil_ = on ? now + WATCH_S : 0;
+        if (on && !was)
         {
-            bool on = !payload.empty() && payload[0] != 0;
-            bool was = watching(now);
-            watchUntil_ = on ? now + WATCH_S : 0;
-            if (on && !was)
-            {
-                lastTelemSent_ = lastSensorsSent_ = -1e9; // answer a fresh watcher on the next tick
-                lastSensors_.clear();
-            }
+            lastTelemSent_ = lastSensorsSent_ = -1e9; // answer a fresh watcher on the next tick
+            lastSensors_.clear();
         }
-        else if (kind == proto::MSG_FAN_CONFIG)
-        {
-            // answered either way: the new config, or the old one with why
-            applyEdit(std::string(payload.begin(), payload.end()), sinks);
-            pushConfig(sinks);
-        }
+    }
+
+    // the phone's edit of the fan list (protocol.hpp MSG_EDIT for VIEW),
+    // answered either way: the new config, or the old one with why
+    void onEdit(const std::string& edit, std::vector<std::unique_ptr<Sink>>& sinks)
+    {
+        applyEdit(edit, sinks);
+        pushConfig(sinks);
     }
 
     // ./led <config> --fan-status: what each fan resolves to and would run
@@ -1385,7 +1383,7 @@ private:
     // ---- dashboard helpers ----
 
     static const size_t ERR_ROOM = 160; // the longest "err" an answer adds to toJson
-    static const int WATCH_S = 30; // a MSG_FAN_WATCH 1 keeps telemetry flowing this long
+    static const int WATCH_S = 30; // a MSG_WATCH 1 keeps telemetry flowing this long
     static const int TELEM_REFRESH_S = 5;
     static const int SENSORS_REFRESH_S = 5; // the catalogue's pace while watched
 
@@ -1554,7 +1552,7 @@ private:
     // an output is [spec, duty %, rpm of the same-numbered tachometer (-1 =
     // none), 1 = can be driven]; it is both an output a fan can drive and an
     // input a fan can follow, so the chips' groups hold the temperatures
-    // alone. DASH_FAN_SENSORS_MAX is the receiver's buffer, so a machine with
+    // alone. VIEW_MAX is the receiver's ceiling, so a machine with
     // more sensors than fit loses temperatures from the end — never an input
     // or output a fan names or the `sensors` pick, which the pickers must be
     // able to show as chosen. "_outs" is held to half the ceiling the same
@@ -1613,7 +1611,7 @@ private:
                 std::string e = std::string(firstOut ? "" : ",") + "[\"" + cfgedit::escape(spec) + "\"," +
                                 std::to_string((int)(r.value + 0.5f)) + "," + std::to_string(rpm) + "," +
                                 (pwmout::writable(r.path) ? "1" : "0") + "]";
-                if (!inUse && outs.size() + e.size() > proto::DASH_FAN_SENSORS_MAX / 2)
+                if (!inUse && outs.size() + e.size() > proto::VIEW_MAX / 2)
                 {
                     outsLeft++;
                     continue;
@@ -1626,7 +1624,7 @@ private:
         {
             fprintf(stderr, "fans: %zu host pwm outputs left out of the phone's output picker (the "
                             "catalogue is over the dashboard's %u bytes; they can still be typed)\n",
-                    outsLeft, proto::DASH_FAN_SENSORS_MAX);
+                    outsLeft, proto::VIEW_MAX);
             warnedOuts_ = true;
         }
 
@@ -1662,7 +1660,7 @@ private:
                 size_t cost = 1 + 1 + cfgedit::escape(e.key).size() + 2 + e.val.size(); // ,"key":val
                 if (std::find(open.begin(), open.end(), e.chip) == open.end())
                     cost += 1 + cfgedit::escape(e.chip).size() + 2 + 1 + 1;      // ,"chip":{ ... }
-                if (size + cost + RESERVE > (size_t)proto::DASH_FAN_SENSORS_MAX)
+                if (size + cost + RESERVE > (size_t)proto::VIEW_MAX)
                 {
                     dropped++;
                     continue;
@@ -1691,7 +1689,7 @@ private:
             if (!warnedSensors_)
                 fprintf(stderr, "fans: the sensor catalogue is over the dashboard's %u bytes — %zu of %zu "
                                 "sensors are left out of the phone's picker (they can still be typed)\n",
-                        proto::DASH_FAN_SENSORS_MAX, dropped, entries.size());
+                        proto::VIEW_MAX, dropped, entries.size());
             warnedSensors_ = true;
         }
         j += (j.size() > 1 ? "," : "") + outs;
@@ -1707,19 +1705,16 @@ private:
         if (j == lastSensors_)
             return;
         lastSensors_ = j;
-        if (j.size() > proto::DASH_FAN_SENSORS_MAX)
+        if (!views::send(sinks, proto::VIEW_SENSORS, j))
         {
             // only what the fans name is over the ceiling (the rest is trimmed
             // to fit): the receiver would drop it, so say so instead
             if (!warnedSensorsSize_)
                 fprintf(stderr, "fans: the sensor catalogue is %zu bytes even trimmed, over the "
                                 "dashboard's %u — not sent (shorten the fans' inputs)\n",
-                        j.size(), proto::DASH_FAN_SENSORS_MAX);
+                        j.size(), proto::VIEW_MAX);
             warnedSensorsSize_ = true;
-            return;
         }
-        for (auto& s : sinks)
-            s->sendCommand(proto::CMD_FAN_SENSORS, (const uint8_t*)j.data(), (uint16_t)j.size());
     }
 
     void sendTelemetry(double now, std::vector<std::unique_ptr<Sink>>& sinks)
@@ -1727,19 +1722,17 @@ private:
         std::string j = telemetryJson();
         if (j == lastTelem_ && now - lastTelemSent_ < TELEM_REFRESH_S)
             return;
-        if (j.size() > proto::DASH_FAN_TELEM_MAX)
+        if (!views::send(sinks, proto::VIEW_FAN_TELEM, j))
         {
             if (!warnedTelem_)
                 fprintf(stderr, "fans: the telemetry is %zu bytes, over the dashboard's %u — not sent\n",
-                        j.size(), proto::DASH_FAN_TELEM_MAX);
+                        j.size(), proto::VIEW_MAX);
             warnedTelem_ = true;
             return;
         }
 
         lastTelem_ = j;
         lastTelemSent_ = now;
-        for (auto& s : sinks)
-            s->sendCommand(proto::CMD_FAN_TELEM, (const uint8_t*)j.data(), (uint16_t)j.size());
     }
 
     // ---- edits ----
@@ -1905,11 +1898,11 @@ private:
         // kept for the "err" an answer may carry
         std::vector<Fan> prev = std::move(fans_);
         fans_ = std::move(next);
-        if (toJson().size() + ERR_ROOM > proto::DASH_FAN_CONFIG_MAX)
+        if (toJson().size() + ERR_ROOM > proto::VIEW_MAX)
         {
             fans_ = std::move(prev);
             return bad(where, "the fan list would be too long for the dashboard (" +
-                                  std::to_string(proto::DASH_FAN_CONFIG_MAX) + " bytes as JSON) — "
+                                  std::to_string(proto::VIEW_MAX) + " bytes as JSON) — "
                                   "shorten fan names, or remove a fan");
         }
         lastFrom_ = from;

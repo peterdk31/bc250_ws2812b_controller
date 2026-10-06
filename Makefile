@@ -123,7 +123,7 @@ HEADERS = daemon/output/strip.hpp daemon/config_loader.hpp daemon/config_check.h
           daemon/sources/hwmon.hpp daemon/sources/hwmon_tree.hpp daemon/sources/pmbus.hpp daemon/sources/smu.hpp daemon/sources/steam.hpp \
           daemon/sources/audio.hpp daemon/sources/audio_detect.hpp \
           daemon/rules/rules.hpp \
-          daemon/output/sink.hpp daemon/output/serial_sink.hpp daemon/output/virtual_sink.hpp \
+          daemon/output/sink.hpp daemon/output/views.hpp daemon/output/serial_sink.hpp daemon/output/virtual_sink.hpp \
           daemon/output/virtual_strip_socket.hpp daemon/output/recorder.hpp \
           daemon/color/color_lut.hpp common/protocol.hpp common/motion.hpp \
           common/recording.hpp common/fade.hpp

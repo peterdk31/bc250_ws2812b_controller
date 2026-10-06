@@ -21,10 +21,10 @@
 // for asking has gone away.
 //
 // Messages (MSG_SYNC frames, post()). What the BLE dashboard's phone asks of
-// the daemon — a fan curve edit, "I'm watching" — carrying a payload and sent
-// once each, in order, from a small queue. No repeat and no ack of their own:
-// the daemon's answer (a fresh CMD_FAN_CONFIG, telemetry starting) is what the
-// phone waits for, and its timeout is what reports a lost one.
+// the daemon — an edit of one of its views, "I'm watching" — carrying a
+// payload and sent once each, in order, from a small queue. No repeat and no
+// ack of their own: the daemon's answer (a fresh view, telemetry starting) is
+// what the phone waits for, and its timeout is what reports a lost one.
 namespace hostreq
 {
 // the most a message payload can carry — protocol.hpp's, a GATT write's own

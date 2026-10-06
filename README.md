@@ -1630,19 +1630,19 @@ sync byte: a **log** frame (`0xAA 0x58`, the debug backchannel), a **request**
 frame (`0xAA 0x59`, the power button asking for a graceful shutdown; answered
 with command `0x06`), and a **message** frame (`0xAA 0x5A`) for the BLE
 dashboard — `kind(1) len(2, LE) payload checksum`, up to 512 bytes, sent
-once, carrying a phone's fan edit (`0x01`), "a phone is watching" (`0x02`), a
-strip edit (`0x03`) or a power switch edit (`0x04`). The dashboard's host →
-receiver commands are `0x0A` (the fan list as the daemon runs it), `0x0B`
-(its live readings), `0x0C` (the strip settings and scenes), `0x0D` (the
-sensor catalogue: every hwmon temperature and pwm output a fan could follow
-or drive, with readings, every 5 s while a phone watches) and `0x0F` (the
-power switch's tunings and short-press command as the daemon runs them). All
-of these payloads are JSON texts in the shapes `daemon/fans.hpp`,
-`daemon/strip_remote.hpp` and `daemon/power_remote.hpp` document, up to 2 KB
-(`protocol.hpp` `DASH_*_MAX`; the receiver takes any command up to that
-whatever its strip length) — the receiver relays them to the phone without
-parsing them, and the phone reads one longer than a GATT value's 512 bytes
-in pages. The fans' standalone settings (`0x11`: six 25-byte slot records,
+once, carrying "a phone is watching" (`0x02`) or a phone's edit of one of the
+daemon's views (`0x05`: the view's id, then the edit). The dashboard's host →
+receiver command is `0x12`, one **view**: its id, then its JSON text — the fan
+list as the daemon runs it (`0`), its live readings (`1`), the strip settings
+and scenes (`2`), the sensor catalogue (`3`: every hwmon temperature and pwm
+output a fan could follow or drive, with readings, every 5 s while a phone
+watches) and the power switch's tunings and short-press command (`4`), in the
+shapes `daemon/fans.hpp`, `daemon/strip_remote.hpp` and
+`daemon/power_remote.hpp` document, up to 2 KB each (`protocol.hpp`
+`VIEW_MAX`; the receiver takes any command up to that whatever its strip
+length). The receiver keeps the last view of each id and relays it to the
+phone without parsing it — so a new daemon view needs no firmware change —
+and the phone reads one longer than a notification in pages. The fans' standalone settings (`0x11`: six 25-byte slot records,
 each with its output), the power switch's tunings (`0x0E`: hold, boot timeout
 and the two sense thresholds, four little-endian u16s) and its wake pin
 (`0x10`: one GPIO byte, `0xFF` = none) are binary, because the receiver does

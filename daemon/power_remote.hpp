@@ -11,6 +11,7 @@
 #include "config_loader.hpp"
 #include "protocol.hpp"
 #include "sink.hpp"
+#include "views.hpp"
 
 // The power switch's half of the BLE dashboard (README "BLE remote", "Power
 // switch"): the config's `power_switch` block as far as a phone may change
@@ -29,7 +30,7 @@
 // runs, daemon/output/serial_sink.hpp) and is applied to the link at once.
 //
 // Like the fans and the strip this is JSON text the receiver relays unread;
-// the view goes out as CMD_PWR_CONFIG, an edit comes back as MSG_PWR_CONFIG,
+// the view goes out as VIEW_POWER, an edit comes back as MSG_EDIT for it,
 // is validated here against the same ranges tools/pwrcfg.py enforces at
 // flash time, written into the block through config_edit.hpp, pushed, and
 // answered with the new view. The shape, all keys as the config spells them
@@ -52,6 +53,8 @@ public:
     // the top-level config block this module owns; like the fans', nothing
     // in it feeds the strip (see fans::Controller::BLOCK)
     static constexpr const char* BLOCK = "power_switch";
+    // ...and the view it owns on the dashboard (protocol.hpp)
+    static const uint8_t VIEW = proto::VIEW_POWER;
 
     // read the block. cfg is held onto (its values are edited in place so the
     // running tree matches the file); writer is the config file's editor,
@@ -154,19 +157,17 @@ public:
     void pushConfig(std::vector<std::unique_ptr<Sink>>& sinks)
     {
         std::string j = toJson();
-        if (j.size() > WIRE_MAX)
+        if (!views::send(sinks, VIEW, j))
         {
-            // the receiver holds WIRE_MAX and drops a longer one unread; say so
-            // rather than leave every phone save timing out for no visible reason
+            // the receiver would drop a longer one unread; say so rather than
+            // leave every phone save timing out for no visible reason
             if (!warnedSize_)
                 fprintf(stderr, "power_switch: the dashboard view is %zu bytes as JSON, over the "
-                                "receiver's %d — shorten short_press\n", j.size(), WIRE_MAX);
+                                "receiver's %u — shorten short_press\n", j.size(), proto::VIEW_MAX);
             warnedSize_ = true;
             return;
         }
         warnedSize_ = false;
-        for (auto& s : sinks)
-            s->sendCommand(proto::CMD_PWR_CONFIG, (const uint8_t*)j.data(), (uint16_t)j.size());
     }
 
     // the short-press command onto the link(s) — at startup, after a reload,
@@ -177,14 +178,10 @@ public:
             s->setShortPress(shortPress_);
     }
 
-    // a msg frame from the receiver (protocol.hpp MSG_PWR_CONFIG): the
-    // phone's edit. Main thread.
-    void onMessage(uint8_t kind, const std::vector<uint8_t>& payload,
-                   std::vector<std::unique_ptr<Sink>>& sinks)
+    // the phone's edit of the view (protocol.hpp MSG_EDIT). Main thread.
+    void onEdit(const std::string& edit, std::vector<std::unique_ptr<Sink>>& sinks)
     {
-        if (kind != proto::MSG_PWR_CONFIG)
-            return;
-        if (applyEdit(std::string(payload.begin(), payload.end()), sinks))
+        if (applyEdit(edit, sinks))
             pushConfig(sinks); // the answer the phone waits for
     }
 
@@ -230,7 +227,6 @@ public:
     }
 
 private:
-    static const int WIRE_MAX = proto::DASH_PWR_CONFIG_MAX; // the receiver's slot for CMD_PWR_CONFIG
     static const int WAKE_MAX = 63;  // the info value's pin mask is 64 bits; no ESP32 has more
 
     bool bad(const std::string& where, const std::string& what)
