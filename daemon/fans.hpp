@@ -1764,7 +1764,7 @@ private:
         cfgedit::member(o, "name") = cfgedit::string(f.name);
         cfgedit::member(o, "output") = cfgedit::string(f.output);
         cfgedit::member(o, "input") = cfgedit::string(f.input);
-        if (f.hasCurve())
+        if (f.hasCurve() && !f.curve.empty()) // a parked fan's may be absent
             cfgedit::member(o, "curve") = cfgedit::string(f.curveText);
         cfgedit::member(o, "fallback") = cfgedit::number(f.fallback);
         if (f.boost >= 0)
@@ -2103,7 +2103,7 @@ private:
             cfgedit::member(fv, "name") = cfgedit::string(f.name);
             cfgedit::member(fv, "output") = cfgedit::string(f.output);
             cfgedit::member(fv, "input") = cfgedit::string(f.input);
-            if (!f.hasCurve())
+            if (!f.hasCurve() || f.curve.empty()) // a parked fan's may be absent — "" would fail the next load
                 cfgedit::erase(fv, "curve");
             else
             {
