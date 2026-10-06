@@ -646,11 +646,11 @@ function FanEditor({ fkey }) {
     : ['fallback', ...own, ...B.HOST_KINDS];
   const setPt = (i, p) => setH(x => { const pts = x.pts.map(q => ({ ...q })); pts[i] = { ...pts[i], ...p }; return { ...x, pts }; });
   const addPt = () => setH(x => {
-    const p = x.pts.map(q => ({ ...q })), d = xDomain(x);
-    // between the last two points, or past the last one
+    const p = x.pts.map(q => ({ ...q })), max = B.xMax(x), last = p[p.length - 1];
+    // past the last point while the axis has room, else between the last two
     let at = p.length, xv, yv;
-    if (p.length >= 2) { const a = p[p.length - 2], b = p[p.length - 1]; xv = (a.x + b.x) / 2; yv = Math.round((a.y + b.y) / 2); at = p.length - 1; }
-    else { xv = Math.min(d[1], p[0].x + 10); yv = p[0].y; }
+    if (last.x < max || p.length < 2) { xv = Math.min(max, last.x + 10); yv = last.y; }
+    else { const a = p[p.length - 2]; xv = (a.x + last.x) / 2; yv = Math.round((a.y + last.y) / 2); at = p.length - 1; }
     xv = Math.round(xv / B.xStep(x)) * B.xStep(x);
     p.splice(at, 0, { x: xv, y: yv });
     return { ...x, pts: p };
