@@ -499,6 +499,7 @@ wins.
 | `load` | CPU/GPU bars from center over a palette wash, each with a heartbeat that quickens under load; each side's palette window slides toward the hot end with its load | `palette` (00e0c0,2060ff,a040ff,ff4060,ff9000), `heat_span` (0.45), `color_drift` (0.3), `pulse` (0.5) |
 | `load_boil` | CPU/GPU load as a lava lamp: each half's blobs boil harder and shift toward the palette's hot end with that side's load | `palette` (00e0c0,2060ff,a040ff,ff4060,ff9000), `blobs` (2), `boil` (2.5) |
 | `orbit` | binary stars: glow pairs orbit a shared center, whipping through conjunctions that bloom white-hot | `palette` (1030ff,00d0ff,c080ff,ff40a0), `pairs` (2), `origin` (0.5) |
+| `pendulum` | pendulum wave: each LED swings once more per period than its neighbour, so the strip drifts from one shared swell through travelling waves and braids and marches back into step | `palette` (2040ff,00d0c0,a040ff,ff4090,2040ff), `period_seconds` (60), `swings` (15), `origin` (0.0) |
 | `plasma` | drifting sines + noise walking a palette | `palette` (0040ff,00d0a0,c040ff,0040ff), `speed` (1.4) |
 | `pulse` | soft palette rings expanding from the center | `palette` (5028ff,30d0ff), `period_seconds` (4) |
 | `rainbow` | scrolling hue cycle with shimmer | `cycles_per_second` (0.9) |

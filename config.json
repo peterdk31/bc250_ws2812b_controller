@@ -324,6 +324,19 @@
                         }
                     },
                     {
+                        "effect": "pendulum",
+                        "seconds": 60,
+                        "settings": {
+                            "palette": "2040ff,00d0c0,a040ff,ff4090,2040ff",
+                            "period_seconds": 60,
+                            "swings": 15,
+                            "sharp": 2.5,
+                            "span": 1.0,
+                            "color_speed": 1.0,
+                            "origin": 0.5
+                        }
+                    },
+                    {
                         "effect": "silk",
                         "settings": {
                             "palette": "3a1078,c03080,ff9040,20b0c0,3a1078",
