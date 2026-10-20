@@ -191,9 +191,24 @@ static void refresh()
         uint8_t t = dither::threshold(ditherTick, i);
         uint8_t c[3];
 
+        const uint16_t* p = &scratch[i * 3];
+        uint32_t peak = p[0] > p[1] ? p[0] : p[1];
+        if (p[2] > peak)
+            peak = p[2];
+
+        // a pixel entirely below code 1 rounds as a whole, so its channels
+        // don't drop out one at a time and tint it (see dither::subCode)
+        if (peak < 0x100)
+        {
+            for (int k = 0; k < 3; k++)
+                c[k] = dither::subCode(p[k], peak);
+            led_strip_set_pixel(strip, i, c[0], c[1], c[2]);
+            continue;
+        }
+
         for (int k = 0; k < 3; k++)
         {
-            uint32_t v = scratch[i * 3 + k];
+            uint32_t v = p[k];
             uint32_t f = v & 0xFF;
 
             // dither only fractions that pulse above the blink floor — and

@@ -36,9 +36,11 @@
 #include <errno.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include "receiver.hpp"
+#include "dither.hpp"
 #include "fade.hpp"
 #include "virtual_strip_socket.hpp"
 
@@ -115,10 +117,15 @@ struct Viewer : proto::FrameHandler
             const uint16_t* p = &work_[i * 3];
             char cell[40];
             // round the 8.8 values to the terminal's 8 bits — the average the
-            // strip's high-rate dither shows. Two background-colored spaces
-            // per LED: a solid block of its color.
+            // strip's high-rate dither shows; a pixel entirely below code 1
+            // rounds as a whole, as the receiver does (dither::subCode). Two
+            // background-colored spaces per LED: a solid block of its color.
+            int peak = std::max({p[0], p[1], p[2]});
+            int c[3];
+            for (int k = 0; k < 3; k++)
+                c[k] = peak < 0x100 ? dither::subCode(p[k], peak) : to8(p[k]);
             snprintf(cell, sizeof cell, "\x1b[48;2;%d;%d;%dm  ",
-                     to8(p[0]), to8(p[1]), to8(p[2]));
+                     c[0], c[1], c[2]);
             out += cell;
         }
 

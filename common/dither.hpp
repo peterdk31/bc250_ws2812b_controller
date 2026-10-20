@@ -18,10 +18,12 @@
 //
 // Two exceptions, applied by the receiver at the latch (see refreshStrip):
 //
-//  - values below code 1 are rounded to nearest, never dithered —
-//    duty-cycling an unlit LED means 100%-contrast flashes from black,
-//    which the eye catches (through a pale diffuser, glaringly) at rates
-//    that pass unseen between two lit codes.
+//  - values below code 1 are never dithered — duty-cycling an unlit LED
+//    means 100%-contrast flashes from black, which the eye catches
+//    (through a pale diffuser, glaringly) at rates that pass unseen
+//    between two lit codes. They round to 0 or 1 instead, per channel
+//    while the pixel's brightest channel is lit, and as a whole pixel
+//    once it isn't (subCode below).
 //
 //  - a duty cycle's pulse rate is fraction × latch rate, so a near-code
 //    fraction pulses slowly — value 2.02 would show code 3 a few times a
@@ -54,6 +56,18 @@ inline uint8_t bitReverse8(uint8_t b)
 inline uint8_t threshold(uint32_t tick, int pixel)
 {
     return (uint8_t)(bitReverse8((uint8_t)tick) + (uint8_t)(pixel * 59));
+}
+
+// the 0-or-1 code for channel value `v` (8.8) of a pixel whose brightest
+// channel `peak` is itself below code 1. Rounding each channel to nearest
+// would drop them one by one as a fade crosses half a code — a white-balanced
+// white (green held lower) passes through magenta and red on its way to
+// black. Instead the pixel is lit or dark as a whole, by its brightest
+// channel, and lit, shows every channel at least half that bright: dim white
+// stays white down to the last code, a dim red stays red.
+inline uint8_t subCode(uint32_t v, uint32_t peak)
+{
+    return peak >= 0x80 && v * 2 >= peak ? 1 : 0;
 }
 
 } // namespace dither

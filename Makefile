@@ -146,7 +146,7 @@ led: $(SRCS) $(HEADERS)
 # hardware and no extra deps — plain g++. Built on demand, not part of `all`,
 # so the deploy path is unchanged. Run it, then start `led` (or run a single
 # effect) to preview an animation before pushing it to the BC-250.
-virtual-strip: tools/virtual_strip.cpp daemon/output/virtual_strip_socket.hpp common/receiver.hpp common/protocol.hpp common/fade.hpp common/motion.hpp
+virtual-strip: tools/virtual_strip.cpp daemon/output/virtual_strip_socket.hpp common/receiver.hpp common/protocol.hpp common/fade.hpp common/dither.hpp common/motion.hpp
 	$(CXX) $(CXXFLAGS) tools/virtual_strip.cpp -o $@
 
 # would the config the daemon runs on start THIS build? (daemon/config_check.hpp)
