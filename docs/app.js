@@ -839,7 +839,8 @@ function SteamScreen() {
   const state = !live ? '' : !live.port ? 'off in the config' : !live.steam ? 'Steam not running' : '';
   return html`<div class="list">
     ${live?.game && html`<${Card} title="Playing">
-      <div class="swrow"><span class="gname">${live.game.n}</span>
+      <div class="swrow"><span class="gtitle"><${Thumb} key=${live.game.a} g=${lib?.games.find(g => g.a === live.game.a) || live.game} />
+        <span class="gname">${live.game.n}</span></span>
         <button class="minor danger" disabled=${waiting} onClick=${() => { if (confirm(`Quit ${live.game.n}? Unsaved progress is lost.`)) B.steamRequest('quit', live.game.a); }}>Quit</button></div>
     <//>`}
     ${live?.launch && html`<${Card} title="Launching" right=${live.launch.p !== null ? `${live.launch.p} %` : ''}>

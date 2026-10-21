@@ -3,7 +3,7 @@
 // install and served cache-first forever. Bump VERSION when any cached file
 // changes — the new worker drops the old cache on activation. Game
 // thumbnails live in their own cache that outlasts versions.
-const VERSION = 'v50';
+const VERSION = 'v51';
 const CACHE = `bc250-power-${VERSION}`;
 const THUMBS = 'bc250-thumbs';
 const FILES = ['./', 'index.html', 'app.js', 'ble.js', 'demo-ble.js', 'vendor/preact-htm.mjs', 'manifest.webmanifest', 'icon.svg'];
