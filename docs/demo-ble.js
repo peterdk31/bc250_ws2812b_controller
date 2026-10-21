@@ -501,7 +501,7 @@ const bc250 = new Board({
     vrm: true,
     steam: { game: null, dl: { a: 1091500, p: 37, paused: false, q: 2 },
              games: [[1245620, 'ELDEN RING', 0.2], [1086940, 'Baldur\'s Gate 3', 1.5], [1091500, 'Cyberpunk 2077', 4],
-                     [413150, 'Stardew Valley', 9], [1145360, 'Hades', 21], [367520, 'Hollow Knight', 60], [2379780, 'Balatro', null, 'c0ffee']] },
+                     [413150, 'Stardew Valley', 9], [1145360, 'Hades', 21], [367520, 'Hollow Knight', 60], [2379780, 'Balatro', null, 'c0ffee/library_header.jpg']] },
   }),
 });
 const desk = new Board({

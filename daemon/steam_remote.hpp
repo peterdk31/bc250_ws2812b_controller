@@ -197,7 +197,7 @@ private:
         {
             std::string e = "{\"a\":" + std::to_string(g.appid) + ",\"n\":\"" + cfgedit::escape(g.name) +
                             "\",\"t\":" + std::to_string(g.lastPlayed) +
-                            (g.artHash.empty() ? "" : ",\"h\":\"" + cfgedit::escape(g.artHash) + "\"") + "}";
+                            (g.art.empty() ? "" : ",\"h\":\"" + cfgedit::escape(g.art) + "\"") + "}";
             // room for the brackets and the "more" count after it
             if (list.size() + e.size() + 40 > proto::VIEW_MAX)
                 break;

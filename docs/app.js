@@ -814,10 +814,10 @@ function played(t) {
 const Bar = ({ p }) => html`<div class="prog"><i style=${`width: ${clamp(p, 0, 100)}%`}></i></div>`;
 // Steam's store art, straight from its CDN while the phone is online; sw.js
 // keeps each one for offline. Newer games' art sits under a hashed folder the
-// daemon reads from Steam's cache (h); the next address is tried on a miss,
+// daemon reads from Steam's cache (h, "<hash>/<file>"); the next address is tried on a miss,
 // and a game with none keeps the empty frame.
 const ART = 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps';
-const artUrls = g => [g.h && `${ART}/${g.a}/${g.h}/header.jpg`,
+const artUrls = g => [g.h && `${ART}/${g.a}/${g.h}`,
   `https://cdn.cloudflare.steamstatic.com/steam/apps/${g.a}/capsule_184x69.jpg`, `${ART}/${g.a}/header.jpg`].filter(Boolean);
 function Thumb({ g }) {
   const [i, setI] = useState(0);

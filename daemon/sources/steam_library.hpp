@@ -13,7 +13,7 @@
 // Newer games keep their store art under a hashed folder on Steam's CDN
 // (store_item_assets/steam/apps/<appid>/<hash>/header.jpg), which the appid
 // alone can't name. Steam's library cache on disk mirrors that folder, so the
-// hash is read from there.
+// path is read from there; some games have only library_header.jpg.
 namespace steam
 {
 
@@ -22,7 +22,7 @@ struct Game
     unsigned appid = 0;
     std::string name;
     long lastPlayed = 0;    // unix seconds, 0 = never
-    std::string artHash;    // "" = the art isn't under a hashed folder
+    std::string art;        // "<hash>/<file>" under the appid, "" = not hashed
 };
 
 inline bool isTool(const std::string& name)
@@ -36,27 +36,29 @@ inline bool isTool(const std::string& name)
     return false;
 }
 
-inline std::string artHash(const std::vector<std::string>& libs, unsigned appid)
+inline std::string artPath(const std::vector<std::string>& libs, unsigned appid)
 {
+    static const char* const FILES[] = {"header.jpg", "library_header.jpg"};
+    struct stat st;
+
     for (const auto& lib : libs)
     {
         std::string dir = lib + "/../appcache/librarycache/" + std::to_string(appid);
-        struct stat st;
         if (stat((dir + "/header.jpg").c_str(), &st) == 0)
             return "";
 
-        DIR* d = opendir(dir.c_str());
-        if (!d) continue;
-        std::string found;
-        while (dirent* e = readdir(d))
-            if (e->d_name[0] != '.' && stat((dir + "/" + e->d_name + "/header.jpg").c_str(), &st) == 0)
-            {
-                found = e->d_name;
-                break;
-            }
-        closedir(d);
-        if (!found.empty())
-            return found;
+        std::vector<std::string> hashes;
+        if (DIR* d = opendir(dir.c_str()))
+        {
+            while (dirent* e = readdir(d))
+                if (e->d_name[0] != '.')
+                    hashes.push_back(e->d_name);
+            closedir(d);
+        }
+        for (const char* file : FILES)
+            for (const auto& h : hashes)
+                if (stat((dir + "/" + h + "/" + file).c_str(), &st) == 0)
+                    return h + "/" + file;
     }
     return "";
 }
@@ -74,7 +76,7 @@ inline std::vector<Game> installedGames()
         for (const Game& g : games)
             if (g.appid == m.appid)
                 return; // the same app in two libraries
-        games.push_back({m.appid, m.name, m.lastPlayed, artHash(libs, m.appid)});
+        games.push_back({m.appid, m.name, m.lastPlayed, artPath(libs, m.appid)});
     });
 
     std::sort(games.begin(), games.end(), [](const Game& a, const Game& b) {
