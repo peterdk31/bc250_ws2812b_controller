@@ -40,7 +40,7 @@
         }
     },
     "power_switch": {
-        "enabled": false,
+        "enabled": true,
         "hold_seconds": 2,
         "boot_timeout_seconds": 10,
         "sense_low_mv": 800,
@@ -53,7 +53,7 @@
             "led": 8,
             "wake": null
         },
-        "short_press": null
+        "short_press": "systemctl poweroff"
     },
     "ble_remote": {
         "enabled": false,

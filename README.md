@@ -80,14 +80,13 @@ sudo make flash
 ```
 
 The config is `/etc/led-controller/config.json` when it exists, else the
-repo's (`CONFIG=path` overrides). The shipped blocks are all off, so a fresh
-box writes all three features off — the shipped `power_switch` block carries
-the carrier board's pins with `"enabled": false`, and an explicit `false`
-*is* written. That matters only on a receiver whose power switch is already
-on: written off, it releases PS_ON# and cuts the machine's power (see [Power
-switch](#power-switch)). Flashing such a box from a config that has no
+repo's (`CONFIG=path` overrides). The shipped `power_switch` block is on,
+with the carrier board's pins; the fan and BLE blocks ship off, and an
+explicit `false` *is* written. For the power switch that matters: a receiver
+whose switch is written off releases PS_ON# and cuts the machine's power (see
+[Power switch](#power-switch)). Flashing from a config that has no
 `power_switch` block at all leaves the chip's switch settings alone, so
-delete the block, or enable it, before flashing a machine whose power
+delete the block, or keep it enabled, before flashing a machine whose power
 already hangs on the receiver. Writing the features from one file also arms
 the encoders' strictest cross-checks: a pin claimed by two blocks, or by a
 block and `strip.pin`, is a hard error. Each feature's section has the `flash-pwr` / `flash-fan` /
@@ -216,15 +215,15 @@ running — the second half the host's rendering:
     "shutdown": { ... },        // (standalone effects only, see below)
 
     "power_switch": {           // the ATX power button, see Power switch
-        "enabled": false,           // enabled + pins: flash-time (make flash-pwr)
+        "enabled": true,            // enabled + pins: flash-time (make flash-pwr)
         "hold_seconds": 2,          // hold this long for a hard cut     ┐ the four tunings:
         "boot_timeout_seconds": 10, // rail not up by then = release PS_ON# │ live (reload, or
         "sense_low_mv": 800,        //                                     │ the phone's cog
         "sense_high_mv": 2000,      //                                     ┘ on the Power tab)
         "pins": { "ps_on": 3, "button": 1, "button_gnd": null, "sense": 2, "led": 8,
                   "wake": null },   // wake: an OpenPuck's power-on pulse, see Power switch
-        "short_press": null         // what the daemon runs on a short press,
-                                    // e.g. "systemctl poweroff"; null = ignore it
+        "short_press": "systemctl poweroff" // what the daemon runs on a short
+                                    // press; null = ignore it
     },
     "ble_remote": {             // the phone power button + dashboard, see BLE remote
         "enabled": false,
@@ -539,6 +538,7 @@ wins.
 | `orbit` | binary stars: glow pairs orbit a shared center, whipping through conjunctions that bloom white-hot | `palette` (1030ff,00d0ff,c080ff,ff40a0), `pairs` (2), `origin` (0.5) |
 | `pendulum` | pendulum wave: each LED swings once more per period than its neighbour, so the strip drifts from one shared swell through travelling waves and braids and marches back into step | `palette` (2040ff,00d0c0,a040ff,ff4090,2040ff), `period_seconds` (60), `swings` (15), `origin` (0.0) |
 | `plasma` | drifting sines + noise walking a palette | `palette` (0040ff,00d0a0,c040ff,0040ff), `speed` (1.4) |
+| `progress` | live progress bar for a `source` (`steam_dl`, `steam_launch`), pulse at 100% | `source` (steam_dl), `palette` (d4009c,ff5a1e,ffd23c), `done_color` (00ff66) |
 | `pulse` | soft palette rings expanding from the center | `palette` (5028ff,30d0ff), `period_seconds` (4) |
 | `rainbow` | scrolling hue cycle with shimmer | `cycles_per_second` (0.9) |
 | `shoreline` | waves roll in from both ends, decelerating and whitening into foam as they break at the center | `palette` (003048,00a090,60e0c0), `period_seconds` (6), `foam_color` (ffffff) |
