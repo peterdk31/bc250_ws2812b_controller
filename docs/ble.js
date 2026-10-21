@@ -1572,6 +1572,11 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') resume();
   else watchAbort?.abort();
 });
+// Android Chrome can keep a reloaded or closed page's link open, and the
+// receiver takes one connection at a time — it stops advertising, and the
+// next page waits for it forever
+window.addEventListener('pagehide', () => { try { if (S.device?.gatt.connected) S.device.gatt.disconnect(); } catch {} });
+window.addEventListener('pageshow', e => { if (e.persisted) resume(); });
 
 export function boot() {
   if (!HAS_BT)
