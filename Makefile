@@ -171,6 +171,7 @@ install: led
 	install -Dm644 led-controller.service /etc/systemd/system/led-controller.service
 	test -f /etc/led-controller/config.json || install -Dm644 config.json /etc/led-controller/config.json
 	-@$(MAKE) --no-print-directory modules
+	-@$(MAKE) --no-print-directory steam-debug
 	systemctl daemon-reload
 	-systemctl enable led-controller
 	-systemctl restart led-controller
@@ -183,6 +184,39 @@ install: led
 modules:
 	install -Dm644 led-controller.conf /etc/modules-load.d/led-controller.conf
 	-modprobe i2c-dev
+
+# turn on Steam's remote debugging when the deployed config sets
+# steam_debug_port (daemon/sources/steam_cef.hpp). Files created are listed so
+# steam-debug-uninstall removes only those, never Decky Loader's.
+STEAM_DEBUG_LIST = /var/lib/led-controller/steam-debug-files
+
+steam-debug:
+	@port=$$(./led --config-get $(DEPLOYED_CONFIG) steam_debug_port 2>/dev/null); \
+	case "$$port" in ""|0|null) exit 0;; esac; \
+	for root in /home/*/.local/share/Steam /var/home/*/.local/share/Steam \
+	            /home/*/.var/app/com.valvesoftware.Steam/.local/share/Steam; do \
+		[ -d "$$root" ] || continue; \
+		real=$$(realpath "$$root"); \
+		case " $$seen " in *" $$real "*) continue;; esac; \
+		seen="$$seen $$real"; \
+		[ -e "$$real/.cef-enable-remote-debugging" ] && continue; \
+		install -m644 -o "$$(stat -c %u "$$real")" -g "$$(stat -c %g "$$real")" \
+			/dev/null "$$real/.cef-enable-remote-debugging" && \
+		mkdir -p "$$(dirname $(STEAM_DEBUG_LIST))" && \
+		echo "$$real/.cef-enable-remote-debugging" >> $(STEAM_DEBUG_LIST) && \
+		echo "steam-debug: enabled Steam remote debugging in $$real —" \
+		     "restart Steam for the exact download bar (port $$port)"; \
+	done; true
+
+# set steam_debug_port to null too, or the next install recreates them
+steam-debug-uninstall:
+	@[ -f $(STEAM_DEBUG_LIST) ] || { echo "steam-debug: no files created by make install"; exit 0; }; \
+	while IFS= read -r f; do \
+		case "$$f" in */.cef-enable-remote-debugging) ;; *) continue;; esac; \
+		[ -f "$$f" ] && rm -f "$$f" && \
+		echo "steam-debug: removed $$f — restart Steam to close the debug port"; \
+	done < $(STEAM_DEBUG_LIST); \
+	rm -f $(STEAM_DEBUG_LIST)
 
 # install the udev rule that pins /dev/led-controller to the receiver's serial
 # port (see led-controller.rules), so the daemon's configured port and `make
@@ -208,6 +242,7 @@ uninstall:
 	rm -f /etc/systemd/system/led-controller.service
 	rm -f $(PREFIX)/bin/led
 	rm -f /etc/udev/rules.d/99-led-controller.rules
+	-@$(MAKE) --no-print-directory steam-debug-uninstall
 	rm -f /etc/modules-load.d/led-controller.conf
 	rm -rf /etc/led-controller
 	@# the host fan outputs' claims record (daemon/pwmout.hpp): the stop above
@@ -555,4 +590,4 @@ receiver-clean:
 	rm -rf firmware/build firmware/build-* firmware/dist $(IDF_GENERATED)
 	-@[ -n "$(CONTAINER)" ] && $(CONTAINER) rmi $(IDF_IMAGE) 2>/dev/null || true
 
-.PHONY: all check install install-config uninstall clean udev-rule serial-perms receiver-toolchain receiver receiver-clean flash flash-source flash-pwr flash-fan flash-ble clear-nvs clear-recordings
+.PHONY: all check install install-config uninstall clean udev-rule steam-debug steam-debug-uninstall serial-perms receiver-toolchain receiver receiver-clean flash flash-source flash-pwr flash-fan flash-ble clear-nvs clear-recordings

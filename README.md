@@ -456,6 +456,24 @@ level slider when the rule's settings carry `color` or `level`.
 The `steam_download` effect turns the strip into a live download progress bar
 (percent driven by network throughput; green pulse at 100%). Reading other
 users' Steam libraries needs the daemon running as root (the systemd unit does).
+Each app of an install (the game, Steamworks redistributables, Proton, shader
+pre-cache) fills its own bar, one after the other.
+
+For exact progress the daemon reads Steam's own numbers — the ones its Downloads
+page shows — over Steam's remote-debugging port, `"steam_debug_port": 8080` (on
+by default; `null` turns it off). That needs Steam's remote debugging on: an
+empty `.cef-enable-remote-debugging` file in the Steam directory
+(`~/.local/share/Steam/`), which `make install` creates for every Steam user
+while the key is set (Decky Loader creates it too). Restart Steam once after.
+`make steam-debug-uninstall` (also part of `make uninstall`) removes the files
+`make install` created, never one that was already there; set the key to `null`
+as well, or the next install puts them back.
+The bar then follows Steam's percent, and a pause or finish shows at once. It uses
+Steam's internal JS API (the one Decky plugins use), so a Steam update can break
+it; whenever the port doesn't answer the daemon falls back to the estimate above
+and says so in the journal. The port is localhost-only, but anything running on
+the machine can drive the Steam client through it. `led <config> --steam-status`
+shows which source is in use and what Steam reports.
 
 The `audio_*` effects visualise what's playing (combine them with `cycle` for
 variety — they share one capture stream and auto-gain, so hopping between them

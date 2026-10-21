@@ -117,6 +117,7 @@
         "nct6683:AMD TSI Addr 98h",
         "nct6686"
     ],
+    "steam_debug_port": 8080,
     "rules": [
         {
             "if": "file:/tmp/led-static-color",

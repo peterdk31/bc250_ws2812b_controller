@@ -38,6 +38,7 @@
 #include "fans.hpp"
 #include "power_remote.hpp"
 #include "strip_remote.hpp"
+#include "steam_cef.hpp"
 #include "rules.hpp"
 #include "serial_sink.hpp"
 #include "recorder.hpp"
@@ -106,6 +107,7 @@ static const Field TOP[] = {
     {"frame_ms", Kind::Int, "the default frame period every effect reads"},
     {"sensors", Kind::Any, "hwmon candidates: \"chip:label,...\" or an array of them"},
     {smu::CONFIG_KEY_INTERVAL, Kind::Int, "how often to re-read the VRAM chips, ms (default 2000, floored at 250)"},
+    {steam::CONFIG_KEY_DEBUG_PORT, Kind::IntOrNull, "Steam's remote-debugging port (8080) for exact download progress, or null"},
     {"rules", Kind::Arr, "the rules, first match wins"},
 };
 

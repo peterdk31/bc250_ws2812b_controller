@@ -10,11 +10,11 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+#include "steam_cef.hpp"
 
-// Steam download tracking by polling steamapps/appmanifest_*.acf:
-// Steam rewrites the manifests as chunks land, so their byte counters
-// are the standard way to watch downloads from outside. Shared by the
-// steam_dl condition and the steam_download effect
+// Steam download progress for the steam_dl condition and the steam_download
+// effect: Steam's own numbers over its debug port when available
+// (steam_cef.hpp), otherwise an estimate from the appmanifests
 namespace steam
 {
 
@@ -22,7 +22,7 @@ struct Downloads
 {
     bool active = false;    // a download is running and bytes are moving
     bool finished = false;  // just completed -- effect celebrates, then ends
-    float percent = 0.0f;   // 0..100 across all active downloads
+    float percent = 0.0f;   // 0..100 for the part downloading now
 };
 
 // `"key"  "value"` out of a VDF/ACF line; false for any other shape
@@ -57,11 +57,9 @@ inline void addLibrary(std::vector<std::string>& libs, const std::string& dir)
         libs.push_back(real);
 }
 
-// every steamapps dir on the system: per-user Steam roots under /home
-// and ostree's /var/home (realpath collapses the /home symlink and the
-// .steam/steam indirection, so nothing is scanned twice), plus the
-// extra libraries each root's libraryfolders.vdf points at (SD card,
-// second disk)
+// every steamapps dir: each user's Steam root under /home and ostree's
+// /var/home, plus the extra libraries its libraryfolders.vdf lists.
+// realpath dedupes the /home symlink and the .steam/steam indirection
 inline std::vector<std::string> libraries()
 {
     std::vector<std::string> libs;
@@ -105,31 +103,33 @@ inline std::vector<std::string> libraries()
     return libs;
 }
 
-// fold one manifest's outstanding bytes into the totals. StateFlags
-// bits (community-documented): 2 update required, 256 update running,
-// 512 update paused, 1024 update started. Requiring 256|1024 rather
-// than just 2 skips games whose update is pending but not downloading
-// ("update on next launch" sits at StateFlags 6 indefinitely)
-inline void addManifest(const std::string& path,
-                        unsigned long long& total,
-                        unsigned long long& done)
+struct Manifest
 {
-    FILE* f = fopen(path.c_str(), "r");
-    if (!f) return;
-
+    std::string name;
     unsigned long flags = 0;
     unsigned long long toDownload = 0, downloaded = 0;
+    std::vector<std::string> depots; // per-depot counters, for --steam-status
+
+    // StateFlags (community-documented): 2 update required, 256 running,
+    // 512 paused, 1024 started. 2 alone is "update on next launch", which
+    // can sit there indefinitely
+    bool running() const
+    {
+        return toDownload > 0 && !(flags & 512) && (flags & (256 | 1024));
+    }
+};
+
+inline bool readManifest(const std::string& path, Manifest& m, bool depots = false)
+{
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) return false;
 
     char line[512];
     std::string key, val;
 
-    // the appmanifest is nested VDF. The top-level AppState block holds
-    // the whole-update StateFlags and byte totals, but blocks deeper in
-    // (per-depot download state) repeat BytesToDownload/BytesDownloaded
-    // for their own slice -- a live download can carry a dozen-plus, the
-    // last a tiny 240-byte depot. A flat last-match read lands on that
-    // leftover instead of the real total, so track brace depth and read
-    // only the depth-1 AppState keys. Braces sit alone on their own lines.
+    // per-depot blocks nested inside AppState repeat BytesToDownload/
+    // BytesDownloaded for their own slice, so only depth-1 keys are the
+    // app's totals. Braces sit alone on their lines
     int depth = 0;
 
     while (fgets(line, sizeof line, f))
@@ -140,30 +140,55 @@ inline void addManifest(const std::string& path,
         if (*p == '{') { depth++; continue; }
         if (*p == '}') { depth--; continue; }
 
-        if (depth != 1 || !vdfPair(line, key, val))
+        if (!vdfPair(line, key, val))
             continue;
 
-        if (key == "StateFlags")
-            flags = strtoul(val.c_str(), nullptr, 10);
-        else if (key == "BytesToDownload")
-            toDownload = strtoull(val.c_str(), nullptr, 10);
-        else if (key == "BytesDownloaded")
-            downloaded = strtoull(val.c_str(), nullptr, 10);
+        if (depth == 1)
+        {
+            if (key == "name") m.name = val;
+            else if (key == "StateFlags")
+                m.flags = strtoul(val.c_str(), nullptr, 10);
+            else if (key == "BytesToDownload")
+                m.toDownload = strtoull(val.c_str(), nullptr, 10);
+            else if (key == "BytesDownloaded")
+                m.downloaded = strtoull(val.c_str(), nullptr, 10);
+        }
+        else if (depots && depth > 1 &&
+                 (key == "BytesToDownload" || key == "BytesDownloaded"))
+        {
+            m.depots.push_back("depth " + std::to_string(depth) + " " + key + "=" + val);
+        }
     }
 
     fclose(f);
-
-    if (toDownload == 0 || (flags & 512) || !(flags & (256 | 1024)))
-        return;
-
-    total += toDownload;
-    done += downloaded;
+    return true;
 }
 
-// total bytes received across every interface except loopback, from
-// /proc/net/dev. Used to tell a live network download from disk-only
-// churn (Steam verifying/committing a finished download still rewrites
-// the downloading/ cache, but pulls nothing over the network)
+// f(file name, path) for every appmanifest_*.acf in the libraries
+template <class F>
+inline void forEachManifest(const std::vector<std::string>& libs, F f)
+{
+    for (const auto& lib : libs)
+    {
+        DIR* dir = opendir(lib.c_str());
+        if (!dir) continue;
+
+        while (dirent* e = readdir(dir))
+        {
+            size_t len = strlen(e->d_name);
+
+            if (strncmp(e->d_name, "appmanifest_", 12) != 0 ||
+                len < 4 || strcmp(e->d_name + len - 4, ".acf") != 0)
+                continue;
+
+            f(e->d_name, lib + "/" + e->d_name);
+        }
+
+        closedir(dir);
+    }
+}
+
+// bytes received on every interface but loopback
 inline unsigned long long netRxBytes()
 {
     FILE* f = fopen("/proc/net/dev", "r");
@@ -172,8 +197,7 @@ inline unsigned long long netRxBytes()
     char line[512];
     unsigned long long sum = 0;
 
-    // each data line is "  iface: rxbytes rxpackets ..."; the two header
-    // lines carry no colon so they're skipped
+    // "  iface: rxbytes ..."; the header lines have no colon
     while (fgets(line, sizeof line, f))
     {
         char* colon = strchr(line, ':');
@@ -193,35 +217,9 @@ inline unsigned long long netRxBytes()
     return sum;
 }
 
-// state of all Steam downloads, rescanned at most every 1 s so the
-// 0.5 s rule tick and the per-frame effect share one scan's cost.
-//
-// "is a download in progress" comes from the manifests: addManifest sums
-// BytesToDownload/BytesDownloaded only for manifests Steam marks as
-// actively updating (running, not paused, bytes outstanding), so total>0
-// means a transfer is underway. That manifest flag stays set across
-// EVERY part of a multi-part install, where the older download-cache test
-// went quiet between parts and dropped the effect on the early ones.
-//
-// "is it transferring right now" (cached.active, what steam_dl keys on)
-// adds a network check: real bytes arriving over the wire. That rejects a
-// deliberate pause and the disk-only churn of verifying a finished
-// download (the manifest may still read "running", but nothing comes off
-// the network). The window is wide enough that an ordinary dip between
-// parts doesn't flap the effect off.
-//
-// percent integrates network throughput onto the manifest's byte totals
-// (the manifest's BytesDownloaded barely moves mid-download -- Steam
-// flushes it on pause/stop -- see the percent block below). Each part
-// carries its own BytesToDownload; when it changes the bar restarts at 0
-// for the new part. The percent is held in cached across brief
-// inactivity, so an effect switching away and back resumes where it was
-// instead of snapping to 0.
-// preview/dev override (no real download needed): set STEAM_FAKE_PERCENT to
-// a number for a static active bar, or to "ramp" to simulate a download that
-// climbs ~3%/s and celebrates on completion. The percent is quantized to 1 s
-// steps so the bumps land like the real 1 Hz manifest scan, which is what the
-// steam_download effect's surge reacts to. Inert when the env var is unset.
+// STEAM_FAKE_PERCENT previews the effect without a download: a number is a
+// static bar, "ramp[N]" climbs N %/s (default 3) in 1 s steps like the real
+// scan, then celebrates
 inline const Downloads* fakeDownloads()
 {
     const char* fake = getenv("STEAM_FAKE_PERCENT");
@@ -240,13 +238,13 @@ inline const Downloads* fakeDownloads()
 
     if (strncmp(fake, "ramp", 4) == 0)
     {
-        long rate = atoi(fake + 4);       // "ramp6" -> 6 %/s; "ramp" -> default
+        long rate = atoi(fake + 4);
         if (rate <= 0) rate = 3;
 
-        long fill = (100 + rate - 1) / rate; // seconds to reach 100%
-        long cycle = fill + 4;               // + a brief finish/celebration
+        long fill = (100 + rate - 1) / rate;
+        long cycle = fill + 4;               // + the celebration
         long s = (long)(now - start) % cycle;
-        long pct = s * rate;                 // already in 1 Hz steps
+        long pct = s * rate;
 
         sim.finished = pct >= 100;
         sim.active = true;
@@ -262,186 +260,221 @@ inline const Downloads* fakeDownloads()
     return &sim;
 }
 
+// downloads run MB/s; background chatter and post-download verification don't
+constexpr double RX_FLOOR = 50.0 * 1024.0; // bytes/sec
+
+// one look at Steam's downloads, from either source
+struct Sample
+{
+    bool present = false;          // a download is underway, not paused
+    bool active = false;           // ...and progressing right now
+    unsigned long long part = 0;   // the app (or part) downloading now
+    float percent = 0.0f;
+    bool jobDone = false;          // with !present: it ended complete, not paused or abandoned
+};
+
+// `last` is the last sample that had a download present; false when Steam
+// has no fresh reading
+inline bool steamSample(Sample& s, const Sample& last)
+{
+    Live live;
+    if (!Cef::get().read(live))
+        return false;
+
+    s.present = s.active = live.running;
+    s.part = live.appid;
+    s.percent = live.percent;
+
+    // the last reading before a finish can sit short of 100%; and a part
+    // completing into a paused or waiting next one isn't the end of the job
+    s.jobDone = !live.running && live.queued == 0 &&
+                (live.isCompleted((unsigned)last.part) || last.percent >= 99.0f);
+    return true;
+}
+
+// The manifests mark a running download reliably, but Steam only flushes
+// BytesDownloaded on pause/stop, so the percent integrates network RX onto
+// the manifest's total instead, with its BytesDownloaded as a floor. The
+// network also tells a real transfer from a pause or the verify phase,
+// which the manifest flags show minutes late.
+class ManifestEstimate
+{
+public:
+    // carry: the percent Steam's own reading had reached when it dropped
+    // out mid-part (< 0 if it didn't), so the bar doesn't jump back
+    Sample sample(double now, double dt, double rxDelta, const Sample& last, float carry)
+    {
+        unsigned long long total = 0, done = 0;
+
+        forEachManifest(libraries(), [&](const char*, const std::string& path) {
+            Manifest m;
+            if (readManifest(path, m) && m.running())
+            {
+                total += m.toDownload;
+                done += m.downloaded;
+            }
+        });
+
+        Sample s;
+        s.present = total > 0;
+
+        if (dt > 0 && rxDelta / dt > RX_FLOOR)
+            lastNetMoved_ = now;
+
+        // wide enough to ride out the gap between parts
+        s.active = s.present && now - lastNetMoved_ < NET_GRACE_S;
+
+        // each part has its own BytesToDownload
+        if (s.present && total != part_)
+        {
+            part_ = total;
+            estDone_ = std::max((double)done, carry >= 0 ? carry / 100.0 * (double)total : 0.0);
+        }
+
+        // capped: wire bytes include protocol overhead
+        if (s.active)
+            estDone_ = std::min((double)total, std::max((double)done, estDone_ + rxDelta));
+
+        s.part = total;
+        s.percent = total > 0 ? 100.0f * (float)(estDone_ / (double)total) : 0.0f;
+        s.jobDone = !s.present && last.percent >= 99.0f;
+        return s;
+    }
+
+    void forget()
+    {
+        part_ = 0;
+        estDone_ = 0.0;
+    }
+
+private:
+    static constexpr double NET_GRACE_S = 10.0;
+
+    double estDone_ = 0.0;
+    unsigned long long part_ = 0;   // the BytesToDownload estDone_ belongs to
+    double lastNetMoved_ = -1e9;
+};
+
+// Turns samples into the bar. An install is several apps downloaded one
+// after another (game, Steamworks Common Redistributables, Proton, shader
+// pre-cache); each fills its own bar from 0. The percent survives brief
+// inactivity so an effect switching back resumes, and a finish holds a few
+// seconds so the effect can celebrate before the rule switches away.
+class Tracker
+{
+public:
+    const Downloads& update()
+    {
+        double now = mono();
+
+        // the 0.5 s rule tick and the per-frame effect share one scan
+        if (now - lastScan_ < 1.0)
+            return cached_;
+
+        double dt = now - lastScan_;
+        lastScan_ = now;
+
+        // sampled even while Steam's reading is used, so a fallback never
+        // integrates a stale delta; rx < lastRx is a counter reset
+        unsigned long long rx = netRxBytes();
+        double rxDelta = (lastRx_ != 0 && rx > lastRx_) ? (double)(rx - lastRx_) : 0.0;
+        lastRx_ = rx;
+
+        Sample s;
+        bool exact = steamSample(s, last_);
+
+        if (exact)
+            manifests_.forget();
+        else
+            s = manifests_.sample(now, dt, rxDelta, last_,
+                                  wasExact_ && wasPresent_ ? last_.percent : -1.0f);
+
+        wasExact_ = exact;
+        wasPresent_ = s.present;
+
+        if (s.present)
+            last_ = s;
+
+        if (s.active)
+        {
+            idleSince_ = -1e9;
+            finishHandled_ = false;
+            finishedUntil_ = -1e9;
+
+            cached_.percent = s.percent;
+            cached_.active = true;
+            cached_.finished = false;
+            return cached_;
+        }
+
+        if (idleSince_ < 0.0)
+            idleSince_ = now;
+
+        if (!finishHandled_ && !s.present && s.jobDone && last_.part != 0)
+        {
+            finishedUntil_ = now + FINISH_HOLD_S;
+            finishHandled_ = true;
+        }
+
+        if (now < finishedUntil_)
+        {
+            cached_.active = true;
+            cached_.finished = true;
+            cached_.percent = 100.0f;
+            return cached_;
+        }
+
+        if ((finishHandled_ && now >= finishedUntil_) ||
+            (!s.present && now - idleSince_ > RESET_GRACE_S))
+        {
+            manifests_.forget();
+            last_ = Sample{};
+            finishHandled_ = false;
+            finishedUntil_ = -1e9;
+            cached_ = Downloads{};
+            return cached_;
+        }
+
+        // paused or stalled: keep the percent
+        cached_.active = false;
+        cached_.finished = false;
+        return cached_;
+    }
+
+private:
+    static constexpr double FINISH_HOLD_S = 5.0;
+    static constexpr double RESET_GRACE_S = 30.0;
+
+    Downloads cached_;
+    ManifestEstimate manifests_;
+    Sample last_;                   // the last sample with a download present
+    bool wasExact_ = false;
+    bool wasPresent_ = false;
+    unsigned long long lastRx_ = 0;
+    double lastScan_ = -1e9;
+    double idleSince_ = -1e9;
+    bool finishHandled_ = false;
+    double finishedUntil_ = -1e9;
+
+    static double mono()
+    {
+        timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return ts.tv_sec + ts.tv_nsec / 1e9;
+    }
+};
+
 inline const Downloads& downloads()
 {
     if (const Downloads* sim = fakeDownloads())
         return *sim;
 
-    static Downloads cached;
-    static double lastScan = -1e9;
-    static double lastNetMoved = -1e9;
-    static unsigned long long lastRx = 0;
-    static double estDone = 0.0;  // bytes pulled, integrated from netRxBytes
-    static unsigned long long lastTarget = 0; // BytesToDownload we're tracking
-    static double idleSince = -1e9;     // when a running manifest last vanished
-    static bool finishHandled = false;  // finish hold already armed this run
-    static double finishedUntil = -1e9; // celebration holds until this time
-
-    timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    double now = ts.tv_sec + ts.tv_nsec / 1e9;
-
-    if (now - lastScan < 1.0)
-        return cached;
-
-    double scanDt = now - lastScan;
-    lastScan = now;
-
-    unsigned long long total = 0, done = 0;
-
-    for (const auto& lib : libraries())
-    {
-        DIR* dir = opendir(lib.c_str());
-        if (!dir) continue;
-
-        while (dirent* e = readdir(dir))
-        {
-            size_t len = strlen(e->d_name);
-
-            if (strncmp(e->d_name, "appmanifest_", 12) != 0 ||
-                len < 4 || strcmp(e->d_name + len - 4, ".acf") != 0)
-                continue;
-
-            addManifest(lib + "/" + e->d_name, total, done);
-        }
-
-        closedir(dir);
-    }
-
-    // addManifest only counts running, non-paused manifests with bytes
-    // outstanding, so total>0 is a stable "Steam is downloading something"
-    // that holds across every part of the job
-    bool present = total > 0;
-
-    // network throughput is the second authority. A live download runs
-    // megabytes/sec; idle background chatter and the disk-only churn of
-    // verifying a finished download sit far below this floor. Guard
-    // rx > lastRx so a counter reset (interface down/up) reads as zero
-    // rather than a huge false delta.
-    unsigned long long rx = netRxBytes();
-    double rxDelta = (lastRx != 0 && rx > lastRx) ? (double)(rx - lastRx) : 0.0;
-    lastRx = rx;
-
-    const double kRxFloor = 50.0 * 1024.0; // bytes/sec
-
-    if (scanDt > 0 && rxDelta / scanDt > kRxFloor)
-        lastNetMoved = now;
-
-    // active = a manifest says a download is underway AND bytes are
-    // arriving. The window tolerates an ordinary dip between parts without
-    // flapping the effect off, yet a real pause or the verify phase
-    // (network goes silent) clears it within a few seconds -- long before
-    // Steam's minute-coarse paused flag would.
-    const double kNetGrace = 10.0; // seconds of net-quiet before inactive
-    bool active = present && (now - lastNetMoved < kNetGrace);
-
-    // a game install is really several apps downloaded one after another
-    // -- the game, Steamworks Common Redistributables (appid 228980),
-    // Proton, shader pre-cache -- each its own appmanifest. Steam runs them
-    // sequentially, so total tracks whichever is running now; when it
-    // finishes and the next starts, total changes, so restart the bar at 0
-    // (seeded from this part's already-downloaded floor, e.g. a resumed
-    // part) and let it fill again. Per-depot progress WITHIN one app isn't
-    // exposed anywhere outside Steam, so per-app is as granular as it gets.
-    if (present && total != lastTarget)
-    {
-        lastTarget = total;
-        estDone = (double)done;
-    }
-
-    if (active)
-    {
-        idleSince = -1e9;
-        finishHandled = false;
-        finishedUntil = -1e9;
-
-        // Live percent by integrating network throughput. Steam writes the
-        // manifest's BytesDownloaded only rarely during a transfer --
-        // often not once across a multi-GB part, flushing it on
-        // pause/stop -- so done/total alone leaves the bar frozen until you
-        // pause. Instead accumulate the bytes coming off the wire: they're
-        // in the same compressed units as the manifest counters (plus a
-        // little protocol overhead). The estimate only ever climbs: the
-        // manifest's done is a floor that ratchets it up whenever Steam
-        // does flush, and it's capped at total so wire overhead can't push
-        // past 100%.
-        estDone += rxDelta;
-
-        if ((double)done > estDone)
-            estDone = (double)done;
-
-        if (total > 0)
-        {
-            if (estDone > (double)total)
-                estDone = (double)total;
-
-            cached.percent = 100.0f * (float)(estDone / (double)total);
-        }
-
-        cached.active = true;
-        cached.finished = false;
-        return cached;
-    }
-
-    // not transferring: pause / verify / finishing / gone / transient dip
-    if (idleSince < 0.0)
-        idleSince = now;
-
-    // a finish is when NO manifest is running any more (present==false)
-    // and the estimate had essentially reached 100%: every byte is down
-    // and only the local commit remains. Hold a brief active+finished
-    // window so the effect can play its completion blink before the rule
-    // engine switches away (the network goes quiet the instant a download
-    // ends). Gating on !present is what stops a part boundary -- where one
-    // part hits 100% but the next is still running -- from celebrating
-    // mid-job.
-    const double kFinishHold = 5.0; // seconds to celebrate
-
-    if (!finishHandled && !present && cached.percent >= 99.0f && lastTarget > 0)
-    {
-        finishedUntil = now + kFinishHold;
-        finishHandled = true;
-    }
-
-    if (now < finishedUntil)
-    {
-        cached.active = true;
-        cached.finished = true;
-        cached.percent = 100.0f;
-        return cached;
-    }
-
-    // forget the download once its celebration is over, or once no running
-    // manifest has been seen for long enough that a stale percent
-    // shouldn't bleed into the next one. A brief stall or a quick effect
-    // switch keeps the percent (present stays true, or we're inside the
-    // grace), so re-activating resumes smoothly instead of from 0 -- which
-    // is what made a download that briefly lost the effect snap back to 0%.
-    const double kResetGrace = 30.0; // seconds
-
-    if ((finishHandled && now >= finishedUntil) ||
-        (!present && now - idleSince > kResetGrace))
-    {
-        estDone = 0.0;
-        lastTarget = 0;
-        finishHandled = false;
-        finishedUntil = -1e9;
-        cached = Downloads{};
-        return cached;
-    }
-
-    // inactive but remembered: report not transferring, keep the percent
-    cached.active = false;
-    cached.finished = false;
-    return cached;
+    static Tracker tracker;
+    return tracker.update();
 }
 
-// one verbose scan for debugging detection (the daemon's `--steam-status`):
-// prints every library found, every appmanifest with its StateFlags and
-// byte counters, whether addManifest's filter would count it as an active
-// download (and if not, why), and the resulting percent. Mirrors the
-// libraries()/addManifest logic so what it reports is what downloads() acts on
-inline void dumpStatus(FILE* out)
+// `led --steam-status`: what each source sees and why
+inline void dumpStatus(FILE* out, int debugPort)
 {
     std::vector<std::string> libs = libraries();
 
@@ -458,95 +491,41 @@ inline void dumpStatus(FILE* out)
     unsigned long long total = 0, done = 0;
     int manifests = 0, counted = 0;
 
-    for (const auto& lib : libs)
-    {
-        DIR* dir = opendir(lib.c_str());
-        if (!dir) continue;
+    forEachManifest(libs, [&](const char* file, const std::string& path) {
+        manifests++;
 
-        while (dirent* e = readdir(dir))
+        Manifest m;
+        if (!readManifest(path, m, true))
         {
-            size_t len = strlen(e->d_name);
-
-            if (strncmp(e->d_name, "appmanifest_", 12) != 0 ||
-                len < 4 || strcmp(e->d_name + len - 4, ".acf") != 0)
-                continue;
-
-            manifests++;
-
-            FILE* f = fopen((lib + "/" + e->d_name).c_str(), "r");
-            if (!f) { fprintf(out, "  %s: cannot open\n", e->d_name); continue; }
-
-            unsigned long flags = 0;
-            unsigned long long toDownload = 0, downloaded = 0;
-            std::string name, key, val;
-            char line[512];
-
-            // downloads() reads only the top-level (depth-1) AppState keys
-            // (per-depot blocks repeat the byte counters and a flat read
-            // lands on a tiny leftover instead of the real total). But the
-            // deeper per-depot BytesTo/Downloaded blocks are exactly what a
-            // future per-part bar would need, and they only exist while a
-            // download is live -- so dump them here too, with their depth,
-            // to capture the structure from a real multi-part download.
-            std::vector<std::string> deeper;
-            int depth = 0;
-
-            while (fgets(line, sizeof line, f))
-            {
-                const char* p = line;
-                while (*p == ' ' || *p == '\t') p++;
-
-                if (*p == '{') { depth++; continue; }
-                if (*p == '}') { depth--; continue; }
-
-                if (!vdfPair(line, key, val)) continue;
-
-                if (depth == 1)
-                {
-                    if (key == "name") name = val;
-                    else if (key == "StateFlags")
-                        flags = strtoul(val.c_str(), nullptr, 10);
-                    else if (key == "BytesToDownload")
-                        toDownload = strtoull(val.c_str(), nullptr, 10);
-                    else if (key == "BytesDownloaded")
-                        downloaded = strtoull(val.c_str(), nullptr, 10);
-                }
-                else if (depth > 1 &&
-                         (key == "BytesToDownload" || key == "BytesDownloaded"))
-                {
-                    deeper.push_back("depth " + std::to_string(depth) + " " +
-                                     key + "=" + val);
-                }
-            }
-
-            fclose(f);
-
-            bool counts = !(toDownload == 0 || (flags & 512) ||
-                            !(flags & (256 | 1024)));
-
-            fprintf(out, "  %s \"%s\": StateFlags=%lu BytesToDownload=%llu "
-                         "BytesDownloaded=%llu -> %s\n",
-                    e->d_name, name.c_str(), flags, toDownload, downloaded,
-                    counts ? "COUNTS" : "ignored");
-
-            for (const auto& d : deeper)
-                fprintf(out, "      per-depot: %s\n", d.c_str());
-
-            if (!counts)
-            {
-                if (toDownload == 0)
-                    fprintf(out, "      reason: BytesToDownload is 0\n");
-                if (flags & 512)
-                    fprintf(out, "      reason: paused (StateFlags bit 512)\n");
-                if (!(flags & (256 | 1024)))
-                    fprintf(out, "      reason: no running bit 256/1024 in "
-                                 "StateFlags\n");
-            }
-            else { total += toDownload; done += downloaded; counted++; }
+            fprintf(out, "  %s: cannot open\n", file);
+            return;
         }
 
-        closedir(dir);
-    }
+        bool counts = m.running();
+
+        fprintf(out, "  %s \"%s\": StateFlags=%lu BytesToDownload=%llu "
+                     "BytesDownloaded=%llu -> %s\n",
+                file, m.name.c_str(), m.flags, m.toDownload, m.downloaded,
+                counts ? "COUNTS" : "ignored");
+
+        for (const auto& d : m.depots)
+            fprintf(out, "      per-depot: %s\n", d.c_str());
+
+        if (counts)
+        {
+            total += m.toDownload;
+            done += m.downloaded;
+            counted++;
+            return;
+        }
+
+        if (m.toDownload == 0)
+            fprintf(out, "      reason: BytesToDownload is 0\n");
+        if (m.flags & 512)
+            fprintf(out, "      reason: paused (StateFlags bit 512)\n");
+        if (!(m.flags & (256 | 1024)))
+            fprintf(out, "      reason: no running bit 256/1024 in StateFlags\n");
+    });
 
     fprintf(out, "manifests scanned: %d, counted as active: %d\n",
             manifests, counted);
@@ -558,11 +537,6 @@ inline void dumpStatus(FILE* out)
                 done, total, 100.0 * done / total);
     else
         fprintf(out, "totals: nothing counted -> percent 0\n");
-
-    // sample network RX over ~1 s: active needs real throughput, not just
-    // a manifest that counts, so report the rate and how it compares to
-    // the floor that separates a live download from verify/idle chatter
-    const double kRxFloor = 50.0 * 1024.0;
 
     unsigned long long rx0 = netRxBytes();
     timespec t0, t1;
@@ -576,10 +550,10 @@ inline void dumpStatus(FILE* out)
 
     double dt = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
     double rate = (dt > 0 && rx1 > rx0) ? (rx1 - rx0) / dt : 0.0;
-    bool netActive = rate > kRxFloor;
+    bool netActive = rate > RX_FLOOR;
 
     fprintf(out, "network RX: %.0f KiB/s (floor %.0f KiB/s) -> %s\n",
-            rate / 1024.0, kRxFloor / 1024.0,
+            rate / 1024.0, RX_FLOOR / 1024.0,
             netActive ? "downloading" : "idle/verify");
 
     fprintf(out, "steam_dl %s\n",
@@ -587,6 +561,33 @@ inline void dumpStatus(FILE* out)
                 ? "would be active (manifest counts + network flowing)"
                 : "inactive (needs a counted manifest AND network throughput; "
                   "a finished download being verified counts but sends nothing)");
+
+    if (debugPort <= 0)
+    {
+        fprintf(out, "debug port: off (set %s in the config, and pass the config: "
+                     "led <config> --steam-status)\n", CONFIG_KEY_DEBUG_PORT);
+        return;
+    }
+
+    Live live;
+    std::string raw, err;
+
+    if (!Cef::probe(debugPort, live, raw, err))
+    {
+        fprintf(out, "debug port %d: %s -> the daemon uses the manifests above\n",
+                debugPort, err.c_str());
+        return;
+    }
+
+    fprintf(out, "debug port %d: hooked into Steam -> the daemon uses this, not the manifests\n",
+            debugPort);
+    fprintf(out, "  app %u, state %s%s: %.0f / %.0f bytes, %.1f%%, %.0f KiB/s, %d queued\n",
+            live.appid, live.state.c_str(), live.paused ? " (paused)" : "",
+            live.done, live.total, live.percent, live.rate / 1024.0, live.queued);
+    fprintf(out, "steam_dl %s\n", live.running ? "would be active" : "inactive (nothing running)");
+
+    if (!raw.empty())
+        fprintf(out, "raw hook state:\n%s\n", raw.c_str());
 }
 
 } // namespace steam

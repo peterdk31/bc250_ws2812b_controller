@@ -223,7 +223,7 @@ static void usage(const char* prog)
             "       %s <config> --preview <slot>      replay a recorded receiver slot\n"
             "                                         (power_on/shutdown) to the viewer\n"
             "       %s --list                         list available effects\n"
-            "       %s --steam-status                 dump Steam download detection\n"
+            "       %s [<config>] --steam-status      dump Steam download detection\n"
             "       %s <config> --fan-status          dump the fans' inputs, outputs and duties\n"
             "       %s --config-get <config> <path>   print a config value\n"
             "       %s --check <config>               validate a config without running it\n"
@@ -246,9 +246,24 @@ int main(int argc, char** argv)
     // appmanifests the download detector sees and why each does or
     // doesn't count, so a blank steam_download bar can be traced to its
     // cause (no library matched, manifest paused/not-running, etc.)
+    // (with the config first, its steam_debug_port is probed too)
     if (argc == 2 && strcmp(argv[1], "--steam-status") == 0)
     {
-        steam::dumpStatus(stdout);
+        steam::dumpStatus(stdout, 0);
+        return 0;
+    }
+
+    if (argc == 3 && strcmp(argv[2], "--steam-status") == 0)
+    {
+        Config cfg;
+
+        if (!cfg.load(argv[1]))
+        {
+            fprintf(stderr, "failed to load config: %s\n", argv[1]);
+            return 1;
+        }
+
+        steam::dumpStatus(stdout, (int)cfg.getInt(steam::CONFIG_KEY_DEBUG_PORT, 0));
         return 0;
     }
 
@@ -315,6 +330,10 @@ int main(int argc, char** argv)
     // here and on every reload below
     smu::Reader::get().setIntervalMs(
         (int)cfg.getInt(smu::CONFIG_KEY_INTERVAL, smu::Reader::DEFAULT_INTERVAL_MS));
+
+    // Steam's debug port for exact download progress (daemon/sources/
+    // steam_cef.hpp), off unless set; here and on every reload below
+    steam::Cef::get().setPort((int)cfg.getInt(steam::CONFIG_KEY_DEBUG_PORT, 0));
 
     // the dashboards' way back into the config file (daemon/config_edit.hpp):
     // a phone edit of a fan curve or the strip's colors is written into the
@@ -690,6 +709,7 @@ int main(int argc, char** argv)
         // the VRAM read cadence changes live
         smu::Reader::get().setIntervalMs(
             (int)cfg.getInt(smu::CONFIG_KEY_INTERVAL, smu::Reader::DEFAULT_INTERVAL_MS));
+        steam::Cef::get().setPort((int)cfg.getInt(steam::CONFIG_KEY_DEBUG_PORT, 0));
 
         fanCtl.pushStandalone(sinks);
         fanCtl.pushConfig(sinks);
