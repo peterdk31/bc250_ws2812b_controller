@@ -22,6 +22,12 @@ public:
 //   cpu_load>N     CPU busy above N % (/proc/stat); bare `cpu_load` means >20
 //   cpu_load<N     CPU busy below N %
 //   proc:NAME      a process with that name is running
+//   steam_dl       a Steam download is moving bytes
+//   steam_launch   a game launch is in a counted step (processing shaders)
+//                  -- both progress sources (progress_sources.hpp): true
+//                  while the progress effect has that bar to show
+//   steam_achievement    a Steam achievement unlocked in the last 5 s
+//   steam_achievement<N  ...in the last N s
 //   file:/PATH     the file exists (external event injection: touch/rm it)
 //   !COND          negation, e.g. !proc:steam
 //   A & B          conjunction, all terms must hold

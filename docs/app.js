@@ -1,5 +1,5 @@
 // The screens: Preact + htm (vendor/preact-htm.mjs, no build step) rendering
-// whatever ble.js holds in `S`. Four tabs — Power, Fans, LEDs, Receiver —
+// whatever ble.js holds in `S`. Five tabs — Power, Fans, LEDs, Steam, Receiver —
 // plus two full-screen editors (a fan header, the power switch's settings)
 // and the power sheet. Every one of those is a history entry, so the phone's back
 // gesture closes the sheet, leaves the editor, returns to the Power tab, and
@@ -38,13 +38,15 @@ const I = {
   board: '<rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"></path>',
   down: '<path d="M6 9l6 6 6-6"></path>', up: '<path d="M6 15l6-6 6 6"></path>',
   right: '<path d="M9 6l6 6-6 6"></path>', left: '<path d="M15 6l-6 6 6 6"></path>',
+  game: '<path d="M6 8h12a4 4 0 0 1 4 4v1a4 4 0 0 1-7 2.6L14 15h-4l-1 .6A4 4 0 0 1 2 13v-1a4 4 0 0 1 4-4z"></path><path d="M7 10.5v3M5.5 12h3"></path><circle cx="16" cy="11" r=".6"></circle><circle cx="17.5" cy="13" r=".6"></circle>',
+  play: '<path d="M8 5l11 7-11 7z"></path>',
   plus: '<path d="M12 5v14M5 12h14"></path>', check: '<path d="M5 12l5 5L20 7"></path>',
   cog: '<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"></path>',
 };
 
 // ---- routing: the route IS the history entry ----
 // { tab, editor: null | a fan card's key ('f2', 's0', 'new') | 'p' (power), sheet }
-const TABS = ['power', 'fans', 'leds', 'receiver'];
+const TABS = ['power', 'fans', 'leds', 'steam', 'receiver'];
 let route = { tab: 'power', editor: null, sheet: false };
 let setRouteState = null;
 let leaveGuard = null; // () => true when a dirty editor may be left (asks the user)
@@ -797,6 +799,59 @@ function LedsScreen() {
   </div>`;
 }
 
+// ---- Steam ----
+// What Steam is doing while the host is up — the running game, a launch's
+// progress, the download — and the installed games, which this phone keeps:
+// a game picked while the host is off powers it on and starts once Steam is up.
+const TASKS = { ProcessingShaderCache: 'Processing shaders', DownloadingDepots: 'Updating', DownloadingWorkshop: 'Downloading workshop items',
+                SynchronizingCloud: 'Syncing saves', VerifyingFiles: 'Verifying files', CreatingProcess: 'Starting', WaitingGameWindow: 'Starting' };
+const taskName = t => TASKS[t] || t.replace(/([a-z])([A-Z])/g, '$1 $2');
+function played(t) {
+  if (!t) return 'never played';
+  const d = Date.now() / 1000 - t;
+  return d < 3600 ? 'played just now' : d < 86400 ? `played ${Math.floor(d / 3600)} h ago` : `played ${Math.floor(d / 86400)} d ago`;
+}
+const Bar = ({ p }) => html`<div class="prog"><i style=${`width: ${clamp(p, 0, 100)}%`}></i></div>`;
+
+function SteamScreen() {
+  if (!B.connected()) return html`<div class="empty">Not connected.</div>`;
+  const live = B.steamLive(), lib = B.library();
+  const waiting = B.steamWaiting();
+  const hostOff = S.psu !== 2;
+  const canLaunch = !waiting && (hostOff ? S.psu === 1 || (S.psu === 0 && !noSwitch()) : !!live?.port);
+  const launch = g => {
+    if (hostOff && S.psu === 0 && !confirm(`Power on and start ${g.n}?`)) return;
+    B.steamRequest('launch', g.a);
+  };
+  const state = !live ? '' : !live.port ? 'off in the config' : !live.steam ? 'Steam not running' : '';
+  return html`<div class="list">
+    ${live?.game && html`<${Card} title="Playing">
+      <div class="swrow"><span class="gname">${live.game.n}</span>
+        <button class="minor danger" disabled=${waiting} onClick=${() => { if (confirm(`Quit ${live.game.n}? Unsaved progress is lost.`)) B.steamRequest('quit', live.game.a); }}>Quit</button></div>
+    <//>`}
+    ${live?.launch && html`<${Card} title="Launching" right=${live.launch.p !== null ? `${live.launch.p} %` : ''}>
+      <div class="gname">${B.gameName(live.launch.a)}</div>
+      <div class="sub">${taskName(live.launch.task)}</div>
+      ${live.launch.p !== null && html`<${Bar} p=${live.launch.p} />`}
+    <//>`}
+    ${live?.dl && html`<${Card} title=${live.dl.paused ? 'Download paused' : 'Downloading'} right=${`${live.dl.p} %`}>
+      <div class="swrow"><span class="gname">${live.dl.n}</span>
+        <button class="minor" disabled=${waiting} onClick=${() => B.steamRequest(live.dl.paused ? 'resume' : 'pause')}>${live.dl.paused ? 'Resume' : 'Pause'}</button></div>
+      <${Bar} p=${live.dl.p} />
+      ${live.dl.q > 1 && html`<div class="sub">${live.dl.q - 1} more queued</div>`}
+    <//>`}
+    <${Card} title="Games" right=${state}>
+      ${!lib ? html`<div class="note">The list arrives the first time the host is on.</div>`
+        : lib.games.length === 0 ? html`<div class="note">No games installed.</div>`
+        : html`<div class="games">${lib.games.map(g => { const playing = live?.game?.a === g.a;
+            return html`<button key=${g.a} class="game ${playing ? 'on' : ''}" disabled=${!canLaunch || playing} onClick=${() => launch(g)}>
+              <span class="lbl"><span>${g.n}</span><small>${playing ? 'playing' : played(g.t)}</small></span>
+              ${!playing && html`<${Icon} d=${I.play} size=${18} />`}</button>`; })}</div>`}
+      ${lib?.more > 0 && html`<div class="foot">${lib.more} more not shown</div>`}
+    <//>
+  </div>`;
+}
+
 // ---- Receiver ----
 // a list row's state: [class, word], or null where the page can't tell
 const presenceState = p => p.near === null ? null : !p.near ? ['away', 'Out of range']
@@ -839,7 +894,7 @@ function ReceiverScreen() {
 
 // ---- the shell ----
 const TabBar = ({ tab }) => html`<nav>
-  ${[['power', 'Power', I.power], ['fans', 'Fans', I.fan], ['leds', 'LEDs', I.strip], ['receiver', 'Receiver', I.board]].map(([id, name, d]) =>
+  ${[['power', 'Power', I.power], ['fans', 'Fans', I.fan], ['leds', 'LEDs', I.strip], ['steam', 'Steam', I.game], ['receiver', 'Receiver', I.board]].map(([id, name, d]) =>
     html`<button key=${id} class=${tab === id ? 'on' : ''} onClick=${() => { if (tab !== id) go({ tab: id, editor: null, sheet: false }); }}>
       <${Icon} d=${d} size=${22} sw=${1.8} /><span>${name}</span></button>`)}
 </nav>`;
@@ -856,7 +911,7 @@ function App() {
   if (r.editor === 'p' && r.tab === 'power')
     return html`<div class="screen"><${PowerEditor} /></div>`;
   const body = r.tab === 'power' ? html`<${PowerScreen} />` : r.tab === 'fans' ? html`<${FansScreen} />`
-             : r.tab === 'leds' ? html`<${LedsScreen} />` : html`<${ReceiverScreen} />`;
+             : r.tab === 'leds' ? html`<${LedsScreen} />` : r.tab === 'steam' ? html`<${SteamScreen} />` : html`<${ReceiverScreen} />`;
   return html`<div class="screen">
     <${Header} />
     <${Msg} />

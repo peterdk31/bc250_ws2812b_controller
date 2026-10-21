@@ -10,20 +10,15 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+#include "progress.hpp"
 #include "steam_cef.hpp"
 
-// Steam download progress for the steam_dl condition and the steam_download
-// effect: Steam's own numbers over its debug port when available
-// (steam_cef.hpp), otherwise an estimate from the appmanifests
+// Steam download progress, the steam_dl progress source: Steam's own
+// numbers over its debug port when available (steam_cef.hpp), otherwise an
+// estimate from the appmanifests. `active` = a download is running and bytes
+// are moving; the percent is the part downloading now's.
 namespace steam
 {
-
-struct Downloads
-{
-    bool active = false;    // a download is running and bytes are moving
-    bool finished = false;  // just completed -- effect celebrates, then ends
-    float percent = 0.0f;   // 0..100 for the part downloading now
-};
 
 // `"key"  "value"` out of a VDF/ACF line; false for any other shape
 inline bool vdfPair(const char* line, std::string& key, std::string& val)
@@ -105,7 +100,9 @@ inline std::vector<std::string> libraries()
 
 struct Manifest
 {
+    unsigned appid = 0;
     std::string name;
+    long lastPlayed = 0;   // unix seconds, 0 = never
     unsigned long flags = 0;
     unsigned long long toDownload = 0, downloaded = 0;
     std::vector<std::string> depots; // per-depot counters, for --steam-status
@@ -145,7 +142,9 @@ inline bool readManifest(const std::string& path, Manifest& m, bool depots = fal
 
         if (depth == 1)
         {
-            if (key == "name") m.name = val;
+            if (key == "appid") m.appid = (unsigned)strtoul(val.c_str(), nullptr, 10);
+            else if (key == "name") m.name = val;
+            else if (key == "LastPlayed") m.lastPlayed = strtol(val.c_str(), nullptr, 10);
             else if (key == "StateFlags")
                 m.flags = strtoul(val.c_str(), nullptr, 10);
             else if (key == "BytesToDownload")
@@ -217,49 +216,6 @@ inline unsigned long long netRxBytes()
     return sum;
 }
 
-// STEAM_FAKE_PERCENT previews the effect without a download: a number is a
-// static bar, "ramp[N]" climbs N %/s (default 3) in 1 s steps like the real
-// scan, then celebrates
-inline const Downloads* fakeDownloads()
-{
-    const char* fake = getenv("STEAM_FAKE_PERCENT");
-    if (!fake || !*fake)
-        return nullptr;
-
-    static Downloads sim;
-    static double start = -1e9;
-
-    timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    double now = ts.tv_sec + ts.tv_nsec / 1e9;
-
-    if (start < 0)
-        start = now;
-
-    if (strncmp(fake, "ramp", 4) == 0)
-    {
-        long rate = atoi(fake + 4);
-        if (rate <= 0) rate = 3;
-
-        long fill = (100 + rate - 1) / rate;
-        long cycle = fill + 4;               // + the celebration
-        long s = (long)(now - start) % cycle;
-        long pct = s * rate;
-
-        sim.finished = pct >= 100;
-        sim.active = true;
-        sim.percent = (float)(pct >= 100 ? 100 : pct);
-    }
-    else
-    {
-        sim.active = true;
-        sim.finished = false;
-        sim.percent = (float)atof(fake);
-    }
-
-    return &sim;
-}
-
 // downloads run MB/s; background chatter and post-download verification don't
 constexpr double RX_FLOOR = 50.0 * 1024.0; // bytes/sec
 
@@ -277,9 +233,11 @@ struct Sample
 // has no fresh reading
 inline bool steamSample(Sample& s, const Sample& last)
 {
-    Live live;
-    if (!Cef::get().read(live))
+    Snapshot snap;
+    if (!Cef::get().read(snap))
         return false;
+
+    const DownloadState& live = snap.downloads;
 
     s.present = s.active = live.running;
     s.part = live.appid;
@@ -363,9 +321,9 @@ private:
 class Tracker
 {
 public:
-    const Downloads& update()
+    const progress::Reading& update()
     {
-        double now = mono();
+        double now = progress::mono();
 
         // the 0.5 s rule tick and the per-frame effect share one scan
         if (now - lastScan_ < 1.0)
@@ -431,7 +389,7 @@ public:
             last_ = Sample{};
             finishHandled_ = false;
             finishedUntil_ = -1e9;
-            cached_ = Downloads{};
+            cached_ = progress::Reading{};
             return cached_;
         }
 
@@ -445,7 +403,7 @@ private:
     static constexpr double FINISH_HOLD_S = 5.0;
     static constexpr double RESET_GRACE_S = 30.0;
 
-    Downloads cached_;
+    progress::Reading cached_;
     ManifestEstimate manifests_;
     Sample last_;                   // the last sample with a download present
     bool wasExact_ = false;
@@ -455,18 +413,13 @@ private:
     double idleSince_ = -1e9;
     bool finishHandled_ = false;
     double finishedUntil_ = -1e9;
-
-    static double mono()
-    {
-        timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        return ts.tv_sec + ts.tv_nsec / 1e9;
-    }
 };
 
-inline const Downloads& downloads()
+// STEAM_FAKE_PERCENT previews the bar without a download (progress::Fake)
+inline const progress::Reading& downloads()
 {
-    if (const Downloads* sim = fakeDownloads())
+    static progress::Fake fake("STEAM_FAKE_PERCENT");
+    if (const progress::Reading* sim = fake.read())
         return *sim;
 
     static Tracker tracker;
@@ -569,15 +522,18 @@ inline void dumpStatus(FILE* out, int debugPort)
         return;
     }
 
-    Live live;
+    Snapshot snap;
     std::string raw, err;
 
-    if (!Cef::probe(debugPort, live, raw, err))
+    if (!Cef::probe(debugPort, snap, raw, err))
     {
-        fprintf(out, "debug port %d: %s -> the daemon uses the manifests above\n",
+        fprintf(out, "debug port %d: %s -> the daemon uses the manifests above; "
+                     "steam_launch and steam_achievement stay off\n",
                 debugPort, err.c_str());
         return;
     }
+
+    const DownloadState& live = snap.downloads;
 
     fprintf(out, "debug port %d: hooked into Steam -> the daemon uses this, not the manifests\n",
             debugPort);
@@ -585,6 +541,22 @@ inline void dumpStatus(FILE* out, int debugPort)
             live.appid, live.state.c_str(), live.paused ? " (paused)" : "",
             live.done, live.total, live.percent, live.rate / 1024.0, live.queued);
     fprintf(out, "steam_dl %s\n", live.running ? "would be active" : "inactive (nothing running)");
+
+    if (snap.launch.appid)
+        fprintf(out, "launch: app %u, task %s, %.0f / %.0f\n", snap.launch.appid,
+                snap.launch.task.c_str(), snap.launch.done, snap.launch.total);
+    else
+        fprintf(out, "launch: none underway\n");
+
+    if (snap.achievement.seq)
+        fprintf(out, "achievements: %u since the hook went in, the last \"%s\" in app %u "
+                     "(%.1f%% of players)\n", snap.achievement.seq, snap.achievement.name.c_str(),
+                snap.achievement.appid, snap.achievement.global);
+    else
+        fprintf(out, "achievements: none since the hook went in\n");
+
+    for (const auto& f : snap.missing)
+        fprintf(out, "missing in this Steam: SteamClient %s -> what it feeds stays off\n", f.c_str());
 
     if (!raw.empty())
         fprintf(out, "raw hook state:\n%s\n", raw.c_str());

@@ -39,6 +39,7 @@
 #include "power_remote.hpp"
 #include "strip_remote.hpp"
 #include "steam_cef.hpp"
+#include "progress_sources.hpp"
 #include "rules.hpp"
 #include "serial_sink.hpp"
 #include "recorder.hpp"
@@ -107,7 +108,7 @@ static const Field TOP[] = {
     {"frame_ms", Kind::Int, "the default frame period every effect reads"},
     {"sensors", Kind::Any, "hwmon candidates: \"chip:label,...\" or an array of them"},
     {smu::CONFIG_KEY_INTERVAL, Kind::Int, "how often to re-read the VRAM chips, ms (default 2000, floored at 250)"},
-    {steam::CONFIG_KEY_DEBUG_PORT, Kind::IntOrNull, "Steam's remote-debugging port (8080) for exact download progress, or null"},
+    {steam::CONFIG_KEY_DEBUG_PORT, Kind::IntOrNull, "Steam's remote-debugging port (8080) for download and launch progress, achievements and the phone's Steam tab, or null"},
     {"rules", Kind::Arr, "the rules, first match wins"},
 };
 
@@ -552,6 +553,30 @@ private:
         }
     }
 
+    // every progress effect under `v`, recursively like checkColors: its
+    // "source" has to name a bar, or it draws an empty one
+    void checkProgressSources(const std::string& where, const json::Value& v)
+    {
+        if (v.isArray())
+        {
+            for (size_t i = 0; i < v.items.size(); i++)
+                checkProgressSources(where + "[" + std::to_string(i) + "]", v.items[i]);
+            return;
+        }
+        if (!v.isObject())
+            return;
+
+        const json::Value* eff = v.find("effect");
+        const json::Value* settings = v.find("settings");
+        const json::Value* source = settings ? settings->find("source") : nullptr;
+        if (eff && eff->isString() && eff->text == "progress" && source &&
+            !(source->isString() && progress::find(source->text)))
+            problem(where + ".settings.source", "expected one of " + progress::names());
+
+        for (auto& m : v.members)
+            checkProgressSources(where + "." + m.first, m.second);
+    }
+
     void checkRules(const Config& cfg)
     {
         const json::Value* list = cfg.root().find("rules");
@@ -579,6 +604,7 @@ private:
 
                 if (const json::Value* s = r.find("settings"))
                     checkColors(where + ".settings", *s);
+                checkProgressSources(where, r);
 
                 // a rule nothing below can beat: a catch-all is fine as the
                 // last rule and dead weight anywhere else

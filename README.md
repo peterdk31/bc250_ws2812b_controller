@@ -441,6 +441,8 @@ conditions did meanwhile.
 | `gpu_load>N` / `gpu_load<N` | amdgpu busy above/below N % (bare `gpu_load` = `>20`) |
 | `proc:NAME` | a process with that name is running (15-char kernel limit) |
 | `steam_dl` | a Steam download is actively moving bytes |
+| `steam_launch` | a game launch is in a counted step — processing Vulkan shaders, verifying files (needs the debug port) |
+| `steam_achievement` / `steam_achievement<N` | a Steam achievement unlocked in the last 5 / N seconds (needs the debug port) |
 | `audio_playing` | system audio is actually playing (see below) |
 | `file:/PATH` | the file exists |
 | `!COND` | negation |
@@ -453,8 +455,16 @@ a **scene** on the phone's dashboard ([BLE remote](#the-dashboard)): a switch
 the daemon flips by creating or removing that file, with a color picker or a
 level slider when the rule's settings carry `color` or `level`.
 
-The `steam_download` effect turns the strip into a live download progress bar
-(percent driven by network throughput; green pulse at 100%). Reading other
+The `progress` effect turns the strip into a live progress bar for whichever
+`"source"` its settings name — `steam_dl` (a download) or `steam_launch` (a game
+launch processing its shaders) — with a celebration pulse at 100%. The rule's
+condition is the same name, so the bar shows exactly while there's something to
+show; give each its own palette (the default config does) to tell them apart.
+`STEAM_FAKE_PERCENT` / `STEAM_FAKE_LAUNCH` preview them without Steam: a number
+holds a static bar, `ramp20` climbs 20 %/s and celebrates.
+
+Downloads work without the debug port too (percent driven by network
+throughput). Reading other
 users' Steam libraries needs the daemon running as root (the systemd unit does).
 Each app of an install (the game, Steamworks redistributables, Proton, shader
 pre-cache) fills its own bar, one after the other.
@@ -468,6 +478,15 @@ while the key is set (Decky Loader creates it too). Restart Steam once after.
 `make steam-debug-uninstall` (also part of `make uninstall`) removes the files
 `make install` created, never one that was already there; set the key to `null`
 as well, or the next install puts them back.
+
+The debug port also feeds `steam_launch` (the launch dialog's counted steps) and
+`steam_achievement`: Steam's own unlock toast, counted by the daemon's hook,
+plays the `achievement` effect — a bloom at `origin` throwing a gold front along
+the strip, glinting, then easing to dark. An unlock fewer than `rare_below` % of
+players have burns in `rare_palette` instead. `STEAM_FAKE_ACHIEVEMENT=6` fires
+a fake unlock every 6 s (every other one rare). `led <config> --steam-status`
+shows what the hook sees, and which of Steam's functions a Steam update took
+away.
 The bar then follows Steam's percent, and a pause or finish shows at once. It uses
 Steam's internal JS API (the one Decky plugins use), so a Steam update can break
 it; whenever the port doesn't answer the daemon falls back to the estimate above
@@ -502,6 +521,7 @@ wins.
 | `audio_music` | audio-reactive bloom from the center: loudness sets its reach, bass pumps it and sends crests to the tips | `palette` (4a00b4,e02090,ff9c28), `pulse` (0.8), `gain_seconds` (6) |
 | `audio_ripple` | audio-reactive: each bass hit sends a wave crest with a luminous wake racing from the center to the tips, reflecting back off them, colors walking the palette per beat | `palette` (0030a0,00c0e0,8040ff), `travel_seconds` (1.0), `sensitivity` (1.0), `reflect` (0.6) |
 | `audio_spectrum` | audio-reactive liquid analyzer: a spring-loaded bar grows from the strip start with the loudness, a meniscus shine on its tip, bass pumping its base and treble its tip, a peak dot falling back with a comet tail between hits | `palette` (00e6b4,3a56ff,ff2e88), `pump` (0.7), `bounce` (0.6), `peak_color` (ffffff) |
+| `achievement` | one shot: a bloom throws a glinting gold front along the strip, then eases to dark; rare unlocks in their own palette | `palette` (ff8a00,ffc040,fff0b0), `rare_palette` (ff3cac,8a4bff,38c8ff), `rare_below` (10), `origin` (0.5) |
 | `aurora` | slow drifting color curtains walking a palette | `palette` (10ff80,10a0ff,8040ff), `speed` (1.0) |
 | `boot` | calm bloom from the center into a full wash, then exhales into a dim hold | `intro_seconds` (7), `color` (ffffff) |
 | `breathe` | palette wash on a slow breath with a drifting bright band | `palette` (0d4a44,30e090), `period_seconds` (3.5) |
@@ -525,7 +545,6 @@ wins.
 | `shutdown` | CRT-style collapse to a point, then a slow phosphor fade | `duration_seconds` (5.0), `color` (0028ff) |
 | `silk` | tide through a drifting warp field: color bands stretch, buckle and fold like fabric in a breeze | `palette` (3a1078,c03080,ff9040,20b0c0,3a1078), `fold` (0.5), `sheen` (0.3) |
 | `solid` | fixed color everywhere — the color-calibration test field, or a plain static light | `color` (ffffff), `level` (1.0) |
-| `steam_download` | live Steam download bar, green pulse at 100% | `palette` (d4009c,ff5a1e,ffd23c), `done_color` (00ff66) |
 | `tide` | a palette gradient sliding and breathing | `palette` (102060,1890d0,30d0a0,8040ff,102060), `speed` (1.4) |
 
 Colors are `"RRGGBB"` or `"#RRGGBB"`; a `palette` is several separated by
@@ -584,8 +603,8 @@ minus its WiFi/BLE):
   do that itself, so it asks over the link and the daemon runs the
   `power_switch.short_press` command (`"systemctl poweroff"`); the machine
   then powers itself off and the sense wire's follow-down releases PS_ON#.
-  **This needs `short_press` set to a command** — it ships `null`, so a box
-  that hasn't opted in ignores the press (and says so in the journal). If nobody answers within 3 s
+  With `short_press` set to `null` the press is ignored (and the journal
+  says so). If nobody answers within 3 s
   — daemon down, no OS yet, feature off — the request is dropped and the
   feedback LED blinks fast for a moment, because otherwise an unheard press
   looks exactly like a broken button. Nothing about this path touches PS_ON#:
@@ -1419,7 +1438,7 @@ edits the daemon's curves, never the power):
 
 ### The dashboard
 
-The page is four tabs, each fitting a phone screen; the tabs, the editors
+The page is five tabs, each fitting a phone screen; the tabs, the editors
 and the shutdown sheet are history entries, so the phone's back gesture
 steps out of them the way a native app does. A sticky header on every tab
 names the receiver (a tap opens the Receiver tab), shows the PSU
@@ -1511,6 +1530,17 @@ temperature (the top-level `sensors` pick), CPU load and GPU load.
   **Direction** (the `reverse` switch). This is the white-balance tuning
   flow, see [Tuning the colors](#tuning-the-colors). A receiver on firmware
   from before the strip view shows the tab empty.
+- **Steam** — needs `steam_debug_port`. While the machine is on: the
+  running game with **Quit**, a launch's progress (processing shaders, its
+  percent), and the download with **Pause** / **Resume**. Under them the
+  installed games, most recently played first, read from the appmanifests
+  (Steam's tools left out). The phone keeps that list per receiver, so it is
+  there while the machine is off: tapping a game then asks, powers the
+  machine on, and the page resends the launch every few seconds until the
+  daemon is up and echoes it — keep the page open until "starting …" shows.
+  From there the daemon owns it: it waits up to 5 minutes for Steam to come
+  up and load its library, then starts the game. The list arrives the first
+  time the machine is on with the page connected.
 - **Receiver** — the boards this phone knows (tap to switch; "add a
   receiver" opens the chooser), and for the current one its firmware
   version, uptime, free memory, whether a host is on the link, plus

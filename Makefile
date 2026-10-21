@@ -118,9 +118,11 @@ IDF_GENERATED = firmware/managed_components firmware/dependencies.lock
 
 HEADERS = daemon/output/strip.hpp daemon/config_loader.hpp daemon/config_check.hpp daemon/fans.hpp vendor/json.hpp \
           daemon/pwmout.hpp daemon/sdnotify.hpp common/fancurve.hpp common/fanwire.hpp \
-          daemon/config_edit.hpp daemon/strip_remote.hpp daemon/power_remote.hpp \
+          daemon/config_edit.hpp daemon/strip_remote.hpp daemon/power_remote.hpp daemon/steam_remote.hpp \
           daemon/effects/effect.hpp daemon/rules/condition.hpp daemon/color/color.hpp \
           daemon/sources/hwmon.hpp daemon/sources/hwmon_tree.hpp daemon/sources/pmbus.hpp daemon/sources/smu.hpp daemon/sources/steam.hpp \
+          daemon/sources/devtools.hpp daemon/sources/steam_cef.hpp daemon/sources/steam_launch.hpp daemon/sources/steam_achievements.hpp \
+          daemon/sources/progress.hpp daemon/sources/progress_sources.hpp daemon/sources/steam_library.hpp \
           daemon/sources/audio.hpp daemon/sources/audio_detect.hpp \
           daemon/rules/rules.hpp \
           daemon/output/sink.hpp daemon/output/views.hpp daemon/output/serial_sink.hpp daemon/output/virtual_sink.hpp \

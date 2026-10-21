@@ -63,15 +63,22 @@ bool loadRules(const Config& cfg, std::vector<Rule>& rules)
     // no implicit default: with no rules configured nothing matches, so
     // the daemon simply leaves the strip dark until one does
 
+    // effects renamed with no compatibility path: say what they became
+    static const struct { const char* name; const char* now; } retired[] = {
+        {"steam_download", "\"progress\" with \"source\": \"steam_dl\" in its settings"},
+    };
+
     // fail at startup, not mid-run, on a typo'd effect name
     for (auto& r : rules)
     {
-        if (!createEffect(r.effect))
-        {
-            fprintf(stderr, "rules reference unknown effect '%s'\n",
-                    r.effect.c_str());
-            return false;
-        }
+        if (createEffect(r.effect))
+            continue;
+
+        fprintf(stderr, "rules reference unknown effect '%s'\n", r.effect.c_str());
+        for (const auto& old : retired)
+            if (r.effect == old.name)
+                fprintf(stderr, "  '%s' is now %s\n", old.name, old.now);
+        return false;
     }
 
     return true;

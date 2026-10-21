@@ -153,10 +153,46 @@
             }
         },
         {
-            "if": "steam_dl",
-            "effect": "steam_download",
+            "if": "steam_achievement",
+            "effect": "achievement",
             "hold": 0,
             "settings": {
+                "origin": 0.5,
+                "palette": "ff8a00,ffc040,fff0b0",
+                "rare_palette": "ff3cac,8a4bff,38c8ff",
+                "rare_below": 10,
+                "flash_color": "fffbe8",
+                "duration_seconds": 4.5,
+                "spread_seconds": 0.9,
+                "fade_seconds": 1.5,
+                "glint": 0.35
+            }
+        },
+        {
+            "if": "steam_launch",
+            "effect": "progress",
+            "hold": 0,
+            "settings": {
+                "source": "steam_launch",
+                "palette": "0a3a8c,1e8cff,7ae0ff",
+                "head_color": "e8fbff",
+                "track_color": "140a22",
+                "done_color": "a0f0ff",
+                "done_pulse_period": 1.0,
+                "speed": 1.0,
+                "ripple_depth": 0.35,
+                "ripple_speed": 1.4,
+                "surge_boost": 0.45,
+                "surge_ripple": 0.9,
+                "head_glow": 0.7
+            }
+        },
+        {
+            "if": "steam_dl",
+            "effect": "progress",
+            "hold": 0,
+            "settings": {
+                "source": "steam_dl",
                 "palette": "d4009c,ff5a1e,ffd23c",
                 "head_color": "fff2cc",
                 "track_color": "0e1c3c",

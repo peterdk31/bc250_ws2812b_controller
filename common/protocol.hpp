@@ -276,11 +276,21 @@ static const uint16_t VIEW_MAX = CMD_MAX - 1; // a CMD_VIEW's payload is the id 
 //                    units, the wake pin, the short_press command and whether
 //                    edits are accepted. Sent at startup, on a reload, after
 //                    an edit.
+//   VIEW_STEAM       what Steam is doing (daemon/steam_remote.hpp): whether
+//                    the daemon is following it, the running game, a launch's
+//                    progress, the download, and the phone's last request
+//                    with its outcome — the echo that tells the phone its
+//                    request arrived. Sent at startup and when it changes.
+//   VIEW_STEAM_LIBRARY  the installed games, most recently played first
+//                    (steam_remote.hpp). Sent at startup and when the list
+//                    changes; the phone keeps it for while the host is off.
 static const uint8_t VIEW_FAN_CONFIG = 0;
 static const uint8_t VIEW_FAN_TELEM = 1;
 static const uint8_t VIEW_STRIP = 2;
 static const uint8_t VIEW_SENSORS = 3;
 static const uint8_t VIEW_POWER = 4;
+static const uint8_t VIEW_STEAM = 5;
+static const uint8_t VIEW_STEAM_LIBRARY = 6;
 static const uint8_t VIEWS = 8;
 
 // CMD_VIEW: view(1) then the view's JSON text — the receiver keeps it as that

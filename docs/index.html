@@ -262,6 +262,17 @@
   @media (max-width: 340px) { .prow { grid-template-columns: 1rem 3.8rem auto 3.8rem auto 2rem; } .prow input { padding-inline: .3rem; } }
 
   /* ---- LEDs ---- */
+  /* ---- Steam: the live cards, then the games ---- */
+  .gname { font-weight: 600; font-size: .95rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prog { height: 4px; border-radius: 2px; background: var(--off); overflow: hidden; margin-top: .4rem; }
+  .prog i { display: block; height: 100%; background: var(--on); transition: width .4s; }
+  .games { display: flex; flex-direction: column; }
+  .game { display: flex; align-items: center; gap: .75rem; min-height: 3rem; padding: .25rem .1rem; text-align: left;
+          border-bottom: 1px solid var(--border); color: var(--muted); }
+  .game:last-child { border-bottom: 0; }
+  .game .lbl > span { color: var(--text); }
+  .game.on .lbl > span, .game.on small { color: var(--on); }
+  .game:disabled:not(.on) { opacity: .5; }
   .scene { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: .3rem .7rem; align-items: center;
            background: var(--bg); border-radius: .6rem; padding: .55rem .7rem; min-height: 3rem; }
   .scene .sname { font-weight: 600; font-size: .95rem; }
@@ -291,7 +302,7 @@
   .facts .k { color: var(--muted); }
 
   /* ---- the tab bar ---- */
-  nav { position: sticky; bottom: 0; z-index: 2; margin-top: auto; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  nav { position: sticky; bottom: 0; z-index: 2; margin-top: auto; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
         background: var(--panel); border-top: 1px solid var(--border); padding: 0 .5rem calc(.6rem + env(safe-area-inset-bottom)); }
   nav button { display: flex; flex-direction: column; align-items: center; gap: .15rem; padding: .5rem 0 .25rem; min-height: 3.25rem;
                color: var(--muted); font-size: .68rem; font-weight: 600; }

@@ -15,6 +15,7 @@
 #include "fans.hpp"
 #include "power_remote.hpp"
 #include "strip_remote.hpp"
+#include "steam_remote.hpp"
 #include "motion.hpp"
 #include "pwmout.hpp"
 #include "rules.hpp"
@@ -223,7 +224,7 @@ static void usage(const char* prog)
             "       %s <config> --preview <slot>      replay a recorded receiver slot\n"
             "                                         (power_on/shutdown) to the viewer\n"
             "       %s --list                         list available effects\n"
-            "       %s [<config>] --steam-status      dump Steam download detection\n"
+            "       %s [<config>] --steam-status      dump what the daemon sees of Steam\n"
             "       %s <config> --fan-status          dump the fans' inputs, outputs and duties\n"
             "       %s --config-get <config> <path>   print a config value\n"
             "       %s --check <config>               validate a config without running it\n"
@@ -244,7 +245,7 @@ int main(int argc, char** argv)
 
     // one verbose Steam scan, then exit: prints which libraries and
     // appmanifests the download detector sees and why each does or
-    // doesn't count, so a blank steam_download bar can be traced to its
+    // doesn't count, so a blank download bar can be traced to its
     // cause (no library matched, manifest paused/not-running, etc.)
     // (with the config first, its steam_debug_port is probed too)
     if (argc == 2 && strcmp(argv[1], "--steam-status") == 0)
@@ -331,7 +332,7 @@ int main(int argc, char** argv)
     smu::Reader::get().setIntervalMs(
         (int)cfg.getInt(smu::CONFIG_KEY_INTERVAL, smu::Reader::DEFAULT_INTERVAL_MS));
 
-    // Steam's debug port for exact download progress (daemon/sources/
+    // Steam's debug port for downloads, launches and achievements (daemon/sources/
     // steam_cef.hpp), off unless set; here and on every reload below
     steam::Cef::get().setPort((int)cfg.getInt(steam::CONFIG_KEY_DEBUG_PORT, 0));
 
@@ -403,6 +404,11 @@ int main(int argc, char** argv)
     pwrcfg::Remote pwrRemote;
     pwrRemote.load(cfg, &cfgWriter);
 
+    // and Steam's (daemon/steam_remote.hpp): the installed games, what Steam
+    // is doing, and the phone's launch/quit/pause requests
+    steamremote::Remote steamRemote;
+    steamRemote.load(cfg);
+
     // outputs the rendered frame goes to. The list is the fan-out: a serial
     // transport for the real strip (absent when running headless), plus the
     // on-screen viewer mirror (always attached — it's a no-op until a viewer
@@ -451,6 +457,7 @@ int main(int argc, char** argv)
     fanCtl.pushConfig(sinks); // for the BLE dashboard (daemon/fans.hpp)
     stripRemote.pushConfig(sinks); // ...and its strip card (daemon/strip_remote.hpp)
     pwrRemote.pushConfig(sinks);   // ...and its power settings (daemon/power_remote.hpp)
+    steamRemote.pushAll(sinks);    // ...and Steam's tab (daemon/steam_remote.hpp)
 
     // a phone's edit goes to the module that owns the view it edits
     // (protocol.hpp MSG_EDIT); a view nobody here owns is dropped
@@ -463,6 +470,7 @@ int main(int argc, char** argv)
         {fans::Controller::VIEW, [&](const std::string& e) { fanCtl.onEdit(e, sinks); }},
         {stripcfg::Remote::VIEW, [&](const std::string& e) { stripRemote.onEdit(e, sinks); }},
         {pwrcfg::Remote::VIEW, [&](const std::string& e) { pwrRemote.onEdit(e, sinks); }},
+        {steamremote::Remote::VIEW, [&](const std::string& e) { steamRemote.onEdit(e, sinks); }},
     };
 
     // the fan curves run on their own 0.5 s cadence in both loops below; a
@@ -535,6 +543,7 @@ int main(int argc, char** argv)
             lastFanTick = now;
             fanCtl.tick(now, sinks);
             stripRemote.tick(now, sinks);
+            steamRemote.tick(now, sinks);
         }
     };
 
@@ -719,6 +728,8 @@ int main(int argc, char** argv)
         pwrRemote.pushSettings(sinks);
         pwrRemote.applyShortPress(sinks);
         pwrRemote.pushConfig(sinks);
+        steamRemote.load(cfg);
+        steamRemote.pushAll(sinks);
 
         if (effectKept)
         {

@@ -7,7 +7,7 @@
 // devices, their GATT servers and characteristics) whose characteristics are
 // served by a simulated receiver (firmware/main/ble.cpp) with, while its host
 // is up, a simulated daemon behind it (daemon/fans.hpp, strip_remote.hpp,
-// power_remote.hpp). Plus an in-memory `storage`, so the simulated boards and
+// power_remote.hpp, steam_remote.hpp). Plus an in-memory `storage`, so the simulated boards and
 // their tokens never touch the receivers this browser really knows.
 //
 // Three boards: a BC-250 with its host up, a desk board with its host off
@@ -57,8 +57,9 @@ function decodeRecord(b) {
 
 // ---- the simulated host: a daemon and the machine's sensors ----
 class Host {
-  constructor({ fans, strip, power, chips, outs, vrm = false }) {
+  constructor({ fans, strip, power, chips, outs, steam, vrm = false }) {
     this.fans = fans; this.strip = strip; this.power = power;
+    this.steam = steam; // { games: [[appid, name, days since played]], game, dl: { a, p, paused, q } | null }
     this.hasVrm = vrm;  // a BC-250 VRM controller answers (fans.hpp vrmJson)
     this.chips = chips; // { chip: { label: base reading } }, drifting
     this.outs = outs;   // [spec, base duty, rpm at that duty (-1 none), writable]
@@ -155,6 +156,45 @@ class Host {
     }
   }
   pcfgJson() { return JSON.stringify({ editable: true, ...this.power }); }
+
+  // ---- Steam (steam_remote.hpp): a launch processes its shaders for a few
+  // seconds, then the game runs; the download creeps on unless paused ----
+  gameName(a) { return this.steam.games.find(g => g[0] === a)?.[1] ?? `app ${a}`; }
+  libraryJson() {
+    const now = Date.now() / 1000;
+    return JSON.stringify({ games: this.steam.games.map(([a, n, days]) => ({ a, n, t: days === null ? 0 : Math.round(now - days * 86400) })), more: 0 });
+  }
+  stepSteam() {
+    const st = this.steam, now = Date.now();
+    if (st.launching) {
+      const el = (now - st.launching.at) / 1000;
+      if (el >= 6) { st.game = st.launching.a; st.launching = null; if (st.req?.op === 'launch') st.req.st = 'done'; }
+    }
+    if (st.dl && !st.dl.paused) {
+      st.dl.p += (now - (st.dlAt ?? now)) / 1000 * 0.6;
+      if (st.dl.p >= 100) st.dl = null;
+    }
+    st.dlAt = now;
+  }
+  steamJson() {
+    this.stepSteam();
+    const st = this.steam, l = st.launching, el = l ? (Date.now() - l.at) / 1000 : 0;
+    return JSON.stringify({
+      port: true, steam: true,
+      game: st.game ? { a: st.game, n: this.gameName(st.game) } : null,
+      launch: !l ? null : el < 5 ? { a: l.a, task: 'ProcessingShaderCache', p: Math.floor(el * 20) } : { a: l.a, task: 'CreatingProcess' },
+      dl: st.dl ? { a: st.dl.a, n: this.gameName(st.dl.a), p: Math.floor(st.dl.p), paused: st.dl.paused, q: st.dl.q } : null,
+      req: st.req });
+  }
+  steamEdit(e) {
+    const st = this.steam;
+    if (st.req && st.req.id === e.id) return; // a resend: only the echo again
+    st.req = { id: e.id, op: e.op, a: e.a || 0, st: 'done' };
+    if (e.op === 'launch') { st.req.st = 'waiting'; st.launching = { a: e.a, at: Date.now() }; }
+    else if (e.op === 'quit') st.game = null;
+    else if ((e.op === 'pause' || e.op === 'resume') && st.dl) st.dl.paused = e.op === 'pause';
+    else st.req = { ...st.req, st: 'failed', err: 'nothing to do' };
+  }
 }
 
 // ---- the simulated receiver ----
@@ -251,7 +291,8 @@ class Board {
     if (!this.hostUp) return new Uint8Array(0);
     const h = this.host;
     const make = { [VIEW.fancfg]: () => h.cfgJson(), [VIEW.telem]: () => h.telemJson(), [VIEW.strip]: () => h.stripJson(),
-                   [VIEW.sensors]: () => h.sensorsJson(), [VIEW.power]: () => h.pcfgJson() }[view];
+                   [VIEW.sensors]: () => h.sensorsJson(), [VIEW.power]: () => h.pcfgJson(),
+                   [VIEW.steam]: () => h.steamJson(), [VIEW.library]: () => h.libraryJson() }[view];
     return make ? enc.encode(make()) : new Uint8Array(0);
   }
   read(u) {
@@ -303,6 +344,9 @@ class Board {
                                  low: h.power.sense_low_mv, high: h.power.sense_high_mv });
       if ('wake' in edit && (edit.wake === null || this.inPins.includes(edit.wake))) this.pins.wake = edit.wake ?? NONE;
       this.later(600, U.pwr); this.laterView(600, VIEW.power);
+    } else if (view === VIEW.steam) {
+      h.steamEdit(edit);
+      this.laterView(300, VIEW.steam);
     }
   }
   control(a) {
@@ -354,7 +398,7 @@ class Board {
   }
   tick() {
     this.notify(U.fans);
-    if (this.hostUp) { this.notifyView(VIEW.telem); this.notifyView(VIEW.sensors); }
+    if (this.hostUp) { this.notifyView(VIEW.telem); this.notifyView(VIEW.sensors); this.notifyView(VIEW.steam); }
   }
 
   // ---- the link ----
@@ -455,6 +499,9 @@ const bc250 = new Board({
              nct6686: { CPU: 52.0, System: 38.5, 'VRM MOS': 41.0 } },
     outs: [['nct6686:pwm1', 48, 1100, 1], ['nct6686:pwm2', 57, 1420, 1], ['amdgpu:pwm1', 30, 900, 0]],
     vrm: true,
+    steam: { game: null, dl: { a: 1091500, p: 37, paused: false, q: 2 },
+             games: [[1245620, 'ELDEN RING', 0.2], [1086940, 'Baldur\'s Gate 3', 1.5], [1091500, 'Cyberpunk 2077', 4],
+                     [413150, 'Stardew Valley', 9], [1145360, 'Hades', 21], [367520, 'Hollow Knight', 60], [2379780, 'Balatro', null]] },
   }),
 });
 const desk = new Board({
@@ -468,6 +515,7 @@ const desk = new Board({
     power: { hold_seconds: 4, boot_timeout_seconds: 20, sense_low_mv: 800, sense_high_mv: 2000, short_press: 'systemctl suspend' },
     chips: { k10temp: { Tctl: 46.0 } },
     outs: [],
+    steam: { game: null, dl: null, games: [[730, 'Counter-Strike 2', 1], [252950, 'Rocket League', 3], [105600, 'Terraria', 12]] },
   }),
 });
 const media = new Board({

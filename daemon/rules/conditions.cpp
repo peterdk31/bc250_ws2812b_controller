@@ -8,7 +8,8 @@
 #include <vector>
 #include "audio_detect.hpp"
 #include "hwmon.hpp"
-#include "steam.hpp"
+#include "progress_sources.hpp"
+#include "steam_achievements.hpp"
 
 class AlwaysCondition : public Condition
 {
@@ -155,12 +156,30 @@ private:
     std::string name;
 };
 
-// a Steam download is actively moving bytes (steam.hpp); pair with
-// the steam_download effect to show it
-class SteamDlCondition : public Condition
+// a progress source is showing (progress_sources.hpp); pair with the
+// progress effect drawing the same source
+class ProgressCondition : public Condition
 {
 public:
-    bool eval() override { return steam::downloads().active; }
+    ProgressCondition(const progress::Source& source) : source(source) {}
+
+    bool eval() override { return source.read().active; }
+
+private:
+    const progress::Source& source;
+};
+
+// a Steam achievement unlocked less than `window` seconds ago
+// (steam_achievements.hpp); pair with the achievement effect
+class AchievementCondition : public Condition
+{
+public:
+    AchievementCondition(float window) : window(window) {}
+
+    bool eval() override { return steam::sinceUnlock() < window; }
+
+private:
+    float window;
 };
 
 // system audio is actually playing, as decided by audio::Detector
@@ -265,8 +284,14 @@ static std::unique_ptr<Condition> parseAtom(const std::string& spec,
     if (spec.rfind("file:", 0) == 0)
         return std::make_unique<FileCondition>(spec.substr(5));
 
-    if (spec == "steam_dl")
-        return std::make_unique<SteamDlCondition>();
+    if (const progress::Source* source = progress::find(spec))
+        return std::make_unique<ProgressCondition>(*source);
+
+    if (spec == "steam_achievement")
+        return std::make_unique<AchievementCondition>(5.0f);
+
+    if (spec.rfind("steam_achievement<", 0) == 0 && spec.size() > 18)
+        return std::make_unique<AchievementCondition>((float)atof(spec.c_str() + 18));
 
     if (spec == "audio_playing")
         return std::make_unique<AudioPlayingCondition>();

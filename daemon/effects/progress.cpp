@@ -1,11 +1,15 @@
 #include <math.h>
+#include <stdio.h>
+#include <string>
 #include "effect.hpp"
 #include "color.hpp"
 #include "motion.hpp"
-#include "steam.hpp"
+#include "progress_sources.hpp"
 
-// progress bar for Steam downloads (steam.hpp), activated by the
-// steam_dl condition. The head pixel is antialiased, so even a 10-LED
+// A progress bar for any progress source (progress_sources.hpp): a Steam
+// download, a game launch processing its shaders. The rule's condition is
+// usually the source's own name, so the bar shows exactly while it has
+// something to show. The head pixel is antialiased, so even a 10-LED
 // strip resolves single percents; the displayed value glides toward
 // the target so coarse updates animate instead of jumping.
 //
@@ -16,20 +20,22 @@
 //     back, hot (gold) at the front -- so the completed amount is
 //     unmistakable, and the leading edge is always the hottest pixel;
 //   * a bright pulsing glow rides the leading edge, marking exactly how
-//     far along the download is.
+//     far along it is.
 //
 // Motion serves the bar and stays inside the filled region. Gentle waves
 // flow toward the head (fluid, low amplitude, so the fill never gaps),
-// and every percent bump (steam.hpp advances ~1 Hz while bytes arrive)
+// and every percent bump (the sources advance ~1 Hz)
 // fires a `surge`: the whole bar and head flare, and a bright crest
 // rushes from the back up to the head -- a clear "progress!" ripple in
 // the same direction as the flow. When it stalls the surge fades and the
 // bar settles to a calm flow.
 //
-// On completion (steam.hpp reports finished) the whole strip pulses
+// On completion (the source reports finished) the whole strip pulses
 // done_color as a brief celebration before the rule deactivates.
 //
 // config:
+//   source             which bar: steam_dl or steam_launch (default
+//                      steam_dl)
 //   palette            filled bar gradient, back -> head = cool -> hot
 //                      (default magenta -> orange -> gold)
 //   head_color         leading-edge glow + ripple RRGGBB (default warm
@@ -50,12 +56,18 @@
 //   ripple_speed       crest travel speed, strips per second (default 1.4)
 //   surge_decay        seconds for a surge to fade (default 1.0)
 //   head_glow          brightness of the leading-edge glow (default 0.7)
-class SteamDownload : public Effect
+class Progress : public Effect
 {
 public:
     void init(const EffectConfig& cfg, int) override
     {
         setFrameDelay(cfg, 16);
+
+        std::string name = cfg.get("source", "steam_dl");
+        source = progress::find(name);
+        if (!source)
+            fprintf(stderr, "progress: unknown source '%s' (one of %s) -- showing an empty bar\n",
+                    name.c_str(), progress::names().c_str());
 
         palette = color::Gradient(cfg.get("palette", "d4009c,ff5a1e,ffd23c"));
 
@@ -90,9 +102,7 @@ public:
         // the strip, so this effect is re-activated (and re-init'd) on
         // every bit of churn. Resuming at the current percent makes a
         // re-activation seamless instead of gliding up from empty.
-        const steam::Downloads& dl = steam::downloads();
-
-        target = dl.percent / 100.0f;
+        target = read().percent / 100.0f;
         shown = target;
         lastSeen = target;
         surge = 0.0f;
@@ -101,7 +111,7 @@ public:
 
     void render(Strip& strip, float t) override
     {
-        const steam::Downloads& dl = steam::downloads();
+        const progress::Reading& dl = read();
 
         if (dl.active)
             target = dl.percent / 100.0f;
@@ -115,8 +125,8 @@ public:
 
         if (dl.finished)
         {
-            // download complete: pulse the whole strip in done_color as a
-            // brief celebration. steam.hpp holds the rule active for a few
+            // complete: pulse the whole strip in done_color as a brief
+            // celebration. The source holds the rule active for a few
             // seconds past completion so this actually shows.
             float phase = donePulse > 0
                         ? sinf(t * 2.0f * (float)M_PI / donePulse)
@@ -224,6 +234,12 @@ public:
     }
 
 private:
+    const progress::Reading& read() const
+    {
+        static const progress::Reading none;
+        return source ? source->read() : none;
+    }
+
     static uint8_t clamp(float v)
     {
         if (v < 0) v = 0;
@@ -231,6 +247,7 @@ private:
         return (uint8_t)v;
     }
 
+    const progress::Source* source = nullptr;
     color::Gradient palette;
     uint8_t hr = 0xff, hg = 0xf2, hb = 0xcc;
     uint8_t tr = 0x0e, tg = 0x1c, tb = 0x3c;
@@ -252,4 +269,4 @@ private:
     float rippleT0 = -1000.0f;
 };
 
-REGISTER_EFFECT("steam_download", SteamDownload)
+REGISTER_EFFECT("progress", Progress)

@@ -33,9 +33,11 @@
 //                          (fans.hpp; edits are its shapes), its readings, the
 //                          strip (strip_remote.hpp; a partial edit), the
 //                          sensor catalogue {"chip":{"label":61.0},"_outs":[...]}
-//                          (fans.hpp sensorsJson) and the power switch
-//                          (power_remote.hpp; a partial edit). Subscribing is
-//                          what starts the daemon's readings.
+//                          (fans.hpp sensorsJson), the power switch
+//                          (power_remote.hpp; a partial edit), and Steam's
+//                          state and installed games (steam_remote.hpp; an
+//                          edit is a request). Subscribing is what starts
+//                          the daemon's readings.
 // A receiver with only the first two has no dashboard, and the power remote
 // works as before; one without views runs firmware from before them.
 //
@@ -69,7 +71,7 @@ const PWR    = 'a5f2000b-8f11-4e0e-9b3a-0bc250e0c001';
 const PAGE   = 'a5f2000d-8f11-4e0e-9b3a-0bc250e0c001';
 const VIEWS  = 'a5f2000e-8f11-4e0e-9b3a-0bc250e0c001';
 // the daemon's views by id (protocol.hpp VIEW_*)
-export const VIEW = { fancfg: 0, telem: 1, strip: 2, sensors: 3, power: 4 };
+export const VIEW = { fancfg: 0, telem: 1, strip: 2, sensors: 3, power: 4, steam: 5, library: 6 };
 export const OP_ON = 0x01, OP_SHUTDOWN = 0x02, OP_HARD_OFF = 0x03;
 export const OP_FAN_HEADER = 0x10;   // + slot(1) + the slot's record (SA_HEADER_LEN, encodeRecord)
 export const OP_PWR_TUNING = 0x20;   // + hold_ms(2) boot_ms(2) low_mv(2) high_mv(2)
@@ -116,6 +118,8 @@ export const S = {
   sens: null,      // the sensor catalogue: [{ spec, chip, label, pwm, value }] (parseSensors)
   sensMore: 0,     // sensors the catalogue left out for size (its "_more")
   outs: null,      // the host's pwm outputs: [{ spec, duty, rpm, writable }] (parseSensors)
+  steam: null,     // what Steam is doing (parseSteam)
+  lib: null,       // the installed games, as the daemon last sent them (parseLibrary; see library())
   saving: null,    // 'p' or a fan card's key: a write waiting for its answer
   note: null,      // the one status line: { text, cls } — a save's progress, or a refusal
 };
@@ -919,7 +923,7 @@ export function wakePinOptions(current) {
 
 function dashReset() {
   S.fansChr = S.saChr = S.pwrChr = S.infoChr = S.pageChr = S.viewsChr = null;
-  S.fans = S.sa = S.cfg = S.telem = S.info = S.sens = S.outs = S.pwr = S.pcfg = null; S.sensMore = 0;
+  S.fans = S.sa = S.cfg = S.telem = S.info = S.sens = S.outs = S.pwr = S.pcfg = S.steam = S.lib = null; S.sensMore = 0;
   S.saving = null; S.note = null;
   clearTimeout(saveTimer);
   stripReset();
@@ -1015,6 +1019,8 @@ const VIEW_APPLY = {
   [VIEW.strip]: dv => onStripCfg(dv),
   [VIEW.sensors]: dv => { const t = json(dv); S.sens = t === null ? null : parseSensors(t); emit(); },
   [VIEW.power]: dv => onPcfg(dv),
+  [VIEW.steam]: dv => onSteam(dv),
+  [VIEW.library]: dv => onLibrary(dv),
 };
 // one view, whole, through the page characteristic
 async function readView(view) {
@@ -1137,7 +1143,7 @@ async function dashOpen(svc) {
   try { S.info = parseInfo(await gattRead(i)); } catch (e) { S.info = skip(e); }
   try { await gattSubscribe(s); onSa(await gattRead(s)); } catch (e) { skip(e); } // emits
   emit();
-  for (const id of [VIEW.strip, VIEW.sensors]) { try { await readView(id); } catch (e) { skip(e); } }
+  for (const id of [VIEW.strip, VIEW.steam, VIEW.library, VIEW.sensors]) { try { await readView(id); } catch (e) { skip(e); } }
 }
 
 // ---- fan edits ----
@@ -1467,6 +1473,96 @@ export async function writeStrip(edit) {
     if (tokenRejected(e)) { note('token rejected', 'err'); S.editToken = true; emit(); }
     else note(`write failed: ${e.message}${writeHint(e)}`, 'err');
   }
+}
+
+// ---- Steam ----
+// The daemon's Steam views (daemon/steam_remote.hpp): what Steam is doing,
+// and the installed games. The games are also kept on this phone, per
+// receiver, so the list is there while the host is off. A request (launch,
+// quit, pause, resume) carries an id and is resent until the daemon's view
+// echoes it — while the host boots (a launch from off powers it on first) no
+// daemon listens and the receiver drops the write. Once echoed the daemon
+// owns it (a launch waits there for Steam), and the outcome comes back in
+// the same view.
+const STEAM_RESEND_MS = 3000, STEAM_WAIT_MS = 4 * 60 * 1000;
+const libKey = id => `steam-lib-${id}`;
+let sReq = null, steamTimer = 0; // the request waiting on its echo or outcome: { id, op, a, dev, until, echoed }
+
+export function parseSteam(text) {
+  let j;
+  try { j = JSON.parse(text); } catch { return null; }
+  if (!j || typeof j !== 'object') return null;
+  const app = x => x && typeof x === 'object' && Number.isInteger(x.a) ? { a: x.a, n: String(x.n || '') } : null;
+  const l = j.launch, d = j.dl, r = j.req;
+  return { port: !!j.port, steam: !!j.steam, game: app(j.game),
+           launch: l && Number.isInteger(l.a) ? { a: l.a, task: String(l.task || ''), p: typeof l.p === 'number' ? l.p : null } : null,
+           dl: app(d) ? { ...app(d), p: +d.p || 0, paused: !!d.paused, q: +d.q || 0 } : null,
+           req: r && Number.isInteger(r.id) ? { id: r.id, op: String(r.op || ''), a: +r.a || 0, st: String(r.st || ''), err: String(r.err || '') } : null };
+}
+export function parseLibrary(text) {
+  let j;
+  try { j = JSON.parse(text); } catch { return null; }
+  if (!j || !Array.isArray(j.games)) return null;
+  return { games: j.games.filter(g => g && Number.isInteger(g.a) && typeof g.n === 'string').map(g => ({ a: g.a, n: g.n, t: +g.t || 0 })),
+           more: +j.more || 0 };
+}
+
+// the games: the daemon's list, else the one this phone kept for the receiver
+export function library() {
+  if (S.lib) return S.lib;
+  const id = currentId();
+  return id ? parseLibrary(store.get(libKey(id))) : null;
+}
+export const gameName = a => library()?.games.find(g => g.a === a)?.n ?? (S.steam?.game?.a === a ? S.steam.game.n : `app ${a}`);
+// Steam's state is only news while the host is up: the receiver keeps the
+// daemon's last word through a shutdown
+export const steamLive = () => S.psu === 2 && S.steam ? S.steam : null;
+export const steamWaiting = () => !!sReq && !sReq.echoed;
+
+function onLibrary(dv) {
+  const t = json(dv), lib = t === null ? null : parseLibrary(t);
+  if (lib && S.device) { S.lib = lib; store.set(libKey(S.device.id), t); }
+  emit();
+}
+
+const STEAM_DONE = { launch: r => `started ${gameName(r.a)}`, quit: r => `quit ${gameName(r.a)}`,
+                     pause: () => 'downloads paused', resume: () => 'downloads resumed' };
+function onSteam(dv) {
+  const t = json(dv);
+  S.steam = t === null ? null : parseSteam(t);
+  const r = sReq, got = S.steam?.req;
+  if (r && got && got.id === r.id) {
+    r.echoed = true;
+    clearTimeout(steamTimer);
+    if (got.st === 'done') { sReq = null; note(STEAM_DONE[r.op](r), 'ok'); }
+    else if (got.st === 'failed') { sReq = null; note(got.err || 'Steam refused it', 'err'); }
+    else if (r.op === 'launch' && S.note?.text !== `starting ${gameName(r.a)}…`) note(`starting ${gameName(r.a)}…`);
+  }
+  emit();
+}
+
+export async function steamRequest(op, a = 0) {
+  if (!connected() || (sReq && !sReq.echoed)) return; // an echoed one is the daemon's now: a new one replaces it there
+  sReq = { id: 1 + Math.floor(Math.random() * 0x7FFFFFFE), op, a, dev: S.device.id, until: Date.now() + STEAM_WAIT_MS, echoed: false };
+  if (op === 'launch' && S.psu === 0) { note(`powering on for ${gameName(a)}…`); await power(OP_ON); }
+  else note(op === 'launch' ? `starting ${gameName(a)}…` : 'asking Steam…');
+  steamPump();
+}
+
+// one send of the request in hand, while the host is up, and again until
+// the daemon echoes it
+async function steamPump() {
+  clearTimeout(steamTimer);
+  const r = sReq;
+  if (!r || r.echoed) return;
+  if (Date.now() > r.until) { sReq = null; note('no answer from the host', 'err'); return; }
+  if (S.device?.id === r.dev && connected() && S.viewsChr && S.psu === 2) {
+    try { await gattWrite(S.viewsChr, viewEdit(VIEW.steam, r.a ? { id: r.id, op: r.op, a: r.a } : { id: r.id, op: r.op })); }
+    catch (e) {
+      if (tokenRejected(e)) { sReq = null; note('token rejected', 'err'); S.editToken = true; emit(); return; }
+    } // anything else: the next send tries again
+  }
+  if (sReq === r && !r.echoed) steamTimer = setTimeout(steamPump, STEAM_RESEND_MS);
 }
 
 // ---- lifecycle ----
