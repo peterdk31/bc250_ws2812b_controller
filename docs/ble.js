@@ -1503,7 +1503,7 @@ export function parseLibrary(text) {
   let j;
   try { j = JSON.parse(text); } catch { return null; }
   if (!j || !Array.isArray(j.games)) return null;
-  return { games: j.games.filter(g => g && Number.isInteger(g.a) && typeof g.n === 'string').map(g => ({ a: g.a, n: g.n, t: +g.t || 0 })),
+  return { games: j.games.filter(g => g && Number.isInteger(g.a) && typeof g.n === 'string').map(g => ({ a: g.a, n: g.n, t: +g.t || 0, ...(typeof g.h === 'string' && { h: g.h }) })),
            more: +j.more || 0 };
 }
 
