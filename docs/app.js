@@ -812,6 +812,10 @@ function played(t) {
   return d < 3600 ? 'played just now' : d < 86400 ? `played ${Math.floor(d / 3600)} h ago` : `played ${Math.floor(d / 86400)} d ago`;
 }
 const Bar = ({ p }) => html`<div class="prog"><i style=${`width: ${clamp(p, 0, 100)}%`}></i></div>`;
+// Steam's store capsule, straight from its CDN while the phone is online; sw.js
+// keeps each one for offline. A game without one keeps the empty frame.
+const Thumb = ({ a }) => html`<span class="thumb"><img src=${`https://cdn.cloudflare.steamstatic.com/steam/apps/${a}/capsule_184x69.jpg`}
+  alt="" loading="lazy" onError=${e => { e.currentTarget.hidden = true; }} /></span>`;
 
 function SteamScreen() {
   if (!B.connected()) return html`<div class="empty">Not connected.</div>`;
@@ -845,6 +849,7 @@ function SteamScreen() {
         : lib.games.length === 0 ? html`<div class="note">No games installed.</div>`
         : html`<div class="games">${lib.games.map(g => { const playing = live?.game?.a === g.a;
             return html`<button key=${g.a} class="game ${playing ? 'on' : ''}" disabled=${!canLaunch || playing} onClick=${() => launch(g)}>
+              <${Thumb} a=${g.a} />
               <span class="lbl"><span>${g.n}</span><small>${playing ? 'playing' : played(g.t)}</small></span>
               ${!playing && html`<${Icon} d=${I.play} size=${18} />`}</button>`; })}</div>`}
       ${lib?.more > 0 && html`<div class="foot">${lib.more} more not shown</div>`}

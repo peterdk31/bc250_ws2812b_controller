@@ -270,6 +270,9 @@
   .game { display: flex; align-items: center; gap: .75rem; min-height: 3rem; padding: .25rem .1rem; text-align: left;
           border-bottom: 1px solid var(--border); color: var(--muted); }
   .game:last-child { border-bottom: 0; }
+  .thumb { flex: none; width: 92px; height: 34.5px; border-radius: .3rem; overflow: hidden; background: var(--border); }
+  .thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .thumb img[hidden] { display: none; }
   .game .lbl > span { color: var(--text); }
   .game.on .lbl > span, .game.on small { color: var(--on); }
   .game:disabled:not(.on) { opacity: .5; }
