@@ -1494,7 +1494,7 @@ export function parseSteam(text) {
   if (!j || typeof j !== 'object') return null;
   const app = x => x && typeof x === 'object' && Number.isInteger(x.a) ? { a: x.a, n: String(x.n || '') } : null;
   const l = j.launch, d = j.dl, r = j.req;
-  return { port: !!j.port, steam: !!j.steam, game: app(j.game),
+  return { port: !!j.port, steam: !!j.steam, playing: Array.isArray(j.playing) ? j.playing.map(app).filter(Boolean) : [],
            launch: l && Number.isInteger(l.a) ? { a: l.a, task: String(l.task || ''), p: typeof l.p === 'number' ? l.p : null } : null,
            dl: app(d) ? { ...app(d), p: +d.p || 0, paused: !!d.paused, q: +d.q || 0 } : null,
            req: r && Number.isInteger(r.id) ? { id: r.id, op: String(r.op || ''), a: +r.a || 0, st: String(r.st || ''), err: String(r.err || '') } : null };
@@ -1513,7 +1513,7 @@ export function library() {
   const id = currentId();
   return id ? parseLibrary(store.get(libKey(id))) : null;
 }
-export const gameName = a => library()?.games.find(g => g.a === a)?.n ?? (S.steam?.game?.a === a ? S.steam.game.n : `app ${a}`);
+export const gameName = a => library()?.games.find(g => g.a === a)?.n ?? (S.steam?.playing.find(g => g.a === a)?.n ?? `app ${a}`);
 // Steam's state is only news while the host is up: the receiver keeps the
 // daemon's last word through a shutdown
 export const steamLive = () => S.psu === 2 && S.steam ? S.steam : null;

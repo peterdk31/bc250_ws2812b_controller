@@ -39,7 +39,7 @@ const I = {
   down: '<path d="M6 9l6 6 6-6"></path>', up: '<path d="M6 15l6-6 6 6"></path>',
   right: '<path d="M9 6l6 6-6 6"></path>', left: '<path d="M15 6l-6 6 6 6"></path>',
   game: '<path d="M6 8h12a4 4 0 0 1 4 4v1a4 4 0 0 1-7 2.6L14 15h-4l-1 .6A4 4 0 0 1 2 13v-1a4 4 0 0 1 4-4z"></path><path d="M7 10.5v3M5.5 12h3"></path><circle cx="16" cy="11" r=".6"></circle><circle cx="17.5" cy="13" r=".6"></circle>',
-  play: '<path d="M8 5l11 7-11 7z"></path>',
+  play: '<path d="M8 5l11 7-11 7z"></path>', close: '<path d="M6 6l12 12M18 6L6 18"></path>',
   plus: '<path d="M12 5v14M5 12h14"></path>', check: '<path d="M5 12l5 5L20 7"></path>',
   cog: '<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"></path>',
 };
@@ -836,13 +836,13 @@ function SteamScreen() {
     if (hostOff && S.psu === 0 && !confirm(`Power on and start ${g.n}?`)) return;
     B.steamRequest('launch', g.a);
   };
+  const quit = g => { if (confirm(`Quit ${g.n}? Unsaved progress is lost.`)) B.steamRequest('quit', g.a); };
+  // running games first, a running one the list doesn't hold too
+  const playing = live?.playing ?? [];
+  const isPlaying = g => playing.some(p => p.a === g.a);
+  const games = lib && [...playing.map(p => lib.games.find(g => g.a === p.a) || p), ...lib.games.filter(g => !isPlaying(g))];
   const state = !live ? '' : !live.port ? 'off in the config' : !live.steam ? 'Steam not running' : '';
   return html`<div class="list">
-    ${live?.game && html`<${Card} title="Playing">
-      <div class="swrow"><span class="gtitle"><${Thumb} key=${live.game.a} g=${lib?.games.find(g => g.a === live.game.a) || live.game} />
-        <span class="gname">${live.game.n}</span></span>
-        <button class="minor danger" disabled=${waiting} onClick=${() => { if (confirm(`Quit ${live.game.n}? Unsaved progress is lost.`)) B.steamRequest('quit', live.game.a); }}>Quit</button></div>
-    <//>`}
     ${live?.launch && html`<${Card} title="Launching" right=${live.launch.p !== null ? `${live.launch.p} %` : ''}>
       <div class="gname">${B.gameName(live.launch.a)}</div>
       <div class="sub">${taskName(live.launch.task)}</div>
@@ -856,12 +856,12 @@ function SteamScreen() {
     <//>`}
     <${Card} title="Games" right=${state}>
       ${!lib ? html`<div class="note">The list arrives the first time the host is on.</div>`
-        : lib.games.length === 0 ? html`<div class="note">No games installed.</div>`
-        : html`<div class="games">${lib.games.map(g => { const playing = live?.game?.a === g.a;
-            return html`<button key=${g.a} class="game ${playing ? 'on' : ''}" disabled=${!canLaunch || playing} onClick=${() => launch(g)}>
+        : games.length === 0 ? html`<div class="note">No games installed.</div>`
+        : html`<div class="games">${games.map(g => { const on = isPlaying(g);
+            return html`<button key=${g.a} class="game ${on ? 'on' : ''}" disabled=${on ? waiting : !canLaunch} onClick=${() => on ? quit(g) : launch(g)}>
               <${Thumb} key=${g.h || ''} g=${g} />
-              <span class="lbl"><span>${g.n}</span><small>${playing ? 'Playing' : played(g.t)}</small></span>
-              ${!playing && html`<${Icon} d=${I.play} size=${18} />`}</button>`; })}</div>`}
+              <span class="lbl"><span>${g.n}</span><small>${on ? 'Playing' : played(g.t)}</small></span>
+              <${Icon} d=${on ? I.close : I.play} size=${18} /></button>`; })}</div>`}
       ${lib?.more > 0 && html`<div class="foot">${lib.more} more not shown</div>`}
     <//>
   </div>`;

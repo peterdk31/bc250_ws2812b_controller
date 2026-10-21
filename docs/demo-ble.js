@@ -168,7 +168,7 @@ class Host {
     const st = this.steam, now = Date.now();
     if (st.launching) {
       const el = (now - st.launching.at) / 1000;
-      if (el >= 6) { st.game = st.launching.a; st.launching = null; if (st.req?.op === 'launch') st.req.st = 'done'; }
+      if (el >= 6) { st.playing = [...(st.playing || []).filter(a => a !== st.launching.a), st.launching.a]; st.launching = null; if (st.req?.op === 'launch') st.req.st = 'done'; }
     }
     if (st.dl && !st.dl.paused) {
       st.dl.p += (now - (st.dlAt ?? now)) / 1000 * 0.6;
@@ -181,7 +181,7 @@ class Host {
     const st = this.steam, l = st.launching, el = l ? (Date.now() - l.at) / 1000 : 0;
     return JSON.stringify({
       port: true, steam: true,
-      game: st.game ? { a: st.game, n: this.gameName(st.game) } : null,
+      playing: (st.playing || []).map(a => ({ a, n: this.gameName(a) })),
       launch: !l ? null : el < 5 ? { a: l.a, task: 'ProcessingShaderCache', p: Math.floor(el * 20) } : { a: l.a, task: 'CreatingProcess' },
       dl: st.dl ? { a: st.dl.a, n: this.gameName(st.dl.a), p: Math.floor(st.dl.p), paused: st.dl.paused, q: st.dl.q } : null,
       req: st.req });
@@ -191,7 +191,7 @@ class Host {
     if (st.req && st.req.id === e.id) return; // a resend: only the echo again
     st.req = { id: e.id, op: e.op, a: e.a || 0, st: 'done' };
     if (e.op === 'launch') { st.req.st = 'waiting'; st.launching = { a: e.a, at: Date.now() }; }
-    else if (e.op === 'quit') st.game = null;
+    else if (e.op === 'quit') st.playing = (st.playing || []).filter(a => a !== e.a);
     else if ((e.op === 'pause' || e.op === 'resume') && st.dl) st.dl.paused = e.op === 'pause';
     else st.req = { ...st.req, st: 'failed', err: 'nothing to do' };
   }
@@ -499,7 +499,7 @@ const bc250 = new Board({
              nct6686: { CPU: 52.0, System: 38.5, 'VRM MOS': 41.0 } },
     outs: [['nct6686:pwm1', 48, 1100, 1], ['nct6686:pwm2', 57, 1420, 1], ['amdgpu:pwm1', 30, 900, 0]],
     vrm: true,
-    steam: { game: null, dl: { a: 1091500, p: 37, paused: false, q: 2 },
+    steam: { playing: [], dl: { a: 1091500, p: 37, paused: false, q: 2 },
              games: [[1245620, 'ELDEN RING', 0.2], [1086940, 'Baldur\'s Gate 3', 1.5], [1091500, 'Cyberpunk 2077', 4],
                      [413150, 'Stardew Valley', 9], [1145360, 'Hades', 21], [367520, 'Hollow Knight', 60], [2379780, 'Balatro', null, 'c0ffee/library_header.jpg']] },
   }),
@@ -515,7 +515,7 @@ const desk = new Board({
     power: { hold_seconds: 4, boot_timeout_seconds: 20, sense_low_mv: 800, sense_high_mv: 2000, short_press: 'systemctl suspend' },
     chips: { k10temp: { Tctl: 46.0 } },
     outs: [],
-    steam: { game: null, dl: null, games: [[730, 'Counter-Strike 2', 1], [252950, 'Rocket League', 3], [105600, 'Terraria', 12]] },
+    steam: { playing: [], dl: null, games: [[730, 'Counter-Strike 2', 1], [252950, 'Rocket League', 3], [105600, 'Terraria', 12]] },
   }),
 });
 const media = new Board({

@@ -26,7 +26,7 @@
 //
 //     { "port": true,                       // steam_debug_port is set
 //       "steam": true,                      // ...and the daemon is following Steam
-//       "game": { "a": 1245620, "n": "ELDEN RING" },          // or null
+//       "playing": [ { "a": 1245620, "n": "ELDEN RING" } ],   // every running game
 //       "launch": { "a": 1245620, "task": "ProcessingShaderCache", "p": 42 },
 //                                           // or null; "p" only with counts
 //       "dl": { "a": 570, "n": "Dota 2", "p": 12, "paused": false, "q": 1 },  // or null
@@ -236,8 +236,11 @@ private:
         std::string j = std::string("{\"port\":") + (port_ ? "true" : "false") +
                         ",\"steam\":" + (following ? "true" : "false");
 
-        j += ",\"game\":";
-        j += following && !s.running.empty() ? "{" + app(s.running[0].appid, s.running[0].name) + "}" : "null";
+        j += ",\"playing\":[";
+        if (following)
+            for (size_t i = 0; i < s.running.size(); i++)
+                j += (i ? ",{" : "{") + app(s.running[i].appid, s.running[i].name) + "}";
+        j += "]";
 
         j += ",\"launch\":";
         if (following && s.launch.appid)
