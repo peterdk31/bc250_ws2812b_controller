@@ -807,9 +807,9 @@ const TASKS = { ProcessingShaderCache: 'Processing shaders', DownloadingDepots: 
                 SynchronizingCloud: 'Syncing saves', VerifyingFiles: 'Verifying files', CreatingProcess: 'Starting', WaitingGameWindow: 'Starting' };
 const taskName = t => TASKS[t] || t.replace(/([a-z])([A-Z])/g, '$1 $2');
 function played(t) {
-  if (!t) return 'never played';
+  if (!t) return 'Never played';
   const d = Date.now() / 1000 - t;
-  return d < 3600 ? 'played just now' : d < 86400 ? `played ${Math.floor(d / 3600)} h ago` : `played ${Math.floor(d / 86400)} d ago`;
+  return d < 3600 ? 'Played just now' : d < 86400 ? `Played ${Math.floor(d / 3600)} h ago` : `Played ${Math.floor(d / 86400)} d ago`;
 }
 const Bar = ({ p }) => html`<div class="prog"><i style=${`width: ${clamp(p, 0, 100)}%`}></i></div>`;
 // Steam's store art, straight from its CDN while the phone is online; sw.js
@@ -859,7 +859,7 @@ function SteamScreen() {
         : html`<div class="games">${lib.games.map(g => { const playing = live?.game?.a === g.a;
             return html`<button key=${g.a} class="game ${playing ? 'on' : ''}" disabled=${!canLaunch || playing} onClick=${() => launch(g)}>
               <${Thumb} key=${g.h || ''} g=${g} />
-              <span class="lbl"><span>${g.n}</span><small>${playing ? 'playing' : played(g.t)}</small></span>
+              <span class="lbl"><span>${g.n}</span><small>${playing ? 'Playing' : played(g.t)}</small></span>
               ${!playing && html`<${Icon} d=${I.play} size=${18} />`}</button>`; })}</div>`}
       ${lib?.more > 0 && html`<div class="foot">${lib.more} more not shown</div>`}
     <//>
