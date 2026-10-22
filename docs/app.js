@@ -832,11 +832,6 @@ function SteamScreen() {
   const waiting = B.steamWaiting();
   const hostOff = S.psu !== 2;
   const canLaunch = !waiting && (hostOff ? S.psu === 1 || (S.psu === 0 && !noSwitch()) : !!live?.port);
-  const launch = g => {
-    if (hostOff && S.psu === 0 && !confirm(`Power on and start ${g.n}?`)) return;
-    B.steamRequest('launch', g.a);
-  };
-  const quit = g => { if (confirm(`Quit ${g.n}? Unsaved progress is lost.`)) B.steamRequest('quit', g.a); };
   // running games first, a running one the list doesn't hold too
   const playing = live?.playing ?? [];
   const isPlaying = g => playing.some(p => p.a === g.a);
@@ -858,7 +853,7 @@ function SteamScreen() {
       ${!lib ? html`<div class="note">The list arrives the first time the host is on.</div>`
         : games.length === 0 ? html`<div class="note">No games installed.</div>`
         : html`<div class="games">${games.map(g => { const on = isPlaying(g);
-            return html`<button key=${g.a} class="game ${on ? 'on' : ''}" disabled=${on ? waiting : !canLaunch} onClick=${() => on ? quit(g) : launch(g)}>
+            return html`<button key=${g.a} class="game ${on ? 'on' : ''}" disabled=${on ? waiting : !canLaunch} onClick=${() => B.steamRequest(on ? 'quit' : 'launch', g.a)}>
               <${Thumb} key=${g.h || ''} g=${g} />
               <span class="lbl"><span>${g.n}</span><small>${on ? 'Playing' : played(g.t)}</small></span>
               <${Icon} d=${on ? I.close : I.play} size=${18} /></button>`; })}</div>`}
